@@ -1,0 +1,61 @@
+[project]
+site_name = "metacooler"
+site_url = "https://js2264.github.io/metacooler"
+site_description = "Hi-C contact maps for metagenomes — an extension of the cooler format."
+site_author = "Jacques Serizay"
+copyright = "&copy; 2026 Jacques Serizay"
+docs_dir = "docs"
+site_dir = "site"
+repo_url = "https://github.com/js2264/metacooler"
+repo_name = "js2264/metacooler"
+
+nav = [
+     { "Home" = "index.md" },
+     { "Installation" = "installation.md" },
+     { "Quickstart" = "quickstart.md" },
+     { "Format specification" = "format.md" },
+     { "Tutorials" = [
+         { "Creating from pairs" = "guides/from-pairs.md" },
+         { "Importing from cooler" = "guides/from-cool.md" },
+         { "Multi-resolution files" = "guides/multireso.md" },
+         { "Exporting data" = "guides/export.md" },
+         { "CLI usage" = "cli.md" }
+     ]},
+     { "API reference" = [
+         { "MetaCooler" = "api/metacooler.md" },
+         { "I/O functions" = "api/io.md" },
+         { "Operations" = "api/ops.md" }
+     ]},
+     { "Changelog" = ["changelog.md"] }
+]
+
+
+[project.theme]
+features = [
+    "navigation.instant",
+    "navigation.expand",
+    "navigation.sections",
+    "navigation.top",
+    "navigation.footer",
+    "search.suggest",
+    "search.highlight",
+    "content.code.copy",
+    "content.code.annotate",
+    "content.tabs.link"
+]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+inherited_members = true
+show_source = true
+show_signature_annotations = true
+show_root_heading = true
+show_submodules = true
+members_order = "source"
+merge_init_into_class = true
+separate_signature = true
+line_length = 80
+type_parameter_headings = false

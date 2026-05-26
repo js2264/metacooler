@@ -1,0 +1,20 @@
+sample:
+  name: gut_microbiome_T0
+  description: This is a gut microbiome sample at time point 0
+  organism: human gut metagenome
+  enzyme: HpaII
+  enzyme_site: "C^CGG"
+sequencing:
+  platform: Illumina NovaSeq 6000
+  read_length: 150
+  n_read_pairs: 245000000
+  n_valid_pairs: 180000000
+assembly:
+  name: gut_microbiome_T0_assembly.fa
+  description: metagenome assembly for the gut microbiome sample at time point 0
+  assembler: MEGAHIT v1.2.9
+  assembly_date: 2024-06-01
+  assembly_stats:
+    total_length: 3500000
+    n_contigs: 120
+    n50: 50000

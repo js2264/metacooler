@@ -1,0 +1,1 @@
+"""metacooler CLI."""

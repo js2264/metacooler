@@ -1,0 +1,151 @@
+---
+title: "metacooler: Hi-C contact maps for metagenomes"
+format:
+  gfm:
+    wrap: none
+---
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/downloads/)
+[![PyPI version](https://img.shields.io/pypi/v/metacooler.svg)](https://pypi.org/project/metacooler/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![codecov](https://codecov.io/gh/js2264/metacooler/branch/devel/graph/badge.svg?token=XMYgQxb7KH)](https://codecov.io/gh/js2264/metacooler)
+
+An extension of the [cooler](https://github.com/open2c/cooler) format for multi-genome (metagenomic) Hi-C data. `metacooler` adds a `genomes/` hierarchy on top of cooler's `chroms/bins/pixels` model, while preserving **full backward compatibility**: any `.metacooler` file can be opened with `cooler.Cooler()` out of the box.
+
+`metacooler` aims to be a drop-in replacement for `cooler` providing a flexible framework for storing and analyzing metagenomic contact maps.
+
+## Installation
+
+```console
+pip install metacooler
+```
+
+Or with development dependencies:
+
+```console
+pip install metacooler[dev]
+```
+
+## Quick start
+
+```console
+metacooler create pairs --help
+```
+
+```console
+metacooler create pairs \
+    --bins fragments.bed \
+    --contigs contigs2mag.tsv \
+    --pairs contacts.pairs \
+    --output output.metacool \
+    --genomes mag_table.tsv       ## <-- Optional
+
+metacooler info output.metacool
+metacooler dump -t genomes output.metacool
+metacooler aggregate --level genome output.metacool genome.cool
+metacooler show output.metacool --level genome --out heatmap.png
+```
+
+```{python}
+#| echo: false
+#| eval: true
+!metacooler create pairs --help
+```
+
+## Input files
+
+**Bins file**: BED-like file with `chrom`, `start`, `end` columns defining the genomic bins.
+
+  - Can be generated from a FASTA assembly with `cooler makebins` to get fixed-size bins
+  - Can be generated from a FASTA assembly with `cooler digest` to get restriction fragments.
+  - Otherwise an arbitrary resolution can be used by specifying `--bins 1000` for 1kb bins, etc.
+
+```{python}
+#| echo: false
+#| eval: true
+from pathlib import Path
+from IPython.display import Markdown
+file_path = Path("tests/data/assembly_1_DpnII-digested.bed")
+lines = file_path.read_text().strip().splitlines()
+head = lines[:5]
+tail = lines[-2:]
+preview_lines = head + ["..."] + tail
+content = "\n".join(preview_lines)
+display(Markdown(f"```txt\n{content}\n```"))
+```
+
+**Contig-genome map**: TSV file mapping contigs to genomes (MAGs). This is used to populate the `contigs` table and map contigs to genomes. Must be either:
+
+  - A two-column file with NO HEADER: first column is treated as contig name, second column as genome/MAG name.
+  - A TSV file with header, with at least `contig_name` and `genome_id` columns. Additional metadata columns will be stored in the `contigs/` table.
+
+```{python}
+#| echo: false
+#| eval: true
+from pathlib import Path
+from IPython.display import Markdown
+file_path = Path("tests/data/contigs_table_1.tsv")
+lines = file_path.read_text().strip().splitlines()
+head = lines[:5]
+tail = lines[-2:]
+preview_lines = head + ["..."] + tail
+content = "\n".join(preview_lines)
+display(Markdown(f"```txt\n{content}\n```"))
+```
+
+**Pairs file**: [4DN-compliant](https://github.com/4dn-dcic/pairix/blob/master/pairs_format_specification.md) tab-delimited file with `readID`, `chrom1`, `pos1`, `chrom2`, `pos2`, `strand1`, `strand2` columns defining the Hi-C contacts. Can be generated from raw FASTQ reads with [`metator pipeline`](https://github.com/koszullab/metator).
+
+```{python}
+#| echo: false
+#| eval: true
+from pathlib import Path
+import gzip
+from IPython.display import Markdown
+gz_path = Path("tests/data/contacts_1_rep1.pairs.gz")
+with gzip.open(gz_path, "rt") as f:
+    lines = [next(f) for _ in range(1000)]
+    comments = [line for line in lines if line.startswith("#")]
+    head = comments[0:8]
+    pairs = [line for line in lines if not line.startswith("#")]
+    tail = pairs[0:5]
+preview_lines = head + ["...\n"] + comments[-1:] + tail + ["..."]
+content = "".join(preview_lines)
+display(Markdown(f"```txt\n{content}\n```"))
+```
+
+*\[Optional\]* **Genomes table**: TSV file with at least a column named `genome_name`, and optional metadata columns describing the genomes/MAGs.
+
+```{python}
+#| echo: false
+#| eval: true
+from pathlib import Path
+from IPython.display import Markdown
+file_path = Path("tests/data/mag_table_1.tsv")
+lines = file_path.read_text().strip().splitlines()
+head = lines[:5]
+tail = lines[-2:]
+preview_lines = head + ["..."] + tail
+content = "\n".join(preview_lines)
+display(Markdown(f"```txt\n{content}\n```"))
+```
+
+*\[Optional\]* **Metadata file**: a YAML/JSON file with additional metadata.
+
+```{python}
+#| echo: false
+#| eval: true
+from pathlib import Path
+from IPython.display import Markdown
+file_path = Path("tests/data/metadata.yaml")
+content = file_path.read_text().strip()
+display(Markdown(f"```yaml\n{content}\n```"))
+```
+
+## Design
+
+- **Metacool identity**: `metacool-format="MetaCool::1.0"` attribute + `genomes/` group
+- **Implement genomes table**: `genome_id`, `genome_name`, optional metadata columns
+- **Support multi-contigs and multi-genomes visualization**: `show` command at `--level contig/genome`
+- **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
+- **Canonical contig ordering**: configurable (`genome-then-length`, `fasta`, `alpha`)
+- **Unassigned contigs**: default to `__unbinned__` genome

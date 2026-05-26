@@ -1,0 +1,980 @@
+"""Create metacool files from pairs, bins, and MAG assignments."""
+
+from __future__ import annotations
+
+import contextlib
+import gzip
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import cooler
+import h5py
+import numpy as np
+import pandas as pd
+from pyfaidx import Fasta
+
+from metacooler._version import __version__
+from metacooler.io.contigs import parse_contigs_table
+from metacooler.io.genomes import parse_genomes_table
+from metacooler.schema import (
+    CONTIGS_DTYPE,
+    COOLER_FORMAT,
+    COOLER_FORMAT_URL,
+    GENOMES_DTYPE,
+    METACOOLER_FORMAT,
+    METACOOLER_FORMAT_URL,
+    METACOOLER_FORMAT_VERSION,
+    validate,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import Literal
+
+logger = logging.getLogger("metacooler")
+
+
+def _read_contig_lengths(
+    bins: pd.DataFrame | None = None,
+    fasta: str | Path | None = None,
+    pairs: str | Path | None = None,
+) -> dict[str, int]:
+    """Extract contig lengths from bins, fasta, or pairs header."""
+    if fasta is not None:
+        fasta_path = Path(fasta)
+        if fasta_path.suffix == ".gz":
+            # pyfaidx doesn't handle plain gzip; decompress to temp
+            import tempfile
+
+            with (
+                tempfile.NamedTemporaryFile(
+                    mode="wb", suffix=".fa", delete=False
+                ) as tmp,
+                gzip.open(fasta_path, "rb") as gz,
+            ):
+                tmp.write(gz.read())
+            fa_path = Path(tmp.name)
+            fai_path = fa_path.parent / (fa_path.name + ".fai")
+            try:
+                fa = Fasta(tmp.name)
+                result = {name: len(record) for name, record in fa.items()}
+            finally:
+                with contextlib.suppress(Exception):
+                    fa.close()
+                fa_path.unlink(missing_ok=True)
+                fai_path.unlink(missing_ok=True)
+            return result
+        fa = Fasta(str(fasta))
+        try:
+            return {name: len(record) for name, record in fa.items()}
+        finally:
+            with contextlib.suppress(Exception):
+                fa.close()
+    if bins is not None:
+        # Infer from max end per chrom
+        return bins.groupby("chrom")["end"].max().to_dict()
+    if pairs is not None:
+        # Try to parse chromsizes from pairs header
+        lengths = _parse_pairs_header(pairs)
+        if lengths:
+            return lengths
+    raise ValueError(
+        "Contig lengths required. Provide --fasta, a BED bins file, "
+        "or a pairs file with #chromsize: header lines."
+    )
+
+
+def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
+    """Parse #chromsize: lines from a pairs file header.
+
+    Returns a dict {contig_name: length} or None if no chromsizes found.
+    """
+    path = Path(pairs_path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    lengths = {}
+    with opener(path, "rt") as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            if line.startswith("#chromsize:"):
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    lengths[parts[1]] = int(parts[2])
+    return lengths if lengths else None
+
+
+def _build_contig_order(
+    contig_lengths: dict[str, int],
+    contig_genome_map: dict[str, str],
+    ordering: Literal[
+        "genome-then-alpha", "genome-then-length", "fasta", "alpha", "custom"
+    ] = "genome-then-alpha",
+    custom_order: list[str] | None = None,
+) -> list[str]:
+    """Return contig names in canonical order."""
+    all_contigs = set(contig_lengths.keys())
+
+    if ordering == "fasta":
+        # Preserve dict insertion order (Python 3.7+)
+        return list(contig_lengths.keys())
+
+    if ordering == "alpha":
+        return sorted(all_contigs)
+
+    if ordering == "custom":
+        if custom_order is None:
+            raise ValueError("custom_order required when ordering='custom'")
+        missing = all_contigs - set(custom_order)
+        if missing:
+            raise ValueError(f"custom_order missing contigs: {missing}")
+        return custom_order
+
+    if ordering == "genome-then-alpha":
+        # Group by genome, then alphabetical order within each genome
+        genome_groups: dict[str, list[str]] = {}
+        for contig in all_contigs:
+            genome = contig_genome_map.get(contig, "__unbinned__")
+            genome_groups.setdefault(genome, []).append(contig)
+
+        ordered = []
+        for genome in sorted(genome_groups.keys()):
+            contigs = genome_groups[genome]
+            contigs.sort()
+            ordered.extend(contigs)
+        return ordered
+
+    if ordering == "genome-then-length":
+        # Group by genome, then longest contig first within each genome
+        genome_groups2: dict[str, list[str]] = {}
+        for contig in all_contigs:
+            genome = contig_genome_map.get(contig, "__unbinned__")
+            genome_groups2.setdefault(genome, []).append(contig)
+
+        ordered2 = []
+        for genome in sorted(genome_groups2.keys()):
+            contigs = genome_groups2[genome]
+            contigs.sort(key=lambda c: (-contig_lengths[c], c))
+            ordered2.extend(contigs)
+        return ordered2
+
+    raise ValueError(f"Unknown ordering: {ordering!r}")
+
+
+# Sentinel values treated as __unbinned__ in contig-to-genome assignment tables.
+_UNBINNED_SENTINELS: frozenset[str] = frozenset(
+    {"__unbinned__", "na", "nan", "n/a", ""}
+)
+
+
+def _normalize_genome_name(v: str) -> str:
+    """Normalize sentinel values (empty, NA, nan…) to ``__unbinned__``."""
+    return "__unbinned__" if v.strip().lower() in _UNBINNED_SENTINELS else v
+
+
+def _build_genomes_table(
+    contig_order: list[str],
+    contig_lengths: dict[str, int],
+    contig_genome_map: dict[str, str],
+    extra_genomes_df: pd.DataFrame | None = None,
+    keep_unbinned: bool = True,
+) -> pd.DataFrame:
+    """Build the genomes DataFrame from contig data.
+
+    Args:
+        contig_order: Ordered list of contig names.
+        contig_lengths: Mapping of contig name → length.
+        contig_genome_map: Mapping of contig name → genome name.
+        extra_genomes_df: Optional DataFrame from a genomes table file
+            (column ``genome_id`` plus any extra columns).  Extra columns
+            are merged into the output by genome name.
+    """
+    # Collect genome names
+    genome_names = set()
+    for contig in contig_order:
+        genome_names.add(contig_genome_map.get(contig, "__unbinned__"))
+
+    # Only inject __unbinned__ when at least one contig actually lands in it
+    has_unbinned = any(
+        contig_genome_map.get(c, "__unbinned__") == "__unbinned__" for c in contig_order
+    )
+    if keep_unbinned and has_unbinned and "__unbinned__" not in genome_names:
+        genome_names.add("__unbinned__")
+
+    # Sort: __unbinned__ first (if present), then alphabetical
+    sorted_names = sorted(genome_names - {"__unbinned__"})
+    if "__unbinned__" in genome_names:
+        sorted_names = ["__unbinned__"] + sorted_names
+
+    # Compute lengths and n_contigs
+    genome_lengths = {g: 0 for g in sorted_names}
+    genome_ncontigs = {g: 0 for g in sorted_names}
+    for contig in contig_order:
+        genome = contig_genome_map.get(contig, "__unbinned__")
+        genome_lengths[genome] += contig_lengths[contig]
+        genome_ncontigs[genome] += 1
+
+    df = pd.DataFrame(
+        {
+            "name": sorted_names,
+            "length": [genome_lengths[g] for g in sorted_names],
+            "n_contigs": [genome_ncontigs[g] for g in sorted_names],
+        }
+    )
+
+    # Merge extra columns from the genomes file if provided
+    if extra_genomes_df is not None and len(extra_genomes_df.columns) > 1:
+        extra_cols = [c for c in extra_genomes_df.columns if c != "genome_id"]
+        extra = extra_genomes_df.rename(columns={"genome_id": "name"})[
+            ["name"] + extra_cols
+        ].copy()
+        for col in extra_cols:
+            if (
+                pd.api.types.is_string_dtype(extra[col].dtype)
+                or extra[col].dtype == object
+            ):
+                with contextlib.suppress(ValueError, TypeError):
+                    extra[col] = pd.to_numeric(extra[col], errors="raise")
+        df = df.merge(extra, on="name", how="left")
+
+    # Ensure column order: name, length, n_contigs, then extras
+    core = ["name", "length", "n_contigs"]
+    extras = [c for c in df.columns if c not in core]
+    df = df[core + extras]
+    return df.astype({k: v for k, v in GENOMES_DTYPE.items() if k in df.columns})
+
+
+def _build_contigs_table(
+    contig_order: list[str],
+    contig_lengths: dict[str, int],
+    contig_genome_map: dict[str, str],
+    genomes: pd.DataFrame,
+    contig_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build the contigs DataFrame with genome_id and optional extra columns."""
+    genome_name_to_id = {name: i for i, name in enumerate(genomes["name"])}
+
+    df = pd.DataFrame(
+        {
+            "name": contig_order,
+            "length": [contig_lengths[c] for c in contig_order],
+            "genome_id": [
+                genome_name_to_id.get(
+                    contig_genome_map.get(c, "__unbinned__"),
+                    genome_name_to_id.get("__unbinned__", 0),
+                )
+                for c in contig_order
+            ],
+        }
+    )
+
+    # Merge additional columns from the input contig table if provided
+    if contig_df is not None and len(contig_df.columns) > 2:
+        # Identify extra columns beyond contig_name and genome_id
+        extra_cols = [
+            c for c in contig_df.columns if c not in ("contig_name", "genome_id")
+        ]
+        if extra_cols:
+            rename_map = {"contig_name": "name"}
+            extra = contig_df.rename(columns=rename_map)[["name"] + extra_cols].copy()
+            # Convert types for extra columns
+            for col in extra_cols:
+                if (
+                    pd.api.types.is_string_dtype(extra[col].dtype)
+                    or extra[col].dtype == object
+                ):
+                    # Try numeric conversion
+                    with contextlib.suppress(ValueError, TypeError):
+                        extra[col] = pd.to_numeric(extra[col], errors="raise")
+            df = df.merge(extra, on="name", how="left")
+
+    # Ensure column order: name, length, genome_id, then extras
+    core_cols = ["name", "length", "genome_id"]
+    extra_cols = [c for c in df.columns if c not in core_cols]
+    df = df[core_cols + extra_cols]
+    return df.astype({k: v for k, v in CONTIGS_DTYPE.items() if k in df.columns})
+
+
+def _build_bins(
+    bins_path: str | Path,
+    contig_order: list[str],
+    contig_name_to_id: dict[str, int],
+) -> pd.DataFrame:
+    """Read a BED file of bins and remap chrom names to contig ids."""
+    df = pd.read_csv(
+        bins_path,
+        sep="\t",
+        header=None,
+        names=["chrom", "start", "end"],
+        dtype={"chrom": str, "start": np.int32, "end": np.int32},
+    )
+    # Map chrom name -> contig id
+    df["chrom"] = df["chrom"].map(contig_name_to_id)
+    if df["chrom"].isna().any():
+        missing = df[df["chrom"].isna()]["chrom"].unique()
+        raise ValueError(f"Bins reference unknown contigs: {missing}")
+    return df[["chrom", "start", "end"]]
+
+
+def _tile_bins(
+    contig_order: list[str],
+    contig_lengths: dict[str, int],
+    contig_name_to_id: dict[str, int],
+    binsize: int,
+) -> pd.DataFrame:
+    """Generate fixed-size bins tiling each contig."""
+    parts = []
+    for contig in contig_order:
+        cid = contig_name_to_id[contig]
+        length = contig_lengths[contig]
+        starts = np.arange(0, length, binsize, dtype=np.int32)
+        ends = np.minimum(starts + binsize, length).astype(np.int32)
+        parts.append(pd.DataFrame({"chrom": cid, "start": starts, "end": ends}))
+    df = pd.concat(parts, ignore_index=True)
+    return df.astype({"chrom": np.int32, "start": np.int32, "end": np.int32})
+
+
+def _stream_pairs(
+    pairs_path: str | Path,
+    c1: int = 2,
+    p1: int = 3,
+    c2: int = 4,
+    p2: int = 5,
+    chunksize: int = 10_000_000,
+) -> Iterable[pd.DataFrame]:
+    """Stream a pairs file in chunks."""
+    path = Path(pairs_path)
+    compression = "infer"
+    if path.suffix == ".gz":
+        compression = "gzip"
+    elif path.suffix == ".bz2":
+        compression = "bz2"
+
+    # Column indices are 1-based in CLI, convert to 0-based
+    usecols_0based = [c1 - 1, p1 - 1, c2 - 1, p2 - 1]
+    col_names = ["chrom1", "pos1", "chrom2", "pos2"]
+
+    reader = pd.read_csv(
+        path,
+        sep="\t",
+        header=None,
+        dtype=str,
+        comment="#",
+        compression=compression,
+        chunksize=chunksize,
+        on_bad_lines="warn",
+    )
+    for chunk in reader:
+        # Select only the columns we need
+        chunk = chunk.iloc[:, usecols_0based].copy()
+        chunk.columns = col_names
+        chunk["pos1"] = chunk["pos1"].astype(np.int64)
+        chunk["pos2"] = chunk["pos2"].astype(np.int64)
+        yield chunk
+
+
+def from_pairs(
+    uri: str | Path,
+    bins: str | Path | pd.DataFrame | None = None,
+    pairs: str | Path | None = None,
+    contig_genome_map: dict[str, str] | str | Path | None = None,
+    contig_table_format: Literal["contig_genome", "metator", "contigs"] = "contigs",
+    fasta: str | Path | None = None,
+    assembly_name: str | None = None,
+    contig_ordering: Literal[
+        "genome-then-alpha", "genome-then-length", "fasta", "alpha", "custom"
+    ] = "genome-then-alpha",
+    custom_order: list[str] | None = None,
+    drop_unassigned: bool = False,
+    binsize: int | None = None,
+    genomes_table: str | Path | None = None,
+    pairs_kwargs: dict | None = None,
+    metadata: dict | None = None,
+    chunksize: int = 10_000_000,
+    nproc: int = 1,
+) -> None:
+    """Create a ``.metacool`` file from pairs, bins, and contig assignments.
+
+    Args:
+        uri: Output file path (``.metacool`` extension recommended).
+        bins: Path to a BED file of bins, or a pre-built DataFrame
+            (``chrom, start, end``).  If ``None``, *binsize* must be given
+            and bins will be tiled from the fasta.
+        pairs: Path to a pairs file (plain text, gzipped, or bgzipped).
+        contig_genome_map: Either a ``dict[contig_name → genome_name]`` or
+            a path to a contig table file.
+        contig_table_format: Format when *contig_genome_map* is a file path.
+        fasta: Assembly fasta (required if *bins* is ``None``).
+        assembly_name: Name for this assembly / metagenome.
+        contig_ordering: Canonical ordering strategy.
+        custom_order: Explicit contig order when *contig_ordering* is
+            ``"custom"``.
+        drop_unassigned: If ``True``, drop contigs not present in the contig
+            table instead of assigning them to ``__unbinned__``.
+        binsize: Fixed bin size (used only when *bins* is ``None``).
+        genomes_table: Optional path to a genomes metadata TSV **with a header
+            row**. The first column must be named ``genome_name``; any additional
+            columns are stored in the ``/genomes`` table.
+        pairs_kwargs: Extra kwargs passed to the pairs reader (column
+            indices, etc.).
+        metadata: Additional metadata dict stored in file attrs.
+        chunksize: Number of pairs to process per chunk.
+        nproc: Number of parallel workers (currently unused).
+    """
+    uri = Path(uri)
+    if pairs_kwargs is None:
+        pairs_kwargs = {}
+
+    if nproc > 1:
+        raise NotImplementedError(
+            "nproc > 1 is not yet implemented. Use nproc=1 (the default)."
+        )
+
+    # --- Parse contig table ---
+    contig_df: pd.DataFrame | None = None
+    if isinstance(contig_genome_map, str | Path):
+        cg_map, contig_df = parse_contigs_table(
+            contig_genome_map, fmt=contig_table_format
+        )
+    elif isinstance(contig_genome_map, dict):
+        cg_map = contig_genome_map
+    else:
+        raise TypeError("contig_genome_map must be a dict or a path")
+
+    # Normalize empty/NA genome names to __unbinned__
+    cg_map = {k: _normalize_genome_name(v) for k, v in cg_map.items()}
+
+    # --- Parse optional genomes metadata table ---
+    extra_genomes_df: pd.DataFrame | None = None
+    if genomes_table is not None:
+        extra_genomes_df = parse_genomes_table(genomes_table)
+
+    # --- Get contig lengths and build bins ---
+    if isinstance(bins, str | Path):
+        bins_df = pd.read_csv(
+            bins,
+            sep="\t",
+            header=None,
+            names=["chrom", "start", "end"],
+            dtype={"chrom": str, "start": np.int32, "end": np.int32},
+        )
+        contig_lengths = bins_df.groupby("chrom")["end"].max().to_dict()
+    elif isinstance(bins, pd.DataFrame):
+        bins_df = bins.copy()
+        contig_lengths = bins_df.groupby("chrom")["end"].max().to_dict()
+    elif bins is None:
+        # Integer binsize mode: need contig lengths from fasta or pairs header
+        contig_lengths = _read_contig_lengths(fasta=fasta, pairs=pairs)
+        bins_df = None
+    else:
+        raise TypeError("bins must be a path, DataFrame, or None")
+
+    # --- Filter unassigned ---
+    if drop_unassigned:
+        contig_lengths = {
+            ct: ls
+            for ct, ls in contig_lengths.items()
+            if ct in cg_map and cg_map[ct] != "__unbinned__"
+        }
+        if bins_df is not None:
+            bins_df = bins_df[bins_df["chrom"].isin(contig_lengths)].copy()
+
+    # --- Build canonical order ---
+    contig_order = _build_contig_order(
+        contig_lengths, cg_map, ordering=contig_ordering, custom_order=custom_order
+    )
+
+    # --- Build genomes / contigs tables ---
+    genomes_df = _build_genomes_table(
+        contig_order,
+        contig_lengths,
+        cg_map,
+        extra_genomes_df,
+        keep_unbinned=not drop_unassigned,
+    )
+    contig_name_to_id = {name: i for i, name in enumerate(contig_order)}
+    contigs_df = _build_contigs_table(
+        contig_order, contig_lengths, cg_map, genomes_df, contig_df
+    )
+
+    # --- Build bins ---
+    if bins_df is None:
+        if binsize is None:
+            raise ValueError("binsize required when bins is None")
+        bins_df = _tile_bins(contig_order, contig_lengths, contig_name_to_id, binsize)
+    else:
+        # Remap chrom names to contig ids
+        bins_df["chrom"] = bins_df["chrom"].map(contig_name_to_id)
+        if bins_df["chrom"].isna().any():
+            missing = set(bins_df[bins_df["chrom"].isna()]["chrom"].unique())
+            raise ValueError(f"Bins reference unknown contigs: {missing}")
+        bins_df = bins_df[["chrom", "start", "end"]]
+
+    # --- Compute offsets ---
+    n_contigs = len(contigs_df)
+    n_bins = len(bins_df)
+
+    # chrom_offset: first bin index for each contig (O(n_bins) via bincount)
+    chrom_counts = np.bincount(
+        bins_df["chrom"].values.astype(np.int64), minlength=n_contigs
+    )
+    chrom_offset = np.zeros(n_contigs + 1, dtype=np.int64)
+    chrom_offset[1:] = np.cumsum(chrom_counts)
+
+    # genome_offset: first contig index for each genome (O(n_contigs) via bincount)
+    n_genomes = len(genomes_df)
+    genome_ids = contigs_df["genome_id"].values
+    genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
+    genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
+    genome_offset[1:] = np.cumsum(genome_counts)
+
+    # n_bins per genome: sum chrom_counts by genome_id
+    genome_bin_counts = np.bincount(
+        contigs_df["genome_id"].values.astype(np.int64),
+        weights=chrom_counts.astype(np.float64),
+        minlength=n_genomes,
+    ).astype(np.int64)
+    genomes_df.insert(3, "n_bins", genome_bin_counts)
+
+    # --- Stream pairs and bin them ---
+    if pairs is None:
+        raise ValueError("pairs path required")
+
+    def pixel_stream():
+        # Build bin lookup structures
+        # chrom_offset has length n_contigs + 1
+        if binsize is not None:
+            # Fixed bins: bin_id = bin_offset + pos // binsize
+            for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
+                chunk = chunk[
+                    chunk["chrom1"].isin(contig_name_to_id)
+                    & chunk["chrom2"].isin(contig_name_to_id)
+                ]
+                if chunk.empty:
+                    continue
+                c1 = chunk["chrom1"].map(contig_name_to_id).values.astype(np.int32)
+                c2 = chunk["chrom2"].map(contig_name_to_id).values.astype(np.int32)
+                p1 = chunk["pos1"].values.astype(np.int64)
+                p2 = chunk["pos2"].values.astype(np.int64)
+                # Zero-based positions
+                p1 = np.maximum(p1 - 1, 0)
+                p2 = np.maximum(p2 - 1, 0)
+                bin1 = chrom_offset[c1] + p1 // binsize
+                bin2 = chrom_offset[c2] + p2 // binsize
+                # Enforce upper triangle
+                swap = bin1 > bin2
+                bin1[swap], bin2[swap] = bin2[swap], bin1[swap]
+                df = pd.DataFrame(
+                    {
+                        "bin1_id": bin1,
+                        "bin2_id": bin2,
+                        "count": np.ones(len(bin1), dtype=np.int32),
+                    }
+                )
+                df = df.groupby(["bin1_id", "bin2_id"], as_index=False)["count"].sum()
+                yield df
+        else:
+            # Fragment-level bins: binary search within each contig's bins
+            starts = bins_df["start"].values.astype(np.int64)
+            for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
+                chunk = chunk[
+                    chunk["chrom1"].isin(contig_name_to_id)
+                    & chunk["chrom2"].isin(contig_name_to_id)
+                ]
+                if chunk.empty:
+                    continue
+                c1 = chunk["chrom1"].map(contig_name_to_id).values.astype(np.int32)
+                c2 = chunk["chrom2"].map(contig_name_to_id).values.astype(np.int32)
+                p1 = chunk["pos1"].values.astype(np.int64)
+                p2 = chunk["pos2"].values.astype(np.int64)
+                p1 = np.maximum(p1 - 1, 0)
+                p2 = np.maximum(p2 - 1, 0)
+                bin1 = np.empty(len(c1), dtype=np.int64)
+                bin2 = np.empty(len(c2), dtype=np.int64)
+                for cid in np.unique(c1):
+                    mask = c1 == cid
+                    lo, hi = chrom_offset[cid], chrom_offset[cid + 1]
+                    bin1[mask] = (
+                        lo + np.searchsorted(starts[lo:hi], p1[mask], side="right") - 1
+                    )
+                for cid in np.unique(c2):
+                    mask = c2 == cid
+                    lo, hi = chrom_offset[cid], chrom_offset[cid + 1]
+                    bin2[mask] = (
+                        lo + np.searchsorted(starts[lo:hi], p2[mask], side="right") - 1
+                    )
+                swap = bin1 > bin2
+                bin1[swap], bin2[swap] = bin2[swap], bin1[swap]
+                df = pd.DataFrame(
+                    {
+                        "bin1_id": bin1,
+                        "bin2_id": bin2,
+                        "count": np.ones(len(bin1), dtype=np.int32),
+                    }
+                )
+                df = df.groupby(["bin1_id", "bin2_id"], as_index=False)["count"].sum()
+                yield df
+
+    # --- Create the cooler file (ordered=False for external sort) ---
+    cooler.create_cooler(
+        str(uri),
+        bins=bins_df,
+        pixels=pixel_stream(),
+        ordered=False,
+        symmetric_upper=True,
+        assembly=assembly_name,
+        metadata=metadata or {},
+        dupcheck=False,
+    )
+
+    # --- Post-process: add metacooler-specific groups and attrs ---
+    with h5py.File(uri, "a") as f:
+        # Overwrite chroms with contigs (soft link for cooler compat)
+        if "chroms" in f:
+            del f["chroms"]
+        f["chroms"] = h5py.SoftLink("contigs")
+
+        # Write genomes group (fixed-length byte strings like cooler)
+        if "genomes" in f:
+            del f["genomes"]
+        g = f.create_group("genomes", track_order=True)
+        for col in genomes_df.columns:
+            data = genomes_df[col].values
+            if data.dtype == object or pd.api.types.is_string_dtype(data.dtype):
+                arr = [
+                    ""
+                    if (v is None or (isinstance(v, float) and np.isnan(v)))
+                    else str(v)
+                    for v in data
+                ]
+                max_len = max((len(s) for s in arr), default=1)
+                g.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
+            else:
+                g.create_dataset(col, data=data)
+
+        # Overwrite contigs group with genome_id (fixed-length byte strings like cooler)
+        if "contigs" in f:
+            del f["contigs"]
+        c = f.create_group("contigs", track_order=True)
+        for col in contigs_df.columns:
+            data = contigs_df[col].values
+            if data.dtype.kind in ("O", "U"):
+                arr = [
+                    ""
+                    if (v is None or (isinstance(v, float) and np.isnan(v)))
+                    else str(v)
+                    for v in data
+                ]
+                max_len = max((len(s) for s in arr), default=1)
+                c.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
+            else:
+                c.create_dataset(col, data=data)
+
+        # Overwrite bins/chrom to remove the enum dtype that cooler.create_cooler
+        # created (it maps integers to the original chrom names, which we replaced)
+        chrom_data = f["bins"]["chrom"][:]
+        del f["bins"]["chrom"]
+        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+
+        # Write genome_offset
+        idx = f["indexes"]
+        if "genome_offset" in idx:
+            del idx["genome_offset"]
+        idx.create_dataset("genome_offset", data=genome_offset)
+
+        # Update / overwrite chrom_offset
+        if "chrom_offset" in idx:
+            del idx["chrom_offset"]
+        idx.create_dataset("chrom_offset", data=chrom_offset)
+
+        # Set attrs
+        f.attrs["format"] = COOLER_FORMAT
+        f.attrs["format-url"] = COOLER_FORMAT_URL
+        f.attrs["metacooler-format"] = METACOOLER_FORMAT
+        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
+        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
+        f.attrs["generated-by"] = f"metacooler-{__version__}"
+        f.attrs["ngenomes"] = n_genomes
+        f.attrs["contig-ordering"] = contig_ordering
+        if assembly_name:
+            f.attrs["assembly-name"] = assembly_name
+
+    # Validate
+    validate(uri)
+    with h5py.File(uri, "r") as f:
+        nnz = len(f["pixels"]["count"])
+        total = int(f["pixels"]["count"][:].sum())
+    logger.info(
+        "Created %d bins from %d contigs in %d genomes. NNZ=%d, sum=%d.",
+        n_bins,
+        n_contigs,
+        n_genomes,
+        nnz,
+        total,
+    )
+    logger.info("Created metacool file: %s", uri)
+
+
+def from_cool(
+    cool_uri: str | Path,
+    output: str | Path,
+    contig_genome_map: str | Path,
+    contig_table_format: Literal[
+        "contigs", "contig_genome", "metator", "I,J"
+    ] = "contigs",
+    genomes_table: str | Path | None = None,
+    contig_ordering: Literal[
+        "genome-then-length", "genome-then-alpha", "cool", "alpha", "custom"
+    ] = "genome-then-length",
+    assembly_name: str | None = None,
+    drop_unassigned: bool = False,
+    metadata: dict | None = None,
+) -> None:
+    """Create a metacool file from an existing cool file.
+
+    Args:
+        cool_uri: Path to the source cool file.
+        output: Destination path for the output metacool file.
+        contig_genome_map: Path to contig-to-genome assignment table
+            (``str`` or ``Path`` only; dicts are not accepted here).
+        contig_table_format: Format of the contig assignment table.
+        genomes_table: Optional path to genomes metadata table.
+        contig_ordering: Strategy for ordering contigs within the metacool file.
+            ``'cool'`` preserves the original contig order from the input cool file.
+            Other choices: ``'genome-then-length'``, ``'genome-then-alpha'``,
+            ``'alpha'``, ``'custom'``.
+        assembly_name: Name for this assembly / metagenome, stored in file attrs.
+        drop_unassigned: If ``True``, drop contigs absent from the contig table
+            instead of collecting them under ``__unbinned__``.
+        metadata: Optional metadata dictionary to store in the file attrs.
+
+    Raises:
+        ValueError: If ``cool_uri`` is not a valid cooler file.
+    """
+    cool_path = Path(cool_uri)
+    output_path = Path(output)
+
+    # Validate input cool file
+    if not cooler.fileops.is_cooler(str(cool_path)):
+        raise ValueError(f"Not a valid cooler file: {cool_path}")
+
+    # Load cool file data (bins are small; pixels are streamed below)
+    clr = cooler.Cooler(str(cool_path))
+    bins = clr.bins()[:]
+
+    logger.info(f"Loaded cool file: {len(bins)} bins, {clr.info['nnz']} pixels")
+
+    # Get contig names from cool file's chroms table
+    chroms = clr.chroms()[:]
+    contig_id_to_name = dict(enumerate(chroms["name"]))
+
+    # Build contig lengths from bins (use actual contigs in bins, not chroms table)
+    contig_lengths: dict[str, int] = {
+        str(chrom): int(group["end"].max()) for chrom, group in bins.groupby("chrom")
+    }
+
+    # Parse contig assignments
+    contig_map, contig_df = parse_contigs_table(contig_genome_map, contig_table_format)
+
+    # Normalize empty/NA genome names to __unbinned__
+    contig_map = {k: _normalize_genome_name(v) for k, v in contig_map.items()}
+
+    # Drop contigs not present in the contig table (or assigned to __unbinned__)
+    if drop_unassigned:
+        contig_lengths = {
+            ct: ln
+            for ct, ln in contig_lengths.items()
+            if ct in contig_map and contig_map[ct] != "__unbinned__"
+        }
+
+    # Build contig order
+    if contig_ordering == "cool":
+        # Preserve the original contig order from the cool file's chroms table,
+        # filtered to only contigs present in contig_lengths (after drop_unassigned).
+        cool_order = [
+            name for name in contig_id_to_name.values() if name in contig_lengths
+        ]
+        contig_order = _build_contig_order(
+            contig_lengths=contig_lengths,
+            contig_genome_map=contig_map,
+            ordering="custom",
+            custom_order=cool_order,
+        )
+    else:
+        contig_order = _build_contig_order(
+            contig_lengths=contig_lengths,
+            contig_genome_map=contig_map,
+            ordering=contig_ordering,
+        )
+
+    # Build genomes table
+    if genomes_table is not None:
+        genomes_df_extra = parse_genomes_table(genomes_table)
+    else:
+        genomes_df_extra = None
+
+    genomes = _build_genomes_table(
+        contig_order=contig_order,
+        contig_lengths=contig_lengths,
+        contig_genome_map=contig_map,
+        extra_genomes_df=genomes_df_extra,
+    )
+
+    # Build contigs table
+    contigs = _build_contigs_table(
+        contig_order=contig_order,
+        contig_lengths=contig_lengths,
+        contig_genome_map=contig_map,
+        genomes=genomes,
+        contig_df=contig_df,
+    )
+
+    # Remap bins to new contig IDs (based on reordered contigs)
+    new_contig_name_to_id = {name: idx for idx, name in enumerate(contig_order)}
+
+    # Remap bins chrom column (bins have contig names, not IDs)
+    bins_remapped = bins.copy()
+    bins_remapped["chrom"] = bins_remapped["chrom"].map(new_contig_name_to_id)
+    if bins_remapped["chrom"].isna().any():
+        missing = bins_remapped[bins_remapped["chrom"].isna()]["chrom"].unique()
+        raise ValueError(f"Bins reference contigs not in contig_order: {missing}")
+
+    bins_remapped = bins_remapped[["chrom", "start", "end"]].copy()
+    bins_remapped["chrom"] = bins_remapped["chrom"].astype(np.int32)
+    bins_remapped["start"] = bins_remapped["start"].astype(np.int32)
+    bins_remapped["end"] = bins_remapped["end"].astype(np.int32)
+
+    # Sort bins by new chrom ID so cooler.create_cooler stores them in the correct
+    # order.  Without this, cooler renumbers enum codes by first-appearance order,
+    # decoupling the code→name mapping from the physical bin data (start/end).
+    sort_idx = np.argsort(bins_remapped["chrom"].values, kind="stable")
+    bins_remapped = bins_remapped.iloc[sort_idx].reset_index(drop=True)
+
+    # Build old-bin-ID → new-bin-ID mapping for pixel remapping
+    n_bins = len(bins_remapped)
+    old_to_new_bin = np.empty(n_bins, dtype=np.int64)
+    old_to_new_bin[sort_idx] = np.arange(n_bins, dtype=np.int64)
+
+    # n_bins per genome: sum bin counts by genome_id via contigs
+    _chrom_counts = np.bincount(
+        bins_remapped["chrom"].values.astype(np.int64), minlength=len(contigs)
+    )
+    _genome_bin_counts = np.bincount(
+        contigs["genome_id"].values.astype(np.int64),
+        weights=_chrom_counts.astype(np.float64),
+        minlength=len(genomes),
+    ).astype(np.int64)
+    genomes.insert(3, "n_bins", _genome_bin_counts)
+
+    # Stream and remap pixel bin IDs in chunks to avoid loading the full table.
+    # Peak memory drops from 2× pixel table size (original + copy) to 1× (remapped).
+    _chunksize = 10_000_000
+    _n_pixels = clr.info["nnz"]
+    _remapped_chunks: list[pd.DataFrame] = []
+    for _i in range(0, _n_pixels, _chunksize):
+        _chunk = clr.pixels()[_i : _i + _chunksize].copy()
+        _chunk["bin1_id"] = old_to_new_bin[_chunk["bin1_id"].values.astype(np.int64)]
+        _chunk["bin2_id"] = old_to_new_bin[_chunk["bin2_id"].values.astype(np.int64)]
+        _chunk["count"] = _chunk["count"].astype(np.int32)
+        _swap = _chunk["bin1_id"] > _chunk["bin2_id"]
+        _chunk.loc[_swap, ["bin1_id", "bin2_id"]] = _chunk.loc[
+            _swap, ["bin2_id", "bin1_id"]
+        ].values
+        _remapped_chunks.append(_chunk[["bin1_id", "bin2_id", "count"]])
+    pixels_remapped = pd.concat(_remapped_chunks, ignore_index=True)
+    del _remapped_chunks
+    # Sort by (bin1_id, bin2_id) so cooler.create_cooler(ordered=True) is correct
+    # after the contig-reordering permutation.
+    _sort_order = np.lexsort(
+        (pixels_remapped["bin2_id"].values, pixels_remapped["bin1_id"].values)
+    )
+    pixels_remapped = pixels_remapped.iloc[_sort_order].reset_index(drop=True)
+
+    logger.info(
+        f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
+    )
+
+    # Create cooler file from remapped bins and pixels
+    cooler.create_cooler(
+        str(output_path),
+        bins=bins_remapped,
+        pixels=pixels_remapped,
+        ordered=True,
+        symmetric_upper=True,
+        assembly=assembly_name or "imported",
+        metadata=metadata or {},
+    )
+
+    # Add metacooler-specific groups and attributes
+    with h5py.File(output_path, "a") as f:
+        # Overwrite chroms with contigs (soft link for cooler compat)
+        if "chroms" in f:
+            del f["chroms"]
+        f["chroms"] = h5py.SoftLink("contigs")
+
+        # Write genomes group
+        if "genomes" in f:
+            del f["genomes"]
+        g = f.create_group("genomes", track_order=True)
+        for col in genomes.columns:
+            data = genomes[col].values
+            if data.dtype == object or pd.api.types.is_string_dtype(data.dtype):
+                arr = [
+                    ""
+                    if (v is None or (isinstance(v, float) and np.isnan(v)))
+                    else str(v)
+                    for v in data
+                ]
+                max_len = max((len(s) for s in arr), default=1)
+                g.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
+            else:
+                g.create_dataset(col, data=data)
+
+        # Overwrite contigs group with genome_id
+        if "contigs" in f:
+            del f["contigs"]
+        c = f.create_group("contigs", track_order=True)
+        for col in contigs.columns:
+            data = contigs[col].values
+            if data.dtype.kind in ("O", "U"):
+                arr = [
+                    ""
+                    if (v is None or (isinstance(v, float) and np.isnan(v)))
+                    else str(v)
+                    for v in data
+                ]
+                max_len = max((len(s) for s in arr), default=1)
+                c.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
+            else:
+                c.create_dataset(col, data=data)
+
+        # Overwrite bins/chrom to remove enum dtype
+        chrom_data = f["bins"]["chrom"][:]
+        del f["bins"]["chrom"]
+        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+
+        # Compute and write genome_offset (O(n_contigs) via bincount)
+        genome_ids = contigs["genome_id"].values
+        n_genomes = len(genomes)
+        genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
+        genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
+        genome_offset[1:] = np.cumsum(genome_counts)
+
+        idx = f["indexes"]
+        if "genome_offset" in idx:
+            del idx["genome_offset"]
+        idx.create_dataset("genome_offset", data=genome_offset)
+
+        # Set metacooler attributes
+        f.attrs["format"] = COOLER_FORMAT
+        f.attrs["format-url"] = COOLER_FORMAT_URL
+        f.attrs["metacooler-format"] = METACOOLER_FORMAT
+        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
+        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
+        f.attrs["generated-by"] = f"metacooler-{__version__}"
+        f.attrs["ngenomes"] = n_genomes
+        f.attrs["contig-ordering"] = contig_ordering
+        if assembly_name:
+            f.attrs["assembly-name"] = assembly_name
+
+    logger.info(f"Successfully created metacool file: {output_path}")

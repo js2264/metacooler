@@ -1,0 +1,202 @@
+# metacooler: Hi-C contact maps for metagenomes
+
+
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/downloads/) [![PyPI version](https://img.shields.io/pypi/v/metacooler.svg)](https://pypi.org/project/metacooler/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![codecov](https://codecov.io/gh/js2264/metacooler/branch/devel/graph/badge.svg?token=XMYgQxb7KH)](https://codecov.io/gh/js2264/metacooler)
+
+An extension of the [cooler](https://github.com/open2c/cooler) format for multi-genome (metagenomic) Hi-C data. `metacooler` adds a `genomes/` hierarchy on top of cooler’s `chroms/bins/pixels` model, while preserving **full backward compatibility**: any `.metacooler` file can be opened with `cooler.Cooler()` out of the box.
+
+`metacooler` aims to be a drop-in replacement for `cooler` providing a flexible framework for storing and analyzing metagenomic contact maps.
+
+## Installation
+
+``` console
+pip install metacooler
+```
+
+Or with development dependencies:
+
+``` console
+pip install metacooler[dev]
+```
+
+## Quick start
+
+``` console
+metacooler create pairs --help
+```
+
+``` console
+metacooler create pairs \
+    --bins fragments.bed \
+    --contigs contigs2mag.tsv \
+    --pairs contacts.pairs \
+    --output output.metacool \
+    --genomes mag_table.tsv       ## <-- Optional
+
+metacooler info output.metacool
+metacooler dump -t genomes output.metacool
+metacooler aggregate --level genome output.metacool genome.cool
+metacooler show output.metacool --level genome --out heatmap.png
+```
+
+                                                                                    
+     Usage: metacooler create pairs [OPTIONS]                                       
+                                                                                    
+     Create a metacool file from pairs and contig assignments.                      
+                                                                                    
+    ╭─ Options ────────────────────────────────────────────────────────────────────╮
+    │ *  --pairs                Pairs file (plain text or gzipped). [required]     │
+    │ *  --bins                 BED file of bins (no column names), or an integer  │
+    │                           bin size in bp (e.g. 1000). If an integer, contig  │
+    │                           lengths must be available from the pairs header or │
+    │                           --fasta. [required]                                │
+    │ *  --output           -o  Output .metacool file path. [required]             │
+    │ *  --contigs              Contig-to-genome assignment table. The expected    │
+    │                           layout depends on --contigs-format. [required]     │
+    │    --contigs-format       Format of the contig assignment table. Four        │
+    │                           formats are supported: [default: contigs]          │
+    │                           - contigs: TSV with a header row. Column 1 must be │
+    │                           named `contig_name` and column 2 `genome_name`.    │
+    │                           Additional columns are stored verbatim.            │
+    │                           - contig_genome: Two-column TSV                    │
+    │                           (`contig<TAB>genome`) with no header. First value  │
+    │                           is contig name, second is genome assignment.       │
+    │                           - metator: MetaTOR output table (ie                │
+    │                           `contig_data_final.txt`). Expects a header with    │
+    │                           columns `Name` (contig) and `Final_bin` (genome).  │
+    │                           Other columns ignored.                             │
+    │                           - I,J(,noheader): Column-index spec (1-based). Use │
+    │                           column `I` for contigs and `J` for genomes. Header │
+    │                           expected by default. Append `,noheader` (e.g.,     │
+    │                           `1,5,noheader`) to treat the first row as data.    │
+    │    --genomes              Optional genomes metadata table with header. First │
+    │                           column must be 'genome_name'; any further columns  │
+    │                           are stored in the /genomes table.                  │
+    │    --metadata             Path to a JSON or YAML file containing metadata to │
+    │                           ingest into the file.                              │
+    │    --force            -f  Overwrite output file if it already exists.        │
+    │    --verbose          -v  Increase verbosity (debug logging).                │
+    │    --contig-order         Strategy for ordering contigs in the output        │
+    │                           metacool file.                                     │
+    │                           - genome-then-length: group by genome,             │
+    │                           longest-first within each genome.                  │
+    │                           - genome-then-alpha: group by genome, alphabetical │
+    │                           within each genome.                                │
+    │                           - fasta: preserve order from the input FASTA (or   │
+    │                           pairs header).                                     │
+    │                           - alpha: sort all contigs alphabetically.          │
+    │                           - custom: explicit order supplied via the API      │
+    │                           only. [default: genome-then-length]                │
+    │    --fasta                Assembly FASTA. Used to extract contig lengths     │
+    │                           when --bins is an integer and contig sizes are     │
+    │                           absent from the pairs header.                      │
+    │    --assembly-name        Name for this assembly / metagenome.               │
+    │    --drop-unassigned      Drop contigs not assigned to any genome.           │
+    │    --chunksize            Number of pairs to process per chunk. [default:    │
+    │                           10000000]                                          │
+    │    --nproc                Number of parallel workers. [default: 1]           │
+    │    --help             -h  Show this message and exit.                        │
+    ╰──────────────────────────────────────────────────────────────────────────────╯
+
+## Input files
+
+**Bins file**: BED-like file with `chrom`, `start`, `end` columns defining the genomic bins.
+
+- Can be generated from a FASTA assembly with `cooler makebins` to get fixed-size bins
+- Can be generated from a FASTA assembly with `cooler digest` to get restriction fragments.
+- Otherwise an arbitrary resolution can be used by specifying `--bins 1000` for 1kb bins, etc.
+
+``` txt
+contig_0_0  0   5
+contig_0_0  5   781
+contig_0_0  781 807
+contig_0_0  807 827
+contig_0_0  827 1073
+...
+contig_unbinned_4   5811    5929
+contig_unbinned_4   5929    6000
+```
+
+**Contig-genome map**: TSV file mapping contigs to genomes (MAGs). This is used to populate the `contigs` table and map contigs to genomes. Must be either:
+
+- A two-column file with NO HEADER: first column is treated as contig name, second column as genome/MAG name.
+- A TSV file with header, with at least `contig_name` and `genome_id` columns. Additional metadata columns will be stored in the `contigs/` table.
+
+``` txt
+contig_name genome_name gc_content  coverage
+contig_0_0  MAG_01  0.47    71.70
+contig_0_1  MAG_01  0.59    10.00
+contig_0_2  MAG_01  0.54    66.47
+contig_1_0  MAG_02  0.45    87.98
+...
+contig_unbinned_3   __unbinned__    0.44    74.74
+contig_unbinned_4       0.52    87.36
+```
+
+**Pairs file**: [4DN-compliant](https://github.com/4dn-dcic/pairix/blob/master/pairs_format_specification.md) tab-delimited file with `readID`, `chrom1`, `pos1`, `chrom2`, `pos2`, `strand1`, `strand2` columns defining the Hi-C contacts. Can be generated from raw FASTQ reads with [`metator pipeline`](https://github.com/koszullab/metator).
+
+``` txt
+#pairs format v1.0
+#sorted: chr1-chr2-pos1-pos2
+#shape: upper triangle
+#genome_assembly: synthetic_assembly_1
+#chromsize: contig_0_0 22000
+#chromsize: contig_0_1 13000
+#chromsize: contig_0_2 25000
+#chromsize: contig_1_0 50000
+...
+#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2
+read_0  contig_7_0  5211    contig_7_0  238 +   +
+read_1  contig_8_4  848 contig_8_4  4852    +   +
+read_2  contig_5_2  3170    contig_5_2  3653    +   +
+read_3  contig_9_2  2789    contig_9_1  2731    +   +
+read_4  contig_unbinned_3   3873    contig_unbinned_0   4709    +   +
+...
+```
+
+*\[Optional\]* **Genomes table**: TSV file with at least a column named `genome_name`, and optional metadata columns describing the genomes/MAGs.
+
+``` txt
+genome_name phylum  completeness    contamination   quality
+MAG_01  Firmicutes  0.85    0.27    medium
+MAG_02  Firmicutes  0.74    0.11    medium
+MAG_03  Proteobacteria  0.96    0.29    low
+MAG_04  Bacteroidetes   0.75    0.30    low
+...
+MAG_09  Proteobacteria  0.55    0.20    low
+MAG_10  Proteobacteria  0.75    0.39    low
+```
+
+*\[Optional\]* **Metadata file**: a YAML/JSON file with additional metadata.
+
+``` yaml
+sample:
+  name: gut_microbiome_T0
+  description: This is a gut microbiome sample at time point 0
+  organism: human gut metagenome
+  enzyme: HpaII
+  enzyme_site: "C^CGG"
+sequencing:
+  platform: Illumina NovaSeq 6000
+  read_length: 150
+  n_read_pairs: 245000000
+  n_valid_pairs: 180000000
+assembly:
+  name: gut_microbiome_T0_assembly.fa
+  description: metagenome assembly for the gut microbiome sample at time point 0
+  assembler: MEGAHIT v1.2.9
+  assembly_date: 2024-06-01
+  assembly_stats:
+    total_length: 3500000
+    n_contigs: 120
+    n50: 50000
+```
+
+## Design
+
+- **Metacool identity**: `metacool-format="MetaCool::1.0"` attribute + `genomes/` group
+- **Implement genomes table**: `genome_id`, `genome_name`, optional metadata columns
+- **Support multi-contigs and multi-genomes visualization**: `show` command at `--level contig/genome`
+- **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
+- **Canonical contig ordering**: configurable (`genome-then-length`, `fasta`, `alpha`)
+- **Unassigned contigs**: default to `__unbinned__` genome

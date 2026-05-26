@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "metacooler"
+version = "0.1.0"
+description = "metacooler: Hi-C contact maps for metagenomes — an extension of the cooler format."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jacques Serizay" }]
+keywords = ["hi-c", "metagenomics", "cooler", "contact-maps", "hdf5"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "cooler>=0.10",
+    "h5py>=3.8",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "bioframe>=0.4",
+    "rich-click>=1.7",
+    "rich>=13",
+    "pyfaidx>=0.7",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+    "click>=8.1",
+    "biopython>=1.87",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+plotly = ["plotly>=5.18"]
+dev = [
+    "ipython>=8.39.0",
+    "jupyter>=1.1.1",
+    "pre-commit>=4.6.0",
+    "pytest>=7.4",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "ty>=0.0.38",
+]
+docs = [
+    "zensical>=0.0.43",
+    "mkdocstrings[python]>=0.25",
+]
+
+[project.scripts]
+metacooler = "metacooler.cli.main:cli"
+
+[project.urls]
+Homepage = "https://github.com/js2264/metacooler"
+Repository = "https://github.com/js2264/metacooler"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/metacooler"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+exclude = [
+    "README.md",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=metacooler --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["metacooler"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

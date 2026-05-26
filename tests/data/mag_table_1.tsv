@@ -1,0 +1,11 @@
+genome_name	phylum	completeness	contamination	quality
+MAG_01	Firmicutes	0.85	0.27	medium
+MAG_02	Firmicutes	0.74	0.11	medium
+MAG_03	Proteobacteria	0.96	0.29	low
+MAG_04	Bacteroidetes	0.75	0.30	low
+MAG_05	Proteobacteria	0.99	0.47	high
+MAG_06	Bacteroidetes	0.78	0.15	high
+MAG_07	Proteobacteria	0.99	0.20	high
+MAG_08	Bacteroidetes	0.60	0.27	low
+MAG_09	Proteobacteria	0.55	0.20	low
+MAG_10	Proteobacteria	0.75	0.39	low
