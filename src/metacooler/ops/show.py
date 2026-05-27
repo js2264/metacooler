@@ -28,7 +28,7 @@ def show(
     transform: Literal["log1p", "none"] = "log1p",
     cmap: str = "YlOrRd",
     out: str | Path | None = None,
-    dpi: int = 150,
+    dpi: int = 500,
 ) -> None:
     """Render a contact map heatmap.
 

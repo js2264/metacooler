@@ -10,7 +10,20 @@ from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="show", help="Visualize contact maps.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.option(
+    "-f",
+    "--file",
+    type=MetaCoolURI(),
+    help="Path to a .metacool file or to a mmetacool entry",
+    required=True,
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Save to file instead of displaying.",
+    required=True,
+)
 @click.option(
     "--level",
     type=click.Choice(["bin", "contig", "genome"]),
@@ -43,16 +56,11 @@ from metacooler.cli.main import MetaCoolURI, cli
     show_default=True,
     help="Matplotlib colormap.",
 )
-@click.option(
-    "-o",
-    "--output",
-    type=click.Path(path_type=Path),
-    help="Save to file instead of displaying.",
-)
+
 @click.option(
     "--dpi",
     type=int,
-    default=150,
+    default=500,
     show_default=True,
     help="DPI for output image.",
 )
@@ -81,7 +89,7 @@ from metacooler.cli.main import MetaCoolURI, cli
     help="Column-dimension range (defaults to --range when omitted). Implies --level bin.",
 )
 def cmd_show(
-    metacool_path: str,
+    file: str,
     level: str,
     genome: str | None,
     genomes: tuple[str, str] | None,
@@ -104,7 +112,7 @@ def cmd_show(
         level = "bin"
 
     show(
-        uri=metacool_path,
+        uri=file,
         level=level,  # type: ignore
         genome=genome,
         genomes=genomes,
