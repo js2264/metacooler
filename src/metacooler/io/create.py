@@ -32,6 +32,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Literal
 
+
+_UNBINNED_SENTINELS: frozenset[str] = frozenset(
+    {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", ""}
+)
+
 logger = logging.getLogger("metacooler")
 
 
@@ -254,12 +259,6 @@ def _build_contig_order(
         return ordered2
 
     raise ValueError(f"Unknown ordering: {ordering!r}")
-
-
-# Sentinel values treated as __unbinned__ in contig-to-genome assignment tables.
-_UNBINNED_SENTINELS: frozenset[str] = frozenset(
-    {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", ""}
-)
 
 
 def _normalize_genome_name(v: str) -> str:
@@ -542,7 +541,15 @@ def _bin_pairs_chunk(
             "count": np.ones(len(bin1), dtype=np.int32),
         }
     )
-    return df.groupby(["bin1_id", "bin2_id"], as_index=False)["count"].sum()
+
+def _total_time_str(start_time: pd.Timestamp) -> str:
+    tottime = pd.Timestamp.now() - start_time
+    if tottime.total_seconds() >= 3600:
+        return f"{int(tottime.total_seconds() // 3600)}h:{int((tottime.total_seconds() % 3600) // 60)}m:{int(tottime.total_seconds() % 60)}s"
+    elif tottime.total_seconds() >= 60:
+        return f"{int(tottime.total_seconds() // 60)}m:{int(tottime.total_seconds() % 60)}s"
+    else:
+        return f"{tottime.total_seconds():.1f}s"
 
 
 def from_pairs(
@@ -598,7 +605,8 @@ def from_pairs(
         raise ValueError("pairs file path required")
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
-
+    timer = pd.Timestamp.now()
+    
     # --- Parse contig table ---
     contig_df: pd.DataFrame | None = None
     if isinstance(contig_genome_map, str | Path):
@@ -797,14 +805,9 @@ def from_pairs(
         nnz = len(f["pixels"]["count"])
         total = int(f["pixels"]["count"][:].sum())
     logger.info(
-        "Created %d bins from %d contigs in %d genomes. NNZ=%d, sum=%d.",
-        n_bins,
-        n_contigs,
-        n_genomes,
-        nnz,
-        total,
+        f"Created {n_bins} bins from {n_contigs} contigs in {n_genomes} genomes. NNZ={nnz}, sum={total}.",
     )
-    logger.info("Created metacool file: %s", uri)
+    logger.info(f"Created metacool file: {uri} ({_total_time_str(timer)} elapsed)")
 
 
 def from_cool(

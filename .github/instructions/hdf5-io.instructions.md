@@ -20,7 +20,7 @@ def _to_hdf5_data(arr):
 Use `schema.read_table(uri, group)` which handles byte→string decoding automatically.
 
 ## Schema constants
-- `METACOOLER_FORMAT = "MetaCooler::1.0"` — stored in `metacooler-format` attr
+- `METACOOLER_FORMAT = "HDF5::MetaCooler"` — stored in `metacooler-format` attr
 - `COOLER_FORMAT = "HDF5::Cooler"` — stored in `format` attr (cooler compat)
 - `MMETACOOLER_FORMAT = "HDF5::MMetaCooler"` — stored in `format` attr for collections
 
