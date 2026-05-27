@@ -431,6 +431,27 @@ def _tile_bins(
     return df.astype({"chrom": np.int32, "start": np.int32, "end": np.int32})
 
 
+def _count_pairs_header(path: Path) -> int:
+    """Count the number of ``#``-prefixed header lines at the top of a pairs file."""
+    import bz2 as _bz2
+    import gzip as _gzip
+
+    if path.suffix in (".gz", ".bgz"):
+        open_fn = _gzip.open
+    elif path.suffix == ".bz2":
+        open_fn = _bz2.open
+    else:
+        open_fn = open
+    n = 0
+    with open_fn(str(path), "rt") as fh:
+        for line in fh:
+            if line.startswith("#"):
+                n += 1
+            else:
+                break
+    return n
+
+
 def _stream_pairs(
     pairs_path: str | Path,
     c1: int = 2,
@@ -439,45 +460,58 @@ def _stream_pairs(
     p2: int = 5,
     chunksize: int = 1_000_000,
 ) -> Iterable[pd.DataFrame]:
-    """Stream a pairs file in chunks.
+    """Stream a pairs file in chunks via pyarrow for fast native gzip decoding.
 
-    Uses ``usecols`` to avoid parsing unneeded columns and reads position
-    columns directly as ``int64`` to skip the ``str → int`` conversion.
+    pyarrow uses multi-threaded C++ parsing and native gzip decompression,
+    which is significantly faster than pandas/gzip for large compressed files.
+    Comment lines (``#``) at the top of the file are counted once with a fast
+    sequential scan and then skipped by pyarrow's ``skip_rows`` option.
     """
+    import pyarrow as pa
+    import pyarrow.csv as pa_csv
+
     path = Path(pairs_path)
-    compression = "infer"
-    if path.suffix == ".gz":
-        compression = "gzip"
-    elif path.suffix == ".bz2":
-        compression = "bz2"
 
-    # Column indices are 1-based in CLI, convert to 0-based
-    usecols_0based = [c1 - 1, p1 - 1, c2 - 1, p2 - 1]
-    col_names = ["chrom1", "pos1", "chrom2", "pos2"]
+    # Count header comment lines; pyarrow has no native comment-skip support
+    n_header = _count_pairs_header(path)
 
-    # Per-column dtypes: chrom columns as str, position columns as int64.
-    # This avoids reading everything as str and converting afterwards.
-    col_dtypes = {
-        c1 - 1: str,
-        p1 - 1: np.int64,
-        c2 - 1: str,
-        p2 - 1: np.int64,
-    }
+    # Column indices are 1-based; convert to 0-based.
+    # pyarrow auto-generates column names "f0", "f1", ... when
+    # autogenerate_column_names=True, so we address columns by those names.
+    pa_col_names = [f"f{c1 - 1}", f"f{p1 - 1}", f"f{c2 - 1}", f"f{p2 - 1}"]
+    final_col_names = ["chrom1", "pos1", "chrom2", "pos2"]
 
-    reader = pd.read_csv(
-        path,
-        sep="\t",
-        header=None,
-        usecols=usecols_0based,
-        dtype=col_dtypes,
-        comment="#",
-        compression=compression,
-        chunksize=chunksize,
-        on_bad_lines="warn",
+    # Aim for approximately chunksize rows per batch; assume ~120 bytes/row.
+    block_size = max(chunksize * 120, 8 * 1024 * 1024)
+
+    read_opts = pa_csv.ReadOptions(
+        skip_rows=n_header,
+        autogenerate_column_names=True,
+        block_size=block_size,
     )
-    for chunk in reader:
-        chunk.columns = col_names
-        yield chunk
+    parse_opts = pa_csv.ParseOptions(delimiter="\t")
+    convert_opts = pa_csv.ConvertOptions(
+        include_columns=pa_col_names,
+        column_types={
+            f"f{c1 - 1}": pa.string(),
+            f"f{p1 - 1}": pa.int64(),
+            f"f{c2 - 1}": pa.string(),
+            f"f{p2 - 1}": pa.int64(),
+        },
+    )
+
+    # pa.input_stream auto-decompresses .gz/.bgz via native C++ gzip
+    src = pa.input_stream(str(path))
+    reader = pa_csv.open_csv(
+        src,
+        read_options=read_opts,
+        parse_options=parse_opts,
+        convert_options=convert_opts,
+    )
+    for batch in reader:
+        df = batch.to_pandas()
+        df.columns = final_col_names
+        yield df
 
 
 def _bin_pairs_chunk(
@@ -581,8 +615,8 @@ def from_pairs(
     fasta: str | Path | None = None,
     assembly_name: str | None = None,
     contig_ordering: Literal[
-        "genome-then-alpha", "genome-then-length", "fasta", "alpha", "custom"
-    ] = "genome-then-alpha",
+        "genome-then-length", "genome-then-alpha", "fasta", "alpha", "custom"
+    ] = "genome-then-length",
     custom_order: list[str] | None = None,
     drop_unassigned: bool = False,
     binsize: int | None = None,
@@ -793,13 +827,40 @@ def from_pairs(
                 if _result is not None and not _result.empty:
                     yield _result
 
+    def pixel_stream_sorted():
+        """Collect all per-chunk pixels, sort globally in RAM, yield sorted sub-chunks.
+
+        Accumulates the aggregated-per-chunk pixel DataFrames from
+        ``pixel_stream()``, concatenates them, performs a single global
+        groupby-sum + sort, and yields the result in write-friendly
+        sub-chunks.  This avoids cooler's temp-file external sort
+        (``ordered=False``) while still producing a correctly sorted,
+        duplicate-free pixel table for ``ordered=True``.
+        """
+        _WRITE_CHUNK = 5_000_000  # pixels per HDF5 append
+
+        frames = list(pixel_stream())
+        if not frames:
+            return
+
+        logger.info("Sorting pixels in memory...")
+        all_pixels = pd.concat(frames, ignore_index=True)
+        del frames
+        all_pixels = all_pixels.groupby(
+            ["bin1_id", "bin2_id"], sort=True, as_index=False
+        )["count"].sum()
+        logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
+
+        for _lo in range(0, len(all_pixels), _WRITE_CHUNK):
+            yield all_pixels.iloc[_lo : _lo + _WRITE_CHUNK]
+
     # --- Create the cooler file ---
     logger.info(f"Starting to create cooler file at {uri}...")
     cooler.create_cooler(
         str(uri),
         bins=bins_df,
-        pixels=pixel_stream(),
-        ordered=False,
+        pixels=pixel_stream_sorted(),
+        ordered=True,
         symmetric_upper=True,
         assembly=assembly_name,
         metadata=metadata or {},
@@ -1057,14 +1118,29 @@ def from_cool(
         f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
     )
 
+    def _remap_pixel_stream_sorted():
+        """Collect, globally sort, and dedup remapped pixel chunks in RAM."""
+        _WRITE_CHUNK = 5_000_000
+        frames = list(_remap_pixel_stream())
+        if not frames:
+            return
+        logger.info("Sorting remapped pixels in memory...")
+        all_pixels = pd.concat(frames, ignore_index=True)
+        del frames
+        all_pixels = all_pixels.groupby(
+            ["bin1_id", "bin2_id"], sort=True, as_index=False
+        )["count"].sum()
+        logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
+        for _lo in range(0, len(all_pixels), _WRITE_CHUNK):
+            yield all_pixels.iloc[_lo : _lo + _WRITE_CHUNK]
+
     # Create cooler file from remapped bins and pixel stream.
-    # Use ordered=False so cooler performs an external sort, avoiding the need
-    # to materialise the full pixel table in memory before writing.
+    # Pixels are sorted in RAM to avoid cooler's temp-file external sort.
     cooler.create_cooler(
         str(output_path),
         bins=bins_remapped,
-        pixels=_remap_pixel_stream(),
-        ordered=False,
+        pixels=_remap_pixel_stream_sorted(),
+        ordered=True,
         symmetric_upper=True,
         assembly=assembly_name or "imported",
         metadata=metadata or {},

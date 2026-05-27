@@ -55,5 +55,12 @@ class TestShow:
 
     def test_show_range1_range2_inter_genome(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
-        show(tiny_metacooler, level="bin", range1="MAG_1", range2="MAG_2", out=out, dpi=50)
+        show(
+            tiny_metacooler,
+            level="bin",
+            range1="MAG_1",
+            range2="MAG_2",
+            out=out,
+            dpi=50,
+        )
         assert out.exists()

@@ -35,6 +35,7 @@ dependencies = [
     "click>=8.1",
     "biopython>=1.87",
     "pyyaml>=6.0",
+    "pyarrow>=13",
 ]
 
 [project.optional-dependencies]
