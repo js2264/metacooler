@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 from metacooler.api import MetaCooler
-from metacooler.schema import is_metacooler, METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
+from metacooler.schema import (
+    METACOOLER_FORMAT,
+    METACOOLER_FORMAT_VERSION,
+    is_metacooler,
+)
 
 
 class TestMetaCooler:

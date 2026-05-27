@@ -13,8 +13,6 @@ import numpy as np
 import pandas as pd
 
 from metacooler.schema import (
-    METACOOLER_FORMAT,
-    METACOOLER_FORMAT_URL,
     read_table,
     validate,
 )
@@ -154,7 +152,15 @@ class MetaCooler:
         # Remove metadata field if present (accessed via .metadata property)
         base.pop("metadata", None)
         # Cast numeric fields to int (cooler may return numpy scalars or strings)
-        for _key in ("bin-size", "format-version", "nbins", "nnz", "sum", "ngenomes", "ncontigs"):
+        for _key in (
+            "bin-size",
+            "format-version",
+            "nbins",
+            "nnz",
+            "sum",
+            "ngenomes",
+            "ncontigs",
+        ):
             if _key in base:
                 with contextlib.suppress(ValueError, TypeError):
                     base[_key] = int(base[_key])
@@ -170,7 +176,7 @@ class MetaCooler:
         if isinstance(meta, dict):
             return meta
         return {}
-    
+
     # ------------------------------------------------------------------
     # metacooler-specific properties
     # ------------------------------------------------------------------
@@ -319,10 +325,14 @@ class MetaCooler:
         The output is a regular cooler file where the "chromosomes" are
         either contigs or genomes, making it immediately compatible with
         the cooler/cooltools/HiGlass ecosystem.
+
+        Pixels are streamed chunk-by-chunk; the full contact matrix is never
+        materialised in memory.  ``cooler`` performs an external sort to merge
+        cross-chunk duplicates.
         """
         import cooler as clr
 
-        from metacooler.ops.aggregate import _aggregate_sparse
+        from metacooler.ops.aggregate import _aggregate_pixel_stream
 
         path = Path(path)
 
@@ -346,23 +356,11 @@ class MetaCooler:
             }
         )
 
-        agg = _aggregate_sparse(self, level=level)
-        coo = agg.tocoo()
-        pixels = pd.DataFrame(
-            {
-                "bin1_id": coo.row.astype(np.int64),
-                "bin2_id": coo.col.astype(np.int64),
-                "count": coo.data.astype(np.int32),
-            }
-        )
-        # Keep only upper triangle
-        pixels = pixels[pixels["bin1_id"] <= pixels["bin2_id"]]
-
         clr.create_cooler(
             str(path),
             bins=bins,
-            pixels=pixels,
-            ordered=True,
+            pixels=_aggregate_pixel_stream(self, level=level),
+            ordered=False,
             symmetric_upper=True,
         )
 

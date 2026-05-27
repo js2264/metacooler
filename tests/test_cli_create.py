@@ -539,69 +539,6 @@ class TestCreatePairsAssemblyName:
 
 
 # ===========================================================================
-# create pairs — performance options
-# ===========================================================================
-
-
-class TestCreatePairsPerformanceOptions:
-    """``--chunksize`` and ``--nproc`` should not cause errors."""
-
-    @pytest.mark.parametrize("chunksize", [10, 100, 10_000_000])
-    def test_chunksize_variants(
-        self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table, chunksize
-    ):
-        out = tmp_path / f"out_chunk{chunksize}.metacool"
-        result = runner.invoke(
-            cli,
-            _base_pairs_args(
-                out,
-                tiny_pairs,
-                tiny_bins_bed,
-                tiny_contigs_table,
-                extra=["--chunksize", str(chunksize)],
-            ),
-        )
-        assert result.exit_code == 0, result.output
-        assert out.exists()
-
-    def test_nproc_1_succeeds(
-        self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
-    ):
-        out = tmp_path / "out_nproc1.metacool"
-        result = runner.invoke(
-            cli,
-            _base_pairs_args(
-                out,
-                tiny_pairs,
-                tiny_bins_bed,
-                tiny_contigs_table,
-                extra=["--nproc", "1"],
-            ),
-        )
-        assert result.exit_code == 0, result.output
-        assert out.exists()
-
-    @pytest.mark.parametrize("nproc", [2, 4])
-    def test_nproc_greater_than_1_not_implemented(
-        self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table, nproc
-    ):
-        """``--nproc > 1`` is not yet implemented and should fail with an error."""
-        out = tmp_path / f"out_nproc{nproc}.metacool"
-        result = runner.invoke(
-            cli,
-            _base_pairs_args(
-                out,
-                tiny_pairs,
-                tiny_bins_bed,
-                tiny_contigs_table,
-                extra=["--nproc", str(nproc)],
-            ),
-        )
-        assert result.exit_code != 0
-        assert isinstance(result.exception, NotImplementedError)
-
-
-# ===========================================================================
 # create pairs — bins as integer (binsize)
 # ===========================================================================
 

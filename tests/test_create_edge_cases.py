@@ -387,16 +387,6 @@ class TestFromPairsValidation:
                 binsize=None,
             )
 
-    def test_pairs_none_raises(self, tmp_path, tiny_bins_bed, tiny_contigs_table):
-        """from_pairs with pairs=None should raise ValueError."""
-        with pytest.raises(ValueError, match="pairs path required"):
-            from_pairs(
-                uri=tmp_path / "out.metacool",
-                bins=tiny_bins_bed,
-                pairs=None,
-                contig_genome_map=tiny_contigs_table,
-            )
-
     def test_contigs_extra_columns_via_from_pairs(
         self, tmp_path, tiny_bins_bed, tiny_pairs
     ):

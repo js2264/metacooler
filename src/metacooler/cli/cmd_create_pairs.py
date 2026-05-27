@@ -67,16 +67,9 @@ from metacooler.cli.cmd_metadata import _stringify_values
 @click.option(
     "--chunksize",
     type=int,
-    default=10_000_000,
+    default=1_000_000,
     show_default=True,
     help="Number of pairs to process per chunk.",
-)
-@click.option(
-    "--nproc",
-    type=int,
-    default=1,
-    show_default=True,
-    help="Number of parallel workers.",
 )
 def cmd_create_pairs(
     output: Path,
@@ -90,7 +83,6 @@ def cmd_create_pairs(
     contig_order: str,
     drop_unassigned: bool,
     chunksize: int,
-    nproc: int,
     force: bool,
     verbose: bool,
     metadata: Path | None,
@@ -149,6 +141,5 @@ def cmd_create_pairs(
         binsize=binsize,
         genomes_table=genomes_table,
         chunksize=chunksize,
-        nproc=nproc,
         metadata=meta,
     )

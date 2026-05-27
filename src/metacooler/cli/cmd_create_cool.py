@@ -50,6 +50,13 @@ from metacooler.cli.cmd_metadata import _stringify_values
     is_flag=True,
     help="Drop contigs not present in the contig table instead of collecting them under __unbinned__.",
 )
+@click.option(
+    "--nproc",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of parallel reader threads for pixel remapping.",
+)
 def cmd_create_cool(
     cool_path: Path,
     output: Path,
@@ -59,6 +66,7 @@ def cmd_create_cool(
     contig_order: str,
     assembly_name: str | None,
     drop_unassigned: bool,
+    nproc: int,
     metadata: Path | None,
     force: bool,
     verbose: bool,
@@ -109,4 +117,5 @@ def cmd_create_cool(
         assembly_name=assembly_name,
         drop_unassigned=drop_unassigned,
         metadata=meta,
+        nproc=nproc,
     )

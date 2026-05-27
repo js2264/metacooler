@@ -1,7 +1,6 @@
 """CLI tests for metacooler."""
 
 from __future__ import annotations
-from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
 
 import json
 import subprocess
@@ -10,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from metacooler.cli.main import cli
+from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
 
 
 @pytest.fixture

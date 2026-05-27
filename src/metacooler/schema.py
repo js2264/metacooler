@@ -1,12 +1,12 @@
 """HDF5 format constants, dtypes, and validators for metacooler."""
 
 from __future__ import annotations
-from typing import Literal
 
 from pathlib import Path
+from typing import Literal
 
-import h5py
 import cooler
+import h5py
 import numpy as np
 import pandas as pd
 
@@ -16,7 +16,9 @@ METACOOLER_FORMAT_URL = "https://github.com/js2264/metacooler"
 MMETACOOLER_FORMAT = "HDF5::MMetaCooler"
 MMETACOOLER_FORMAT_VERSION = 1
 COOLER_FORMAT: Literal["HDF5::Cooler"] = cooler.create._constants.MAGIC
-COOLER_FORMAT_URL = "https://github.com/open2c/cooler"
+COOLER_FORMAT_URL: Literal["https://github.com/open2c/cooler"] = (
+    cooler.create._constants.URL
+)
 
 # Dense matrix size guard: refuse to allocate matrices larger than this
 DENSE_MATRIX_BIN_LIMIT = 10_000

@@ -25,7 +25,11 @@ from click.testing import CliRunner
 
 from metacooler.cli.main import cli
 from metacooler.io.mmetacool import list_entries
-from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION, COOLER_FORMAT
+from metacooler.schema import (
+    COOLER_FORMAT,
+    METACOOLER_FORMAT,
+    METACOOLER_FORMAT_VERSION,
+)
 
 # ---------------------------------------------------------------------------
 # Constants – expected values derived from running cli_tests.sh

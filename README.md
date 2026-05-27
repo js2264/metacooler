@@ -93,8 +93,7 @@ metacooler show output.metacool --level genome --out heatmap.png
     │    --assembly-name        Name for this assembly / metagenome.               │
     │    --drop-unassigned      Drop contigs not assigned to any genome.           │
     │    --chunksize            Number of pairs to process per chunk. [default:    │
-    │                           10000000]                                          │
-    │    --nproc                Number of parallel workers. [default: 1]           │
+    │                           1000000]                                           │
     │    --help             -h  Show this message and exit.                        │
     ╰──────────────────────────────────────────────────────────────────────────────╯
 

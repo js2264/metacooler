@@ -5,7 +5,7 @@ description: >
   more than one layer (io + ops + cli), auditing a new feature end-to-end, or
   performing a release readiness check. For schema-only and HDF5 write reviews,
   use metacooler-hdf5-reviewer.agent.md instead.
-tools: [vscode/getProjectSetupInfo, read, edit/createFile, search, web]
+tools: [vscode/extensions, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/resolveMemoryFileUri, vscode/runCommand, vscode/switchAgent, vscode/vscodeAPI, vscode/askQuestions, vscode/toolSearch, execute/getTerminalOutput, execute/killTerminal, execute/sendToTerminal, execute/createAndRunTask, execute/runNotebookCell, execute/runInTerminal, execute/runTests, execute/testFailure, read/terminalSelection, read/terminalLastCommand, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/readNotebookCellOutput, agent/runSubagent, edit/createDirectory, edit/createFile, edit/editFiles, search/codebase, search/fileSearch, search/listDirectory, search/textSearch, search/usages, web/fetch, web/githubRepo, web/githubTextSearch]
 ---
 
 # metacooler — Code Review Agent

@@ -13,13 +13,14 @@ from scipy import sparse
 from metacooler.api import MetaCooler
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from typing import Literal
 
 
 def _aggregate_sparse(
     mc: MetaCooler,
     level: Literal["contig", "genome"] = "contig",
-    chunksize: int = 10_000_000,
+    chunksize: int = 1_000_000,
 ) -> sparse.csr_matrix:
     """Return the aggregated contact matrix as a sparse CSR matrix.
 
@@ -75,12 +76,71 @@ def _aggregate_sparse(
     return agg
 
 
+def _aggregate_pixel_stream(
+    mc: MetaCooler,
+    level: Literal["contig", "genome"] = "contig",
+    chunksize: int = 1_000_000,
+) -> Generator[pd.DataFrame, None, None]:
+    """Yield aggregated pixel chunks without building a sparse matrix.
+
+    Maps bin IDs to contig or genome IDs, enforces the upper triangle, and
+    aggregates within each chunk.  Cross-chunk duplicates are resolved by the
+    caller (pass to ``cooler.create_cooler`` with ``ordered=False``).
+
+    Args:
+        mc: Open MetaCooler instance.
+        level: Aggregation level — ``"contig"`` or ``"genome"``.
+        chunksize: Number of pixels to process per chunk.
+
+    Yields:
+        DataFrames with columns ``bin1_id``, ``bin2_id``, ``count``
+        (upper-triangle only, aggregated within each chunk).
+    """
+    n_contigs = len(mc.contigs)
+    n_genomes = len(mc.genomes)
+
+    if level == "contig":
+        bins = mc.bins()[["chrom"]]
+        mapping = bins["chrom"].cat.codes.values.copy()
+    elif level == "genome":
+        contigs = mc.contigs
+        bins = mc.bins()[["chrom"]]
+        bin_to_contig = bins["chrom"].cat.codes.values
+        mapping = contigs["genome_id"].values[bin_to_contig].copy()
+    else:
+        raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+
+    del n_contigs, n_genomes  # not needed here
+
+    n_pix = len(mc._clr.pixels())
+    for i in range(0, n_pix, chunksize):
+        chunk = mc._clr.pixels()[i : i + chunksize]
+        c1 = mapping[chunk["bin1_id"].values].copy()
+        c2 = mapping[chunk["bin2_id"].values].copy()
+        vals = chunk["count"].values
+
+        # Enforce upper triangle
+        swap = c1 > c2
+        c1[swap], c2[swap] = c2[swap], c1[swap]
+
+        df = pd.DataFrame(
+            {
+                "bin1_id": c1.astype(np.int64),
+                "bin2_id": c2.astype(np.int64),
+                "count": vals.astype(np.int32),
+            }
+        )
+        # Aggregate within-chunk duplicates to reduce cooler's external sort load
+        df = df.groupby(["bin1_id", "bin2_id"], as_index=False)["count"].sum()
+        yield df[["bin1_id", "bin2_id", "count"]]
+
+
 def aggregate(
     uri: str | Path,
     output: str | Path,
     level: Literal["contig", "genome"] = "contig",
     count_col: str = "count",
-    chunksize: int = 10_000_000,
+    chunksize: int = 1_000_000,
 ) -> None:
     """Aggregate a metacool file to contig or genome level.
 

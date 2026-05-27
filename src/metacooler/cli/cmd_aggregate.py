@@ -36,7 +36,7 @@ from metacooler.cli.main import MetaCoolURI, cli
 @click.option(
     "--chunksize",
     type=int,
-    default=10_000_000,
+    default=1_000_000,
     show_default=True,
     help="Pixels per chunk.",
 )
