@@ -439,7 +439,11 @@ def _stream_pairs(
     p2: int = 5,
     chunksize: int = 1_000_000,
 ) -> Iterable[pd.DataFrame]:
-    """Stream a pairs file in chunks."""
+    """Stream a pairs file in chunks.
+
+    Uses ``usecols`` to avoid parsing unneeded columns and reads position
+    columns directly as ``int64`` to skip the ``str → int`` conversion.
+    """
     path = Path(pairs_path)
     compression = "infer"
     if path.suffix == ".gz":
@@ -451,22 +455,28 @@ def _stream_pairs(
     usecols_0based = [c1 - 1, p1 - 1, c2 - 1, p2 - 1]
     col_names = ["chrom1", "pos1", "chrom2", "pos2"]
 
+    # Per-column dtypes: chrom columns as str, position columns as int64.
+    # This avoids reading everything as str and converting afterwards.
+    col_dtypes = {
+        c1 - 1: str,
+        p1 - 1: np.int64,
+        c2 - 1: str,
+        p2 - 1: np.int64,
+    }
+
     reader = pd.read_csv(
         path,
         sep="\t",
         header=None,
-        dtype=str,
+        usecols=usecols_0based,
+        dtype=col_dtypes,
         comment="#",
         compression=compression,
         chunksize=chunksize,
         on_bad_lines="warn",
     )
     for chunk in reader:
-        # Select only the columns we need
-        chunk = chunk.iloc[:, usecols_0based].copy()
         chunk.columns = col_names
-        chunk["pos1"] = chunk["pos1"].astype(np.int64)
-        chunk["pos2"] = chunk["pos2"].astype(np.int64)
         yield chunk
 
 
@@ -496,17 +506,25 @@ def _bin_pairs_chunk(
         Aggregated pixel DataFrame or ``None`` if the chunk is empty after
         filtering.
     """
-    chunk = chunk[
-        chunk["chrom1"].isin(contig_name_to_id)
-        & chunk["chrom2"].isin(contig_name_to_id)
-    ]
-    if chunk.empty:
+    # Use pd.Categorical for fast contig-name → integer-ID encoding.
+    # This mirrors cooler's _sanitize_records approach: unrecognised contigs
+    # receive code == -1 and are dropped in one vectorised pass.
+    contig_list = list(contig_name_to_id.keys())
+    c1_cat = pd.Categorical(chunk["chrom1"], categories=contig_list, ordered=True)
+    c2_cat = pd.Categorical(chunk["chrom2"], categories=contig_list, ordered=True)
+    c1_codes = c1_cat.codes  # int8/int16 ndarray, -1 for unknown
+    c2_codes = c2_cat.codes
+
+    # Drop pairs referencing unknown contigs in one boolean mask
+    valid = (c1_codes >= 0) & (c2_codes >= 0)
+    if not valid.any():
         return None
 
-    c1 = chunk["chrom1"].map(contig_name_to_id).values.astype(np.int32)
-    c2 = chunk["chrom2"].map(contig_name_to_id).values.astype(np.int32)
-    p1 = np.maximum(chunk["pos1"].values.astype(np.int64) - 1, 0)
-    p2 = np.maximum(chunk["pos2"].values.astype(np.int64) - 1, 0)
+    c1 = c1_codes[valid].astype(np.int32)
+    c2 = c2_codes[valid].astype(np.int32)
+    # Convert 1-based pairs positions to 0-based, clamp at 0
+    p1 = np.maximum(chunk["pos1"].values[valid] - 1, 0)
+    p2 = np.maximum(chunk["pos2"].values[valid] - 1, 0)
 
     if binsize is not None:
         # Fixed-size bins: direct arithmetic
@@ -541,6 +559,8 @@ def _bin_pairs_chunk(
             "count": np.ones(len(bin1), dtype=np.int32),
         }
     )
+    return df.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"].sum()
+
 
 def _total_time_str(start_time: pd.Timestamp) -> str:
     tottime = pd.Timestamp.now() - start_time
@@ -606,7 +626,7 @@ def from_pairs(
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
     timer = pd.Timestamp.now()
-    
+
     # --- Parse contig table ---
     contig_df: pd.DataFrame | None = None
     if isinstance(contig_genome_map, str | Path):
@@ -779,7 +799,7 @@ def from_pairs(
         str(uri),
         bins=bins_df,
         pixels=pixel_stream(),
-        ordered=True,
+        ordered=False,
         symmetric_upper=True,
         assembly=assembly_name,
         metadata=metadata or {},

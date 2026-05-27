@@ -22,6 +22,11 @@ metacooler dump -t bins assembly_1_rep1_1kb_dropped.metacool > dump_bins_after_d
 git diff --no-index --compact-summary dump_bins_before_drop.tsv dump_bins_after_drop.tsv || true
 md5sum dump_bins_before_drop.tsv dump_bins_after_drop.tsv
 
+metacooler create pairs --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv --pairs ../contacts_1_rep1.pairs.gz --bins 1000 --contig-order fasta --output assembly_1_rep1_1kb_same-order.metacool
+cooler dump -t pixels ../assembly_1_rep1_1kb.cool > dump_pixels_cool
+metacooler dump -t pixels assembly_1_rep1_1kb_same-order.metacool > dump_pixels_metacool
+md5sum dump_pixels_cool dump_pixels_metacool
+
 # ================================================================================
 ## Create metacool from cooler
 # ================================================================================

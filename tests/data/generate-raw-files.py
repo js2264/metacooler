@@ -37,26 +37,34 @@ binsize = 1000
 n_pairs = 50000
 
 # Generate contigs
-contigs: list = []
+# Collect (length, mag) without baking the MAG index into the name,
+# then shuffle before assigning opaque sequential names so alphabetical
+# sort of contig names reveals no MAG grouping.
 mag_names: list[str] = [f"MAG_{i:02d}" for i in range(1, n_mags + 1)]
+_raw: list = []
 
 for mag_idx, n_contigs in enumerate(iterable=contigs_per_mag):
-    for cidx in range(n_contigs):
+    for _ in range(n_contigs):
         length = int(np.random.lognormal(np.log(15000), 0.8))
         length = max(min_len, min(max_len, length))
         length = (length // binsize) * binsize
         if length < min_len:
             length = min_len
-        name = f"contig_{mag_idx}_{cidx}"
-        contigs.append((name, length, mag_names[mag_idx]))
+        _raw.append((length, mag_names[mag_idx]))
 
-for i in range(n_unbinned):
+for _ in range(n_unbinned):
     length = int(np.random.lognormal(np.log(8000), 0.6))
     length = max(min_len, min(max_len, length))
     length = (length // binsize) * binsize
     if length < min_len:
         length = min_len
-    contigs.append((f"contig_unbinned_{i}", length, "__unbinned__"))
+    _raw.append((length, "__unbinned__"))
+
+# Shuffle before naming so sequential names don't encode MAG membership
+np.random.shuffle(_raw)
+contigs: list = [
+    (f"contig_1_{i:03d}", length, mag) for i, (length, mag) in enumerate(_raw)
+]
 
 # Write FASTA
 with open("assembly_1.fa", "w") as f:
@@ -87,11 +95,14 @@ with open("contigs_table_1.tsv", "w") as f:
         )
 
 # Write MAG table
+# Shuffle MAG order so they are not listed sequentially
+shuffled_mag_names_1 = list(mag_names)
+np.random.shuffle(shuffled_mag_names_1)
 with open("mag_table_1.tsv", "w") as f:
     # columns should be with header: genome_name, phylum, completeness, contamination, quality
     # Random values for phylum, completeness, contamination, quality
     f.write("genome_name\tphylum\tcompleteness\tcontamination\tquality\n")
-    for name in mag_names:
+    for name in shuffled_mag_names_1:
         phylum = np.random.choice(["Proteobacteria", "Bacteroidetes", "Firmicutes"])
         completeness = np.random.uniform(0.5, 1.0)
         contamination: int | float = np.random.uniform(low=0, high=0.5)
@@ -156,26 +167,29 @@ binsize = 1000
 n_pairs = 50000
 
 # Generate contigs
-contigs = []
 mag_names = [f"MAG_{i:02d}" for i in range(1, n_mags + 1)]
+_raw = []
 
 for mag_idx, n_contigs in enumerate(contigs_per_mag):
-    for cidx in range(n_contigs):
+    for _ in range(n_contigs):
         length = int(np.random.lognormal(np.log(15000), 0.8))
         length = max(min_len, min(max_len, length))
         length = (length // binsize) * binsize
         if length < min_len:
             length = min_len
-        name = f"contig_{mag_idx}_{cidx}"
-        contigs.append((name, length, mag_names[mag_idx]))
+        _raw.append((length, mag_names[mag_idx]))
 
-for i in range(n_unbinned):
+for _ in range(n_unbinned):
     length = int(np.random.lognormal(np.log(8000), 0.6))
     length = max(min_len, min(max_len, length))
     length = (length // binsize) * binsize
     if length < min_len:
         length = min_len
-    contigs.append((f"contig_unbinned_{i}", length, "__unbinned__"))
+    _raw.append((length, "__unbinned__"))
+
+# Shuffle before naming so sequential names don't encode MAG membership
+np.random.shuffle(_raw)
+contigs = [(f"contig_2_{i:03d}", length, mag) for i, (length, mag) in enumerate(_raw)]
 
 # Write FASTA
 with open("assembly_2.fa", "w") as f:
@@ -203,9 +217,12 @@ with open("contigs_table_2.tsv", "w") as f:
         )
 
 # Write MAG table
+# Shuffle MAG order so they are not listed sequentially
+shuffled_mag_names_2 = list(mag_names)
+np.random.shuffle(shuffled_mag_names_2)
 with open("mag_table_2.tsv", "w") as f:
     f.write("genome_name\tphylum\tcompleteness\tcontamination\tquality\n")
-    for name in mag_names:
+    for name in shuffled_mag_names_2:
         phylum = np.random.choice(["Proteobacteria", "Bacteroidetes", "Firmicutes"])
         completeness = np.random.uniform(0.5, 1.0)
         contamination = np.random.uniform(0, 0.5)

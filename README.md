@@ -106,14 +106,14 @@ metacooler show output.metacool --level genome --out heatmap.png
 - Otherwise an arbitrary resolution can be used by specifying `--bins 1000` for 1kb bins, etc.
 
 ``` txt
-contig_0_0  0   5
-contig_0_0  5   781
-contig_0_0  781 807
-contig_0_0  807 827
-contig_0_0  827 1073
+contig_1_000    0   721
+contig_1_000    721 747
+contig_1_000    747 767
+contig_1_000    767 1013
+contig_1_000    1013    1099
 ...
-contig_unbinned_4   5811    5929
-contig_unbinned_4   5929    6000
+contig_1_043    8869    8959
+contig_1_043    8959    9000
 ```
 
 **Contig-genome map**: TSV file mapping contigs to genomes (MAGs). This is used to populate the `contigs` table and map contigs to genomes. Must be either:
@@ -123,13 +123,13 @@ contig_unbinned_4   5929    6000
 
 ``` txt
 contig_name genome_name gc_content  coverage
-contig_0_0  MAG_01  0.47    71.70
-contig_0_1  MAG_01  0.59    10.00
-contig_0_2  MAG_01  0.54    66.47
-contig_1_0  MAG_02  0.45    87.98
+contig_1_000    MAG_04  0.51    99.40
+contig_1_001    MAG_02  0.59    75.43
+contig_1_002    MAG_04  0.45    8.81
+contig_1_003    __unbinned__    0.52    8.28
 ...
-contig_unbinned_3   __unbinned__    0.44    74.74
-contig_unbinned_4       0.52    87.36
+contig_1_042    MAG_05  0.52    18.45
+contig_1_043    MAG_05  0.42    97.78
 ```
 
 **Pairs file**: [4DN-compliant](https://github.com/4dn-dcic/pairix/blob/master/pairs_format_specification.md) tab-delimited file with `readID`, `chrom1`, `pos1`, `chrom2`, `pos2`, `strand1`, `strand2` columns defining the Hi-C contacts. Can be generated from raw FASTQ reads with [`metator pipeline`](https://github.com/koszullab/metator).
@@ -139,17 +139,17 @@ contig_unbinned_4       0.52    87.36
 #sorted: chr1-chr2-pos1-pos2
 #shape: upper triangle
 #genome_assembly: synthetic_assembly_1
-#chromsize: contig_0_0 22000
-#chromsize: contig_0_1 13000
-#chromsize: contig_0_2 25000
-#chromsize: contig_1_0 50000
+#chromsize: contig_1_000 18000
+#chromsize: contig_1_001 12000
+#chromsize: contig_1_002 3000
+#chromsize: contig_1_003 6000
 ...
 #columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2
-read_0  contig_7_0  5211    contig_7_0  238 +   +
-read_1  contig_8_4  848 contig_8_4  4852    +   +
-read_2  contig_5_2  3170    contig_5_2  3653    +   +
-read_3  contig_9_2  2789    contig_9_1  2731    +   +
-read_4  contig_unbinned_3   3873    contig_unbinned_0   4709    +   +
+read_0  contig_1_007    41718   contig_1_006    6634    +   +
+read_1  contig_1_037    2208    contig_1_000    12785   +   +
+read_2  contig_1_003    5884    contig_1_028    2231    +   +
+read_3  contig_1_014    3164    contig_1_021    47093   +   +
+read_4  contig_1_008    138 contig_1_038    6042    +   +
 ...
 ```
 
@@ -157,13 +157,13 @@ read_4  contig_unbinned_3   3873    contig_unbinned_0   4709    +   +
 
 ``` txt
 genome_name phylum  completeness    contamination   quality
-MAG_01  Firmicutes  0.85    0.27    medium
-MAG_02  Firmicutes  0.74    0.11    medium
-MAG_03  Proteobacteria  0.96    0.29    low
-MAG_04  Bacteroidetes   0.75    0.30    low
+MAG_02  Firmicutes  0.92    0.14    low
+MAG_03  Proteobacteria  0.73    0.03    low
+MAG_01  Bacteroidetes   0.63    0.10    high
+MAG_04  Firmicutes  0.99    0.24    medium
 ...
-MAG_09  Proteobacteria  0.55    0.20    low
-MAG_10  Proteobacteria  0.75    0.39    low
+MAG_09  Proteobacteria  0.95    0.04    low
+MAG_05  Proteobacteria  0.89    0.27    high
 ```
 
 *\[Optional\]* **Metadata file**: a YAML/JSON file with additional metadata.

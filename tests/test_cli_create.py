@@ -6,6 +6,7 @@ Covers:
 - ``--genomes`` validation: valid table, missing ``genome_name`` column, no header
 - ``--assembly-name`` stored in HDF5 attrs
 - ``--chunksize`` / ``--nproc`` do not cause errors (pairs only)
+- Pixel correctness: ``create pairs --contig-order fasta`` matches ``cooler cload pairs``
 """
 
 from __future__ import annotations
@@ -820,3 +821,71 @@ class TestCreateCoolGenomesTable:
             ),
         )
         assert result.exit_code != 0
+
+
+# ===========================================================================
+# create pairs — pixel correctness vs. cooler cload pairs
+# ===========================================================================
+
+
+class TestCreatePairsPixelCorrectness:
+    """``create pairs --contig-order fasta`` must produce an identical pixel table
+    to ``cooler cload pairs`` when using the same pairs file and bin size.
+
+    The pre-built ``assembly_1_rep1_1kb.cool`` in ``tests/data/`` was generated
+    with::
+
+        cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 \\
+            assembly_1.chrom.sizes:1000 contacts_1_rep1.pairs.gz \\
+            assembly_1_rep1_1kb.cool
+
+    Using ``--contig-order fasta`` preserves the chromsize order from the pairs
+    header, which matches ``assembly_1.chrom.sizes``, so both files must have
+    identical bin numbering and therefore identical pixel tables.
+    """
+
+    DATA = Path("tests/data")
+
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
+
+    def test_pixels_match_cooler_cload(self, runner, tmp_path):
+        """``create pairs --contig-order fasta --bins 1000`` pixel table equals
+        the pre-built cooler file pixel-for-pixel."""
+        import cooler
+        import pandas as pd
+
+        out = tmp_path / "fasta_order.metacool"
+        result = runner.invoke(
+            cli,
+            [
+                "create",
+                "pairs",
+                "--output",
+                str(out),
+                "--pairs",
+                str(self.DATA / "contacts_1_rep1.pairs.gz"),
+                "--bins",
+                "1000",
+                "--contigs",
+                str(self.DATA / "contigs_table_1.tsv"),
+                "--genomes",
+                str(self.DATA / "mag_table_1.tsv"),
+                "--contig-order",
+                "fasta",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+
+        pix_cool = cooler.Cooler(str(self.DATA / "assembly_1_rep1_1kb.cool")).pixels()[
+            :
+        ]
+        pix_meta = cooler.Cooler(str(out)).pixels()[:]
+
+        pd.testing.assert_frame_equal(
+            pix_cool.reset_index(drop=True),
+            pix_meta.reset_index(drop=True),
+            check_like=False,
+        )
