@@ -116,11 +116,6 @@ def zoomify(
             len(entries),
             sorted(entries.keys(), key=int),
         )
-
-        # Create the mmetacool with resolution entries
-        # We use "resolutions/<binsize>" as the group structure
-        # but create_mmetacool puts them under /entries/<name>
-        # So we use the binsize as the entry name
         create_mmetacool(Path(output), entries)
 
     logger.info("Written multi-resolution mmetacool to %s", output)

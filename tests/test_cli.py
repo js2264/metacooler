@@ -151,7 +151,7 @@ class TestShow:
     def test_show_genome(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
         result = runner.invoke(
-            cli, ["show", "--level", "genome", "-o", str(out), str(tiny_metacooler)]
+            cli, ["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)]
         )
         assert result.exit_code == 0
         assert out.exists()
@@ -159,7 +159,7 @@ class TestShow:
     def test_show_contig(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
         result = runner.invoke(
-            cli, ["show", "--level", "contig", "-o", str(out), str(tiny_metacooler)]
+            cli, ["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)]
         )
         assert result.exit_code == 0
         assert out.exists()

@@ -1067,13 +1067,13 @@ class TestShowCLI:
 
     def test_show_genome_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_genome.png"
-        r = _run(["show", "--level", "genome", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
     def test_show_contig_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_contig.png"
-        r = _run(["show", "--level", "contig", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1089,6 +1089,7 @@ class TestShowCLI:
                 "MAG_1",
                 "-o",
                 str(out),
+                "-f",
                 str(tiny_metacooler),
             ]
         )
@@ -1097,7 +1098,7 @@ class TestShowCLI:
 
     def test_show_single_genome_view(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_intra.png"
-        r = _run(["show", "--genome", "MAG_1", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--genome", "MAG_1", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1111,6 +1112,7 @@ class TestShowCLI:
                 "MAG_2",
                 "-o",
                 str(out),
+                "-f",
                 str(tiny_metacooler),
             ]
         )
@@ -1119,22 +1121,22 @@ class TestShowCLI:
 
     def test_show_transform_none(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_raw.png"
-        r = _run(["show", "--transform", "none", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--transform", "none", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
 
     def test_show_custom_cmap(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_blues.png"
-        r = _run(["show", "--cmap", "Blues", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--cmap", "Blues", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
 
     def test_show_custom_dpi(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_dpi.png"
-        r = _run(["show", "--dpi", "72", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--dpi", "72", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
 
     def test_show_verbose(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_v.png"
-        r = _run(["show", "-v", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "-v", "-o", str(out), "-f", str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
 
     # --- failures ---
