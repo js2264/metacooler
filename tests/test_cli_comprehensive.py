@@ -25,6 +25,7 @@ from click.testing import CliRunner
 
 from metacooler.cli.main import cli
 from metacooler.io.mmetacool import list_entries
+from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION, COOLER_FORMAT
 
 # ---------------------------------------------------------------------------
 # Constants – expected values derived from running cli_tests.sh
@@ -38,7 +39,7 @@ A1_REP1_1KB_NCONTIGS = 44
 A1_REP1_1KB_NBINS = 661
 A1_REP1_1KB_NNZ = 21799
 A1_REP1_1KB_SUM = 50000
-A1_REP1_1KB_BINSIZE = "1000"
+A1_REP1_1KB_BINSIZE = 1000
 
 # assembly_1_rep2_1kb merged properties
 MERGED_NNZ = 36584
@@ -417,8 +418,8 @@ class TestCreatePairs:
             ],
         )
         data = json.loads(runner.invoke(cli, ["info", str(out)]).output)
-        assert data["format"] == "HDF5::MetaCooler"
-        assert data["format-version"] == "3"
+        assert data["format"] == METACOOLER_FORMAT
+        assert data["format-version"] == METACOOLER_FORMAT_VERSION
 
     def test_create_pairs_no_overwrite_without_force(
         self,
@@ -550,8 +551,8 @@ class TestInfo:
         result = runner.invoke(cli, ["info", str(a1_rep1_1kb)])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
-        assert data["format"] == "HDF5::MetaCooler"
-        assert data["format-version"] == "3"
+        assert data["format"] == METACOOLER_FORMAT
+        assert data["format-version"] == METACOOLER_FORMAT_VERSION
         assert data["ngenomes"] == A1_REP1_1KB_NGENOMES
         assert data["ncontigs"] == A1_REP1_1KB_NCONTIGS
         assert data["nbins"] == A1_REP1_1KB_NBINS
@@ -570,7 +571,7 @@ class TestInfo:
         result = runner.invoke(cli, ["info", uri])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
-        assert data["format"] == "HDF5::MetaCooler"
+        assert data["format"] == METACOOLER_FORMAT
         assert data["ngenomes"] == A1_REP1_1KB_NGENOMES
         assert data["nbins"] == A1_REP1_1KB_NBINS
 
@@ -579,7 +580,7 @@ class TestInfo:
         result = runner.invoke(cli, ["info", uri])
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
-        assert data["format"] == "HDF5::MetaCooler"
+        assert data["format"] == METACOOLER_FORMAT
         # rep2 has different nnz than rep1
         assert data["nbins"] == A1_REP1_1KB_NBINS
         assert data["ngenomes"] == A1_REP1_1KB_NGENOMES
@@ -631,7 +632,7 @@ class TestAttrs:
         assert result.exit_code == 0, result.output
         assert "format" in result.output
         assert "metacooler-format" in result.output
-        assert "HDF5::Cooler" in result.output
+        assert COOLER_FORMAT in result.output
 
     def test_attrs_metacool_has_metadata_key(self, runner, a1_rep1_1kb):
         result = runner.invoke(cli, ["attrs", str(a1_rep1_1kb)])
@@ -1759,7 +1760,7 @@ class TestBinnify:
             ["binnify", "--binsize", "5000", "--output", str(out), str(a1_rep1_1kb)],
         )
         data = json.loads(runner.invoke(cli, ["info", str(out)]).output)
-        assert data["bin-size"] == "5000"
+        assert data["bin-size"] == 5000
 
     def test_binnify_from_variable_bins(self, runner, tmp_path, a1_rep1_DpnII):
         out = tmp_path / "rebinned_5kb.metacool"

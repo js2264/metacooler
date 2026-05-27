@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from metacooler.api import MetaCooler
-from metacooler.schema import is_metacooler
+from metacooler.schema import is_metacooler, METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
 
 
 class TestMetaCooler:
@@ -55,9 +55,8 @@ class TestMetaCooler:
         info = mc.info
         assert info["ngenomes"] == 3
         assert info["ncontigs"] == 4
-        assert info["format"] == "HDF5::MetaCooler"
-        assert info["format-version"] == 3  # cooler format version
-        assert info["metacooler-format-version"] == 1
+        assert info["format"] == METACOOLER_FORMAT
+        assert info["format-version"] == METACOOLER_FORMAT_VERSION
         assert info["ordering"] == "genome-then-alpha"
 
     def test_bins_for_genome(self, tiny_metacooler):
@@ -81,16 +80,20 @@ class TestMetaCooler:
         assert end - start == 10  # 10 bins
 
     def test_aggregate_matrix_contig(self, tiny_metacooler):
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
-        mat = mc.aggregate_matrix(level="contig", sparse=False)
+        mat = _aggregate_sparse(mc, level="contig").toarray()
         assert mat.shape == (4, 4)
-        assert np.allclose(mat, mat.T)  # symmetric  # type: ignore
+        assert np.allclose(mat, mat.T)
 
     def test_aggregate_matrix_genome(self, tiny_metacooler):
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
-        mat = mc.aggregate_matrix(level="genome", sparse=False)
+        mat = _aggregate_sparse(mc, level="genome").toarray()
         assert mat.shape == (3, 3)
-        assert np.allclose(mat, mat.T)  # type: ignore
+        assert np.allclose(mat, mat.T)
 
     def test_to_cooler_contig(self, tiny_metacooler, tmp_path):
         mc = MetaCooler(tiny_metacooler)
@@ -140,9 +143,11 @@ class TestMetaCoolerErrors:
             mc.contig_extent("NONEXISTENT")
 
     def test_aggregate_matrix_invalid_level(self, tiny_metacooler):
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
         with pytest.raises(ValueError, match="level must be"):
-            mc.aggregate_matrix(level="invalid")  # type: ignore
+            _aggregate_sparse(mc, level="invalid")  # type: ignore
 
     def test_pixels_for_genome_pair_unknown_genome(self, tiny_metacooler):
         mc = MetaCooler(tiny_metacooler)
@@ -273,25 +278,33 @@ class TestMetaCoolerAggregateMatrix:
     def test_sparse_returns_sparse_matrix(self, tiny_metacooler):
         from scipy import sparse as sp
 
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
-        mat = mc.aggregate_matrix(level="contig", sparse=True)
+        mat = _aggregate_sparse(mc, level="contig")
         assert sp.issparse(mat)
 
     def test_dense_symmetric(self, tiny_metacooler):
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
-        mat = mc.aggregate_matrix(level="genome", sparse=False)
-        assert np.allclose(mat, mat.T)  # type: ignore
+        mat = _aggregate_sparse(mc, level="genome").toarray()
+        assert np.allclose(mat, mat.T)
 
     def test_genome_shape_matches_ngenomes(self, tiny_metacooler):
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
         n = len(mc.genomes)
-        mat = mc.aggregate_matrix(level="genome", sparse=False)
+        mat = _aggregate_sparse(mc, level="genome").toarray()
         assert mat.shape == (n, n)
 
     def test_contig_diagonal_nonnegative(self, tiny_metacooler):
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         mc = MetaCooler(tiny_metacooler)
-        mat = mc.aggregate_matrix(level="contig", sparse=False)
-        assert (np.diag(mat) >= 0).all()  # type: ignore
+        mat = _aggregate_sparse(mc, level="contig").toarray()
+        assert (np.diag(mat) >= 0).all()
 
 
 class TestMetaCoolerOpenContextManager:
@@ -339,5 +352,5 @@ class TestMetaCoolerMmetacoolURI:
         uri = f"{mmetacool}::entries/myentry"
         mc = MetaCooler(uri)
         info = mc.info
-        assert info["format"] == "HDF5::MetaCooler"
+        assert info["format"] == METACOOLER_FORMAT
         assert info["ncontigs"] == 4

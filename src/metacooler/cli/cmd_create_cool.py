@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal, cast
 
 import rich_click as click
 import yaml
@@ -94,9 +95,17 @@ def cmd_create_cool(
         cool_uri=cool_path,
         output=output,
         contig_genome_map=contigs,
-        contig_table_format=contigs_format,  # type: ignore
+        contig_table_format=cast(
+            Literal["contigs", "contig_genome", "metator", "I,J"],
+            contigs_format,
+        ),
         genomes_table=genomes_table,
-        contig_ordering=contig_order,  # type: ignore
+        contig_ordering=cast(
+            Literal[
+                "genome-then-length", "genome-then-alpha", "cool", "alpha", "custom"
+            ],
+            contig_order,
+        ),
         assembly_name=assembly_name,
         drop_unassigned=drop_unassigned,
         metadata=meta,

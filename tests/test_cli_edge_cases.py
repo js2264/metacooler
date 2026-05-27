@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from metacooler.cli.main import cli
+from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -727,12 +728,12 @@ class TestInfoCLI:
     def test_info_format_is_metacooler(self, tiny_metacooler):
         r = _run(["info", str(tiny_metacooler)])
         data = json.loads(r.output)
-        assert data["format"] == "HDF5::MetaCooler"
+        assert data["format"] == METACOOLER_FORMAT
 
     def test_info_format_version_is_1(self, tiny_metacooler):
         r = _run(["info", str(tiny_metacooler)])
         data = json.loads(r.output)
-        assert str(data["format-version"]) == "3"
+        assert str(data["format-version"]) == str(METACOOLER_FORMAT_VERSION)
 
     def test_info_table_output(self, tiny_metacooler):
         r = _run(["info", "--table", str(tiny_metacooler)])
@@ -1067,13 +1068,17 @@ class TestShowCLI:
 
     def test_show_genome_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_genome.png"
-        r = _run(["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(
+            ["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)]
+        )
         assert r.exit_code == 0, r.output
         assert out.exists()
 
     def test_show_contig_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_contig.png"
-        r = _run(["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(
+            ["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)]
+        )
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1098,7 +1103,9 @@ class TestShowCLI:
 
     def test_show_single_genome_view(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_intra.png"
-        r = _run(["show", "--genome", "MAG_1", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(
+            ["show", "--genome", "MAG_1", "-o", str(out), "-f", str(tiny_metacooler)]
+        )
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1121,12 +1128,16 @@ class TestShowCLI:
 
     def test_show_transform_none(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_raw.png"
-        r = _run(["show", "--transform", "none", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(
+            ["show", "--transform", "none", "-o", str(out), "-f", str(tiny_metacooler)]
+        )
         assert r.exit_code == 0, r.output
 
     def test_show_custom_cmap(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_blues.png"
-        r = _run(["show", "--cmap", "Blues", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(
+            ["show", "--cmap", "Blues", "-o", str(out), "-f", str(tiny_metacooler)]
+        )
         assert r.exit_code == 0, r.output
 
     def test_show_custom_dpi(self, tiny_metacooler, tmp_path):

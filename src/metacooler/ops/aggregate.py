@@ -16,6 +16,65 @@ if TYPE_CHECKING:
     from typing import Literal
 
 
+def _aggregate_sparse(
+    mc: MetaCooler,
+    level: Literal["contig", "genome"] = "contig",
+    chunksize: int = 10_000_000,
+) -> sparse.csr_matrix:
+    """Return the aggregated contact matrix as a sparse CSR matrix.
+
+    Args:
+        mc: Open MetaCooler instance.
+        level: Aggregation level — ``"contig"`` or ``"genome"``.
+        chunksize: Number of pixels to process per chunk.
+
+    Returns:
+        Symmetrised sparse CSR matrix of shape ``(n, n)`` where ``n`` is
+        the number of contigs or genomes at the requested level.
+    """
+    n_contigs = len(mc.contigs)
+    n_genomes = len(mc.genomes)
+
+    if level == "contig":
+        n = n_contigs
+        bins = mc.bins()[["chrom"]]
+        mapping = bins["chrom"].cat.codes.values
+    elif level == "genome":
+        n = n_genomes
+        contigs = mc.contigs
+        bins = mc.bins()[["chrom"]]
+        bin_to_contig = bins["chrom"].cat.codes.values
+        mapping = contigs["genome_id"].values[bin_to_contig]
+    else:
+        raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+
+    rows, cols, data = [], [], []
+    n_pix = len(mc._clr.pixels())
+    for i in range(0, n_pix, chunksize):
+        chunk = mc._clr.pixels()[i : i + chunksize]
+        c1 = mapping[chunk["bin1_id"].values]
+        c2 = mapping[chunk["bin2_id"].values]
+        vals = chunk["count"].values
+
+        swap = c1 > c2
+        c1[swap], c2[swap] = c2[swap], c1[swap]
+
+        rows.extend(c1.tolist())
+        cols.extend(c2.tolist())
+        data.extend(vals.tolist())
+
+    agg = sparse.coo_matrix((data, (rows, cols)), shape=(n, n))
+    agg = agg.tocsr()
+    agg = (
+        agg
+        + agg.T
+        - sparse.diags(
+            agg.diagonal().astype(np.int64), offsets=0, format="csr", dtype=np.int64
+        )
+    )
+    return agg
+
+
 def aggregate(
     uri: str | Path,
     output: str | Path,
@@ -29,54 +88,19 @@ def aggregate(
     either contigs or genomes.
     """
     mc = MetaCooler(uri)
-    n_contigs = len(mc.contigs)
-    n_genomes = len(mc.genomes)
 
     if level == "contig":
-        n = n_contigs
-        bins = mc.bins()[["chrom"]]
-        mapping = bins["chrom"].cat.codes.values
         chroms = mc.contigs[["name", "length"]].rename(
             columns={"name": "chrom", "length": "length"}
         )
     elif level == "genome":
-        n = n_genomes
-        contigs = mc.contigs
-        bins = mc.bins()[["chrom"]]
-        bin_to_contig = bins["chrom"].cat.codes.values
-        mapping = contigs["genome_id"].values[bin_to_contig]
         chroms = mc.genomes[["name", "length"]].rename(
             columns={"name": "chrom", "length": "length"}
         )
     else:
         raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
 
-    # Chunked accumulation — stream directly from the cooler selector
-    rows, cols, data = [], [], []
-    n_pix = len(mc._clr.pixels())
-    for i in range(0, n_pix, chunksize):
-        chunk = mc._clr.pixels()[i : i + chunksize]
-        c1 = mapping[chunk["bin1_id"].values]
-        c2 = mapping[chunk["bin2_id"].values]
-        vals = chunk[count_col].values
-
-        swap = c1 > c2
-        c1[swap], c2[swap] = c2[swap], c1[swap]
-
-        rows.extend(c1.tolist())
-        cols.extend(c2.tolist())
-        data.extend(vals.tolist())
-
-    agg = sparse.coo_matrix((data, (rows, cols)), shape=(n, n))
-    agg = agg.tocsr()
-    # Symmetrise: subtract diagonal to avoid double-counting (matches api.aggregate_matrix)
-    agg = (
-        agg
-        + agg.T
-        - sparse.diags(
-            agg.diagonal().astype(np.int64), offsets=0, format="csr", dtype=np.int64
-        )
-    )
+    agg = _aggregate_sparse(mc, level=level, chunksize=chunksize)
     coo = agg.tocoo()
 
     pixels = pd.DataFrame(
@@ -88,7 +112,6 @@ def aggregate(
     )
     pixels = pixels[pixels["bin1_id"] <= pixels["bin2_id"]]
 
-    # One bin per chromosome at this level
     bins_out = pd.DataFrame(
         {
             "chrom": chroms["chrom"].values,

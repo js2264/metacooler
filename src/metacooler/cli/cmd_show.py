@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal, cast
 
 import rich_click as click
 
@@ -56,7 +57,6 @@ from metacooler.cli.main import MetaCoolURI, cli
     show_default=True,
     help="Matplotlib colormap.",
 )
-
 @click.option(
     "--dpi",
     type=int,
@@ -113,12 +113,12 @@ def cmd_show(
 
     show(
         uri=file,
-        level=level,  # type: ignore
+        level=cast(Literal["bin", "contig", "genome"], level),
         genome=genome,
         genomes=genomes,
         range1=range1,
         range2=range2,
-        transform=transform,  # type: ignore
+        transform=cast(Literal["log1p", "none"], transform),
         cmap=cmap,
         out=output,
         dpi=dpi,

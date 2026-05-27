@@ -8,6 +8,7 @@ import h5py
 import rich_click as click
 
 from metacooler.cli.main import cli
+from metacooler.schema import COOLER_FORMAT
 
 
 def _is_mcool(file_path: Path) -> bool:
@@ -21,7 +22,7 @@ def _is_mcool(file_path: Path) -> bool:
                 child = f["resolutions"][name]
                 if (
                     isinstance(child, h5py.Group)
-                    and child.attrs.get("format") == "HDF5::Cooler"
+                    and child.attrs.get("format") == COOLER_FORMAT
                 ):
                     return True
             return False

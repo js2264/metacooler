@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal, cast
 
 import rich_click as click
 
@@ -63,4 +64,10 @@ def cmd_network(
 
     setup_logging(verbose, command_name="metacooler network")
 
-    network(uri=metacool_path, level=level, weight=weight, out=output, header=header)  # type: ignore
+    network(
+        uri=metacool_path,
+        level=cast(Literal["bin", "contig", "genome"], level),
+        weight=weight,
+        out=output,
+        header=header,
+    )

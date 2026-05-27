@@ -15,8 +15,6 @@ from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
 if TYPE_CHECKING:
     from typing import Literal
 
-matplotlib.use("Agg")
-
 
 def show(
     uri: str | Path,
@@ -61,25 +59,32 @@ def show(
                 f"Available genomes: {sorted(known_genomes)}"
             )
 
+    if out:
+        matplotlib.use("Agg")
+
     col_labels: list | None = None
 
     if level == "genome":
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         n = len(mc.genomes)
         if n > DENSE_MATRIX_BIN_LIMIT:
             raise ValueError(
                 f"Refusing to allocate a {n}\u00d7{n} dense matrix "
                 f"({n**2 * 8 / 1e9:.1f} GB). Use a smaller file."
             )
-        mat = mc.aggregate_matrix(level="genome", sparse=False)
+        mat = _aggregate_sparse(mc, level="genome").toarray()
         labels = mc.genomes["name"].tolist()
     elif level == "contig":
+        from metacooler.ops.aggregate import _aggregate_sparse
+
         n = len(mc.contigs)
         if n > DENSE_MATRIX_BIN_LIMIT:
             raise ValueError(
                 f"Refusing to allocate a {n}\u00d7{n} dense matrix "
                 f"({n**2 * 8 / 1e9:.1f} GB). Use --level genome or a smaller file."
             )
-        mat = mc.aggregate_matrix(level="contig", sparse=False)
+        mat = _aggregate_sparse(mc, level="contig").toarray()
         labels = mc.contigs["name"].tolist()
     elif level == "bin":
         if range1 is not None:

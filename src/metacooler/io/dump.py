@@ -147,12 +147,12 @@ def dump_table(
         if selected_contig_ids is not None:
             bins = mc.bins()
             bin_chrom_codes = bins["chrom"].cat.codes.values
-            valid_bins = set(
-                np.where(np.isin(bin_chrom_codes, list(selected_contig_ids)))[
-                    0
-                ].tolist()
+            valid_bin_ids = np.where(
+                np.isin(bin_chrom_codes, list(selected_contig_ids))
+            )[0]
+            mask = np.isin(df["bin1_id"].values, valid_bin_ids) & np.isin(
+                df["bin2_id"].values, valid_bin_ids
             )
-            mask = df["bin1_id"].isin(valid_bins) & df["bin2_id"].isin(valid_bins)
             df = df[mask]
 
         if range1 is not None:

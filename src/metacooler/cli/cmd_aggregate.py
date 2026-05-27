@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal, cast
 
 import rich_click as click
 
@@ -76,7 +77,7 @@ def cmd_aggregate(
     aggregate(
         uri=metacool_path,
         output=output,
-        level=level,  # type: ignore
+        level=cast(Literal["contig", "genome"], level),
         count_col=count_col,
         chunksize=chunksize,
     )

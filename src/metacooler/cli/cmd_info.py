@@ -25,6 +25,7 @@ _INFO_KEY_ORDER = [
     "format",
     "format-url",
     "format-version",
+    "metacooler-format-version",
     "generated-by",
     "genome-assembly",
     "nbins",
@@ -103,15 +104,11 @@ def cmd_info(metacool_path: str, table_out: bool, verbose: bool) -> None:
     mc = MetaCooler(raw)
     info = mc.info
 
-    # Build ordered dict — known keys first, then any extras (e.g. custom metadata,
-    # future cooler attributes, or keys added via `metacooler metadata add`).
+    # Build ordered dict
     ordered_info = {}
     for key in _INFO_KEY_ORDER:
         if key in info:
             ordered_info[key] = info[key]
-    for key, value in info.items():
-        if key not in ordered_info:
-            ordered_info[key] = value
 
     if table_out:
         table = Table(

@@ -38,6 +38,7 @@ from metacooler.io.mmetacool import (
     move_entry,
     remove_entry,
 )
+from metacooler.schema import COOLER_FORMAT
 
 # External cooler binary — intentionally subprocess, NOT CliRunner.
 # These tests verify third-party cooler CLI compatibility.
@@ -57,7 +58,7 @@ def _assert_entry_cooler_compat(path: Path, entry_name: str) -> None:
     uri = f"{path}::entries/{entry_name}"
     assert cooler.fileops.is_cooler(uri) is True
     c = cooler.Cooler(uri)
-    assert c.info["format"] == "HDF5::Cooler"
+    assert c.info["format"] == COOLER_FORMAT
     assert int(c.info["format-version"]) == 3
     assert c.info["storage-mode"] == "symmetric-upper"
     assert int(c.info["nbins"]) == len(c.bins()[:])
@@ -76,7 +77,7 @@ def _assert_entry_cooler_cli_compat(path: Path, entry_name: str) -> None:
     uri = f"{path}::entries/{entry_name}"
     r = _cooler_cli("info", uri)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["format"] == "HDF5::Cooler"
+    assert json.loads(r.stdout)["format"] == COOLER_FORMAT
     r = _cooler_cli("dump", "-t", "bins", uri)
     assert r.returncode == 0 and len(r.stdout.strip().splitlines()) > 0
     r = _cooler_cli("dump", "-t", "pixels", uri)
@@ -105,7 +106,7 @@ class TestMetacoolCoolerCompat:
 
     def test_info_required_fields(self, tiny_metacooler: Path):
         c = cooler.Cooler(str(tiny_metacooler))
-        assert c.info["format"] == "HDF5::Cooler"
+        assert c.info["format"] == COOLER_FORMAT
         assert int(c.info["format-version"]) == 3
         assert c.info["storage-mode"] == "symmetric-upper"
         assert "metacooler-format" in c.info
@@ -182,7 +183,7 @@ class TestMetacoolCoolerCLI:
     def test_info(self, tiny_metacooler: Path):
         r = _cooler_cli("info", str(tiny_metacooler))
         assert r.returncode == 0
-        assert json.loads(r.stdout)["format"] == "HDF5::Cooler"
+        assert json.loads(r.stdout)["format"] == COOLER_FORMAT
 
     def test_ls(self, tiny_metacooler: Path):
         r = _cooler_cli("ls", str(tiny_metacooler))
@@ -235,7 +236,7 @@ class TestMmetacoolCoolerCompat:
     ):
         mc = cooler.Cooler(str(tiny_metacooler))
         entry = cooler.Cooler(f"{tiny_mmetacool}::entries/entry1")
-        assert entry.info["format"] == "HDF5::Cooler"
+        assert entry.info["format"] == COOLER_FORMAT
         assert int(entry.info["nchroms"]) == int(mc.info["nchroms"])
         assert len(entry.bins()[:]) == len(mc.bins()[:])
         assert len(entry.pixels()[:]) == len(mc.pixels()[:])
@@ -286,7 +287,7 @@ class TestMmetacoolCoolerCLI:
     def test_info(self, tiny_mmetacool: Path):
         r = _cooler_cli("info", f"{tiny_mmetacool}::entries/entry1")
         assert r.returncode == 0
-        assert json.loads(r.stdout)["format"] == "HDF5::Cooler"
+        assert json.loads(r.stdout)["format"] == COOLER_FORMAT
 
     def test_dump_bins_count_matches_api(self, tiny_mmetacool: Path):
         uri = f"{tiny_mmetacool}::entries/entry1"

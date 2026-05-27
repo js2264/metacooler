@@ -1,6 +1,7 @@
 """CLI tests for metacooler."""
 
 from __future__ import annotations
+from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
 
 import json
 import subprocess
@@ -95,11 +96,10 @@ class TestInfo:
     def test_info(self, runner, tiny_metacooler):
         result = runner.invoke(cli, ["info", str(tiny_metacooler)])
         assert result.exit_code == 0
-        assert "HDF5::MetaCooler" in result.output
+        assert METACOOLER_FORMAT in result.output
         data = json.loads(result.output)
-        assert data["format"] == "HDF5::MetaCooler"
-        assert data["format-version"] == "3"  # numpy scalar serialized via default=str
-        assert data["metacooler-format-version"] == "1"
+        assert data["format"] == METACOOLER_FORMAT
+        assert data["format-version"] == METACOOLER_FORMAT_VERSION
         assert data["ngenomes"] == 3
         assert data["ncontigs"] == 4
         assert data["ordering"] == "genome-then-alpha"
@@ -151,7 +151,8 @@ class TestShow:
     def test_show_genome(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
         result = runner.invoke(
-            cli, ["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)]
+            cli,
+            ["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)],
         )
         assert result.exit_code == 0
         assert out.exists()
@@ -159,7 +160,8 @@ class TestShow:
     def test_show_contig(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
         result = runner.invoke(
-            cli, ["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)]
+            cli,
+            ["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)],
         )
         assert result.exit_code == 0
         assert out.exists()

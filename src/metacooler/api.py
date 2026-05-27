@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -10,9 +11,9 @@ import cooler
 import h5py
 import numpy as np
 import pandas as pd
-from scipy import sparse as sp
 
 from metacooler.schema import (
+    METACOOLER_FORMAT,
     METACOOLER_FORMAT_URL,
     read_table,
     validate,
@@ -61,6 +62,16 @@ class MetaCooler:
             cooler_uri = f"{self._store}::{group_path}"
             self._clr = cooler.Cooler(cooler_uri)
         else:
+            from metacooler.schema import is_mmetacooler, list_metacoolers
+
+            if is_mmetacooler(self._store):
+                entries = list_metacoolers(self._store)
+                raise KeyError(
+                    f"No metacool entry at root of {self._store}. "
+                    f"Metacool entries found: {entries}. "
+                    f"Use '::' to specify a group path, e.g. "
+                    f"{self._store}::{entries[0] if entries else '/entries/<name>'}."
+                )
             validate(self._store)
             self._clr = cooler.Cooler(str(self._store))
 
@@ -81,14 +92,23 @@ class MetaCooler:
 
     @property
     def uri(self) -> str:
-        """The cooler-style URI (``path::/``)."""
-        return f"{self._store}::/"
+        """The cooler-style URI (``path::group_path``)."""
+        if self._group_path == "/":
+            return f"{self._store}::/"
+        return f"{self._store}::{self._group_path}"
 
     # ------------------------------------------------------------------
     # Delegated to cooler.Cooler (pass-through)
     # ------------------------------------------------------------------
+    @functools.cached_property
+    def _bins_cache(self) -> pd.DataFrame:
+        """Cached bin table — bins are immutable once written."""
+        return cast(pd.DataFrame, self._clr.bins()[:])
+
     def bins(self, **kw) -> pd.DataFrame:
-        return cast(pd.DataFrame, self._clr.bins(**kw)[:])
+        if kw:
+            return cast(pd.DataFrame, self._clr.bins(**kw)[:])
+        return self._bins_cache
 
     def pixels(self, join: bool = False, **kw) -> pd.DataFrame:
         return cast(pd.DataFrame, self._clr.pixels(join=join, **kw)[:])
@@ -125,33 +145,36 @@ class MetaCooler:
     def info(self) -> dict:
         """Merged metadata in metacool format."""
         base = dict(self._clr.info)
-        with h5py.File(self._store, "r") as f:
-            root = f[self._group_path.lstrip("/")] if self._group_path != "/" else f
-            base["format"] = "HDF5::MetaCooler"
-            base["format-url"] = root.attrs.get(
-                "metacooler-format-url", METACOOLER_FORMAT_URL
-            )
-            base["ordering"] = root.attrs.get("contig-ordering", "unknown")
-            base["ncontigs"] = len(root["contigs"]["name"])
-            base["ngenomes"] = len(root["genomes"]["name"])
-            # Remove cooler-specific keys that are redundant
-            base.pop("metacooler-format", None)
-            base.pop("contig-ordering", None)
-            base.pop("n_genomes", None)
-            base.pop("n_contigs", None)
-            base.pop("nchroms", None)
-            base.pop("metadata", None)
-        # Cast numeric fields to int (cooler may return them as strings or numpy scalars)
-        for _key in ("nbins", "nnz", "sum"):
+        # Promote metacooler-specific attrs over their cooler equivalents
+        base["format"] = base.pop("metacooler-format")
+        base["format-url"] = base.pop("metacooler-format-url")
+        base["format-version"] = base.pop("metacooler-format-version")
+        base["ordering"] = base.pop("contig-ordering")
+        base["ncontigs"] = base.pop("nchroms")
+        # Remove metadata field if present (accessed via .metadata property)
+        base.pop("metadata", None)
+        # Cast numeric fields to int (cooler may return numpy scalars or strings)
+        for _key in ("bin-size", "format-version", "nbins", "nnz", "sum", "ngenomes", "ncontigs"):
             if _key in base:
                 with contextlib.suppress(ValueError, TypeError):
                     base[_key] = int(base[_key])
         return base
 
+    @property
+    def metadata(self) -> dict:
+        """The contents of the optional ``metadata`` group as a nested dict."""
+        base = dict(self._clr.info)
+        meta = base.pop("metadata", None)
+        if meta is None:
+            return {}
+        if isinstance(meta, dict):
+            return meta
+        return {}
+    
     # ------------------------------------------------------------------
     # metacooler-specific properties
     # ------------------------------------------------------------------
-    @property
+    @functools.cached_property
     def genomes(self) -> pd.DataFrame:
         """The ``/genomes`` table as a DataFrame."""
         if self._group_path != "/":
@@ -159,7 +182,7 @@ class MetaCooler:
             return read_table(self._store, grp)
         return read_table(self._store, "genomes")
 
-    @property
+    @functools.cached_property
     def contigs(self) -> pd.DataFrame:
         """The ``/contigs`` table as a DataFrame (includes ``genome_id``)."""
         if self._group_path != "/":
@@ -195,34 +218,60 @@ class MetaCooler:
         return bins[bins["chrom"].cat.codes == cid].copy()
 
     def pixels_for_genome_pair(self, g1: str, g2: str) -> pd.DataFrame:
-        """Return pixels where one bin is in *g1* and the other in *g2*."""
+        """Return pixels where one bin is in *g1* and the other in *g2*.
+
+        Uses ``genome_extent`` index lookups instead of loading the full pixel
+        table — safe for large datasets.
+        """
         genomes = self.genomes
-        contigs = self.contigs
         for g in (g1, g2):
             if g not in genomes["name"].values:
                 raise KeyError(
                     f"Genome {g!r} not found. Available: {genomes['name'].tolist()}"
                 )
 
-        gid1 = genomes.loc[genomes["name"] == g1].index[0]
-        gid2 = genomes.loc[genomes["name"] == g2].index[0]
+        s1, e1 = self.genome_extent(g1)
+        s2, e2 = self.genome_extent(g2)
+
+        # Determine the pixel range to scan (contiguous region in the upper triangle)
+        lo = min(s1, s2)
+        hi = max(e1, e2)
+
+        chunks = []
+        chunksize = 1_000_000
+        n_pix = len(self._clr.pixels())
+        # Use bin1_offset index to find the pixel range for bins [lo, hi)
+        with h5py.File(self._store, "r") as f:
+            root = f[self._group_path.lstrip("/")] if self._group_path != "/" else f
+            bin1_offset = root["indexes"]["bin1_offset"][:]
+        pix_lo = int(bin1_offset[lo])
+        pix_hi = int(bin1_offset[hi]) if hi < len(bin1_offset) else n_pix
+
+        bins = self._bins_cache
+        bin_to_contig = bins["chrom"].cat.codes.values
+
+        contigs = self.contigs
+        gid1 = int(genomes.loc[genomes["name"] == g1].index[0])
+        gid2 = int(genomes.loc[genomes["name"] == g2].index[0])
         cids1 = set(contigs.index[contigs["genome_id"] == gid1].tolist())
         cids2 = set(contigs.index[contigs["genome_id"] == gid2].tolist())
 
-        bins = self.bins()
-        bin_to_contig = bins["chrom"].cat.codes.values
-        mask1 = np.isin(bin_to_contig, list(cids1))
-        mask2 = np.isin(bin_to_contig, list(cids2))
+        valid1 = np.where(np.isin(bin_to_contig, list(cids1)))[0]
+        valid2 = np.where(np.isin(bin_to_contig, list(cids2)))[0]
+        set1 = set(valid1.tolist())
+        set2 = set(valid2.tolist())
 
-        # Build a set of valid bin ids for each genome
-        bins1 = set(bins.index[mask1].tolist())
-        bins2 = set(bins.index[mask2].tolist())
+        for i in range(pix_lo, pix_hi, chunksize):
+            chunk = self._clr.pixels()[i : i + chunksize]
+            b1 = chunk["bin1_id"]
+            b2 = chunk["bin2_id"]
+            sel = (b1.isin(set1) & b2.isin(set2)) | (b1.isin(set2) & b2.isin(set1))
+            if sel.any():
+                chunks.append(chunk[sel])
 
-        pix = self.pixels()
-        sel = (pix["bin1_id"].isin(bins1) & pix["bin2_id"].isin(bins2)) | (
-            pix["bin1_id"].isin(bins2) & pix["bin2_id"].isin(bins1)
-        )
-        return pix[sel].copy()
+        if not chunks:
+            return pd.DataFrame(columns=["bin1_id", "bin2_id", "count"])
+        return pd.concat(chunks, ignore_index=True)
 
     # ------------------------------------------------------------------
     # Extent helpers
@@ -258,68 +307,6 @@ class MetaCooler:
         return (int(sel.index[0]), int(sel.index[-1]) + 1)
 
     # ------------------------------------------------------------------
-    # Aggregation
-    # ------------------------------------------------------------------
-    def aggregate_matrix(
-        self,
-        level: Literal["contig", "genome"] = "contig",
-        sparse: bool = True,
-    ) -> sp.csr_matrix | np.ndarray:
-        """Aggregate the contact matrix to *contig* or *genome* level.
-
-        Returns a scipy sparse CSR matrix by default, or a dense numpy
-        array when *sparse* is ``False``.
-        """
-        n_contigs = len(self.contigs)
-        n_genomes = len(self.genomes)
-
-        if level == "contig":
-            n = n_contigs
-            bins = self.bins()[["chrom"]]
-            mapping = bins["chrom"].cat.codes.values
-        elif level == "genome":
-            n = n_genomes
-            contigs = self.contigs
-            bins = self.bins()[["chrom"]]
-            # Map bin -> contig -> genome
-            bin_to_contig = bins["chrom"].cat.codes.values
-            mapping = contigs["genome_id"].values[bin_to_contig]
-        else:
-            raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
-
-        # Chunked accumulation — stream directly from the cooler selector
-        rows, cols, data = [], [], []
-        chunk_size = 1_000_000
-        n_pix = len(self._clr.pixels())
-        for i in range(0, n_pix, chunk_size):
-            chunk = self._clr.pixels()[i : i + chunk_size]
-            c1 = mapping[chunk["bin1_id"].values]
-            c2 = mapping[chunk["bin2_id"].values]
-            vals = chunk["count"].values
-
-            # Enforce upper-triangular at the aggregated level
-            swap = c1 > c2
-            c1[swap], c2[swap] = c2[swap], c1[swap]
-
-            rows.extend(c1.tolist())
-            cols.extend(c2.tolist())
-            data.extend(vals.tolist())
-
-        agg = sp.coo_matrix((data, (rows, cols)), shape=(n, n))
-        agg = agg.tocsr()
-        # Symmetrise
-        agg = (
-            agg
-            + agg.T
-            - sp.diags(
-                agg.diagonal().astype(np.int64), offsets=0, format="csr", dtype=np.int64
-            )
-        )
-        if sparse:
-            return agg
-        return agg.toarray()
-
-    # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
     def to_cooler(
@@ -334,6 +321,8 @@ class MetaCooler:
         the cooler/cooltools/HiGlass ecosystem.
         """
         import cooler as clr
+
+        from metacooler.ops.aggregate import _aggregate_sparse
 
         path = Path(path)
 
@@ -357,8 +346,7 @@ class MetaCooler:
             }
         )
 
-        # Aggregate pixels
-        agg = cast(sp.csr_matrix, self.aggregate_matrix(level=level, sparse=True))
+        agg = _aggregate_sparse(self, level=level)
         coo = agg.tocoo()
         pixels = pd.DataFrame(
             {

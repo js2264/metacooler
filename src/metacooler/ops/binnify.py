@@ -166,6 +166,19 @@ def binnify(
         len(pixel_df),
     )
 
+    # Recompute n_bins per genome from the new bins
+    new_bin_genome_ids = contigs["genome_id"].values[
+        pd.Categorical(new_bins_out["chrom"], categories=contigs["name"].values).codes
+    ]
+    new_genome_bin_counts = np.bincount(
+        new_bin_genome_ids.astype(np.int64), minlength=len(genomes)
+    ).astype(np.int64)
+    genomes = genomes.copy()
+    if "n_bins" in genomes.columns:
+        genomes["n_bins"] = new_genome_bin_counts
+    else:
+        genomes.insert(3, "n_bins", new_genome_bin_counts)
+
     # Write as a new metacool file using a temporary pairs approach
     # We'll write directly using cooler + h5py to preserve metacooler structure
     _write_rebinned_metacool(
@@ -190,16 +203,21 @@ def _write_rebinned_metacool(
 ) -> None:
     """Write a re-binned metacool file preserving the full metacooler schema."""
     import cooler
-    import h5py
 
-    from metacooler._version import __version__
-    from metacooler.schema import (
-        COOLER_FORMAT,
-        COOLER_FORMAT_URL,
-        METACOOLER_FORMAT,
-        METACOOLER_FORMAT_URL,
-        METACOOLER_FORMAT_VERSION,
-    )
+    from metacooler.io.create import _finalize_metacool_file
+
+    # Pre-compute index offsets from the bins DataFrame
+    contig_names = contigs["name"].values
+    bin_chrom_codes = pd.Categorical(
+        bins["chrom"].values, categories=contig_names
+    ).codes.astype(np.int64)
+    chrom_counts = np.bincount(bin_chrom_codes, minlength=len(contig_names))
+    chrom_offset = np.concatenate([[0], np.cumsum(chrom_counts)]).astype(np.int64)
+
+    contig_genome_ids = contigs["genome_id"].values
+    bin_genome_ids = contig_genome_ids[bin_chrom_codes]
+    genome_counts = np.bincount(bin_genome_ids.astype(np.int64), minlength=len(genomes))
+    genome_offset = np.concatenate([[0], np.cumsum(genome_counts)]).astype(np.int64)
 
     # Create the cooler first
     cooler.create_cooler(
@@ -210,77 +228,13 @@ def _write_rebinned_metacool(
         symmetric_upper=True,
     )
 
-    # Now add metacooler-specific tables and attributes
-    with h5py.File(output, "a") as f:
-        # Set metacooler format attributes
-        f.attrs["format"] = COOLER_FORMAT
-        f.attrs["format-url"] = COOLER_FORMAT_URL
-        f.attrs["metacooler-format"] = METACOOLER_FORMAT
-        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
-        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
-        f.attrs["generated-by"] = f"metacooler-{__version__}"
-        f.attrs["ngenomes"] = len(genomes)
-        f.attrs["contig-ordering"] = "rebinned"
-
-        def _to_hdf5_data(arr):
-            """Convert array to HDF5-compatible dtype."""
-            if (
-                arr.dtype == object
-                or arr.dtype.kind in ("U", "S")
-                or str(arr.dtype) == "string"
-            ):
-                # Convert strings to fixed-length bytes for HDF5
-                str_arr = [str(x) for x in arr]
-                max_len = max(len(s) for s in str_arr) if len(str_arr) > 0 else 1
-                return np.array(
-                    [s.encode("utf-8") for s in str_arr], dtype=f"S{max_len}"
-                )
-            return np.asarray(arr)
-
-        # Write genomes table
-        g = f.require_group("genomes")
-        for col in genomes.columns:
-            data = _to_hdf5_data(genomes[col].values)
-            if col in g:
-                del g[col]
-            g.create_dataset(col, data=data)
-
-        # Write contigs table (overwrite chroms-based one)
-        if "contigs" in f:
-            del f["contigs"]
-        c = f.create_group("contigs")
-        for col in contigs.columns:
-            data = _to_hdf5_data(contigs[col].values)
-            c.create_dataset(col, data=data)
-
-        # Create soft link chroms -> contigs (cooler compat)
-        if "chroms" in f:
-            del f["chroms"]
-        f["chroms"] = h5py.SoftLink("contigs")
-
-        # Build indexes
-        idx = f.require_group("indexes")
-
-        # chrom_offset: cumulative bin count per contig (O(n_bins) via bincount)
-        bin_chroms = bins["chrom"].values
-        contig_names = contigs["name"].values
-        bin_chrom_codes = pd.Categorical(
-            bin_chroms, categories=contig_names
-        ).codes.astype(np.int64)
-        chrom_counts = np.bincount(bin_chrom_codes, minlength=len(contig_names))
-        chrom_offset = np.concatenate([[0], np.cumsum(chrom_counts)])
-        if "chrom_offset" in idx:
-            del idx["chrom_offset"]
-        idx.create_dataset("chrom_offset", data=chrom_offset.astype(np.int64))
-
-        # genome_offset: cumulative bin count per genome (O(n_bins) via bincount)
-        # Map each bin's contig code to a genome id, then bincount
-        contig_genome_ids = contigs["genome_id"].values  # shape: (n_contigs,)
-        bin_genome_ids = contig_genome_ids[bin_chrom_codes]
-        genome_counts = np.bincount(bin_genome_ids, minlength=len(genomes))
-        genome_offset = np.concatenate([[0], np.cumsum(genome_counts)])
-        if "genome_offset" in idx:
-            del idx["genome_offset"]
-        idx.create_dataset("genome_offset", data=genome_offset.astype(np.int64))
+    _finalize_metacool_file(
+        output,
+        genomes,
+        contigs,
+        chrom_offset,
+        genome_offset,
+        contig_ordering="rebinned",
+    )
 
     logger.info("Written rebinned metacool to %s", output)

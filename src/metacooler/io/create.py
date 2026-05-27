@@ -35,6 +35,101 @@ if TYPE_CHECKING:
 logger = logging.getLogger("metacooler")
 
 
+def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
+    """Convert a string/object array to fixed-length bytes for HDF5 storage."""
+    if arr.dtype.kind in ("O", "U", "S") or str(arr.dtype) == "string":
+        str_arr = [
+            "" if (v is None or (isinstance(v, float) and np.isnan(v))) else str(v)
+            for v in arr
+        ]
+        max_len = max((len(s) for s in str_arr), default=1)
+        return np.array([s.encode("utf-8") for s in str_arr], dtype=f"S{max_len}")
+    return np.asarray(arr)
+
+
+def _finalize_metacool_file(
+    path: Path,
+    genomes: pd.DataFrame,
+    contigs: pd.DataFrame,
+    chrom_offset: np.ndarray | None,
+    genome_offset: np.ndarray,
+    *,
+    contig_ordering: str = "genome-then-alpha",
+    assembly_name: str | None = None,
+) -> None:
+    """Add metacooler-specific groups and attributes to a cooler file.
+
+    Handles: chroms soft-link, genomes/contigs HDF5 groups (with byte-string
+    encoding), stripping the enum dtype from ``bins/chrom``, writing index
+    offsets, and setting all format attributes.
+
+    Args:
+        path: Path to the cooler file to finalize (opened in append mode).
+        genomes: ``/genomes`` DataFrame.
+        contigs: ``/contigs`` DataFrame.
+        chrom_offset: Pre-computed ``chrom_offset`` array (length n_contigs+1).
+            If ``None``, computed from the ``bins/chrom`` dataset.
+        genome_offset: Pre-computed ``genome_offset`` array (length n_genomes+1).
+        contig_ordering: Value for the ``contig-ordering`` HDF5 attribute.
+        assembly_name: Optional assembly name stored in ``assembly-name`` attr.
+    """
+    with h5py.File(path, "a") as f:
+        # Recreate chroms as a soft link to contigs (cooler compat)
+        if "chroms" in f:
+            del f["chroms"]
+        f["chroms"] = h5py.SoftLink("contigs")
+
+        # Write /genomes
+        if "genomes" in f:
+            del f["genomes"]
+        g = f.create_group("genomes", track_order=True)
+        for col in genomes.columns:
+            g.create_dataset(col, data=_str_to_hdf5(genomes[col].values))
+
+        # Write /contigs
+        if "contigs" in f:
+            del f["contigs"]
+        c = f.create_group("contigs", track_order=True)
+        for col in contigs.columns:
+            c.create_dataset(col, data=_str_to_hdf5(contigs[col].values))
+
+        # Strip cooler's enum dtype from bins/chrom so it stores plain int32
+        chrom_data = f["bins"]["chrom"][:]
+        del f["bins"]["chrom"]
+        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+
+        # Compute chrom_offset from bins if not provided
+        if chrom_offset is None:
+            n_contigs = len(contigs)
+            contig_counts = np.bincount(
+                chrom_data.astype(np.int64), minlength=n_contigs
+            )
+            chrom_offset = np.zeros(n_contigs + 1, dtype=np.int64)
+            chrom_offset[1:] = np.cumsum(contig_counts)
+
+        # Write index offsets
+        idx = f.require_group("indexes")
+        for key, data in (
+            ("chrom_offset", chrom_offset),
+            ("genome_offset", genome_offset),
+        ):
+            if key in idx:
+                del idx[key]
+            idx.create_dataset(key, data=data.astype(np.int64))
+
+        # Format attributes
+        f.attrs["format"] = COOLER_FORMAT
+        f.attrs["format-url"] = COOLER_FORMAT_URL
+        f.attrs["metacooler-format"] = METACOOLER_FORMAT
+        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
+        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
+        f.attrs["generated-by"] = f"metacooler-{__version__}"
+        f.attrs["ngenomes"] = len(genomes)
+        f.attrs["contig-ordering"] = contig_ordering
+        if assembly_name:
+            f.attrs["assembly-name"] = assembly_name
+
+
 def _read_contig_lengths(
     bins: pd.DataFrame | None = None,
     fasta: str | Path | None = None,
@@ -163,12 +258,12 @@ def _build_contig_order(
 
 # Sentinel values treated as __unbinned__ in contig-to-genome assignment tables.
 _UNBINNED_SENTINELS: frozenset[str] = frozenset(
-    {"__unbinned__", "na", "nan", "n/a", ""}
+    {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", ""}
 )
 
 
 def _normalize_genome_name(v: str) -> str:
-    """Normalize sentinel values (empty, NA, nan…) to ``__unbinned__``."""
+    """Normalize sentinel values (empty, NA, nan, ND, n/d, …) to ``__unbinned__``."""
     return "__unbinned__" if v.strip().lower() in _UNBINNED_SENTINELS else v
 
 
@@ -296,18 +391,21 @@ def _build_contigs_table(
 
 
 def _build_bins(
-    bins_path: str | Path,
+    bins: str | Path | pd.DataFrame,
     contig_order: list[str],
     contig_name_to_id: dict[str, int],
 ) -> pd.DataFrame:
-    """Read a BED file of bins and remap chrom names to contig ids."""
-    df = pd.read_csv(
-        bins_path,
-        sep="\t",
-        header=None,
-        names=["chrom", "start", "end"],
-        dtype={"chrom": str, "start": np.int32, "end": np.int32},
-    )
+    """Read a BED file (or DataFrame) of bins and remap chrom names to contig ids."""
+    if isinstance(bins, str | Path):
+        df = pd.read_csv(
+            bins,
+            sep="\t",
+            header=None,
+            names=["chrom", "start", "end"],
+            dtype={"chrom": str, "start": np.int32, "end": np.int32},
+        )
+    else:
+        df = bins.copy()
     # Map chrom name -> contig id
     df["chrom"] = df["chrom"].map(contig_name_to_id)
     if df["chrom"].isna().any():
@@ -503,12 +601,7 @@ def from_pairs(
             raise ValueError("binsize required when bins is None")
         bins_df = _tile_bins(contig_order, contig_lengths, contig_name_to_id, binsize)
     else:
-        # Remap chrom names to contig ids
-        bins_df["chrom"] = bins_df["chrom"].map(contig_name_to_id)
-        if bins_df["chrom"].isna().any():
-            missing = set(bins_df[bins_df["chrom"].isna()]["chrom"].unique())
-            raise ValueError(f"Bins reference unknown contigs: {missing}")
-        bins_df = bins_df[["chrom", "start", "end"]]
+        bins_df = _build_bins(bins_df, contig_order, contig_name_to_id)
 
     # --- Compute offsets ---
     n_contigs = len(contigs_df)
@@ -628,76 +721,15 @@ def from_pairs(
     )
 
     # --- Post-process: add metacooler-specific groups and attrs ---
-    with h5py.File(uri, "a") as f:
-        # Overwrite chroms with contigs (soft link for cooler compat)
-        if "chroms" in f:
-            del f["chroms"]
-        f["chroms"] = h5py.SoftLink("contigs")
-
-        # Write genomes group (fixed-length byte strings like cooler)
-        if "genomes" in f:
-            del f["genomes"]
-        g = f.create_group("genomes", track_order=True)
-        for col in genomes_df.columns:
-            data = genomes_df[col].values
-            if data.dtype == object or pd.api.types.is_string_dtype(data.dtype):
-                arr = [
-                    ""
-                    if (v is None or (isinstance(v, float) and np.isnan(v)))
-                    else str(v)
-                    for v in data
-                ]
-                max_len = max((len(s) for s in arr), default=1)
-                g.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
-            else:
-                g.create_dataset(col, data=data)
-
-        # Overwrite contigs group with genome_id (fixed-length byte strings like cooler)
-        if "contigs" in f:
-            del f["contigs"]
-        c = f.create_group("contigs", track_order=True)
-        for col in contigs_df.columns:
-            data = contigs_df[col].values
-            if data.dtype.kind in ("O", "U"):
-                arr = [
-                    ""
-                    if (v is None or (isinstance(v, float) and np.isnan(v)))
-                    else str(v)
-                    for v in data
-                ]
-                max_len = max((len(s) for s in arr), default=1)
-                c.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
-            else:
-                c.create_dataset(col, data=data)
-
-        # Overwrite bins/chrom to remove the enum dtype that cooler.create_cooler
-        # created (it maps integers to the original chrom names, which we replaced)
-        chrom_data = f["bins"]["chrom"][:]
-        del f["bins"]["chrom"]
-        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
-
-        # Write genome_offset
-        idx = f["indexes"]
-        if "genome_offset" in idx:
-            del idx["genome_offset"]
-        idx.create_dataset("genome_offset", data=genome_offset)
-
-        # Update / overwrite chrom_offset
-        if "chrom_offset" in idx:
-            del idx["chrom_offset"]
-        idx.create_dataset("chrom_offset", data=chrom_offset)
-
-        # Set attrs
-        f.attrs["format"] = COOLER_FORMAT
-        f.attrs["format-url"] = COOLER_FORMAT_URL
-        f.attrs["metacooler-format"] = METACOOLER_FORMAT
-        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
-        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
-        f.attrs["generated-by"] = f"metacooler-{__version__}"
-        f.attrs["ngenomes"] = n_genomes
-        f.attrs["contig-ordering"] = contig_ordering
-        if assembly_name:
-            f.attrs["assembly-name"] = assembly_name
+    _finalize_metacool_file(
+        uri,
+        genomes_df,
+        contigs_df,
+        chrom_offset,
+        genome_offset,
+        contig_ordering=contig_ordering,
+        assembly_name=assembly_name,
+    )
 
     # Validate
     validate(uri)
@@ -866,115 +898,60 @@ def from_cool(
     ).astype(np.int64)
     genomes.insert(3, "n_bins", _genome_bin_counts)
 
-    # Stream and remap pixel bin IDs in chunks to avoid loading the full table.
-    # Peak memory drops from 2× pixel table size (original + copy) to 1× (remapped).
+    # Stream and remap pixel bin IDs in chunks using a generator to avoid
+    # loading the full pixel table into memory.
     _chunksize = 10_000_000
     _n_pixels = clr.info["nnz"]
-    _remapped_chunks: list[pd.DataFrame] = []
-    for _i in range(0, _n_pixels, _chunksize):
-        _chunk = clr.pixels()[_i : _i + _chunksize].copy()
-        _chunk["bin1_id"] = old_to_new_bin[_chunk["bin1_id"].values.astype(np.int64)]
-        _chunk["bin2_id"] = old_to_new_bin[_chunk["bin2_id"].values.astype(np.int64)]
-        _chunk["count"] = _chunk["count"].astype(np.int32)
-        _swap = _chunk["bin1_id"] > _chunk["bin2_id"]
-        _chunk.loc[_swap, ["bin1_id", "bin2_id"]] = _chunk.loc[
-            _swap, ["bin2_id", "bin1_id"]
-        ].values
-        _remapped_chunks.append(_chunk[["bin1_id", "bin2_id", "count"]])
-    pixels_remapped = pd.concat(_remapped_chunks, ignore_index=True)
-    del _remapped_chunks
-    # Sort by (bin1_id, bin2_id) so cooler.create_cooler(ordered=True) is correct
-    # after the contig-reordering permutation.
-    _sort_order = np.lexsort(
-        (pixels_remapped["bin2_id"].values, pixels_remapped["bin1_id"].values)
-    )
-    pixels_remapped = pixels_remapped.iloc[_sort_order].reset_index(drop=True)
+
+    def _remap_pixel_stream():
+        for _i in range(0, _n_pixels, _chunksize):
+            _chunk = clr.pixels()[_i : _i + _chunksize].copy()
+            _chunk["bin1_id"] = old_to_new_bin[
+                _chunk["bin1_id"].values.astype(np.int64)
+            ]
+            _chunk["bin2_id"] = old_to_new_bin[
+                _chunk["bin2_id"].values.astype(np.int64)
+            ]
+            _chunk["count"] = _chunk["count"].astype(np.int32)
+            _swap = _chunk["bin1_id"] > _chunk["bin2_id"]
+            _chunk.loc[_swap, ["bin1_id", "bin2_id"]] = _chunk.loc[
+                _swap, ["bin2_id", "bin1_id"]
+            ].values
+            yield _chunk[["bin1_id", "bin2_id", "count"]]
 
     logger.info(
         f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
     )
 
-    # Create cooler file from remapped bins and pixels
+    # Create cooler file from remapped bins and pixel stream.
+    # Use ordered=False so cooler performs an external sort, avoiding the need
+    # to materialise the full pixel table in memory before writing.
     cooler.create_cooler(
         str(output_path),
         bins=bins_remapped,
-        pixels=pixels_remapped,
-        ordered=True,
+        pixels=_remap_pixel_stream(),
+        ordered=False,
         symmetric_upper=True,
         assembly=assembly_name or "imported",
         metadata=metadata or {},
     )
 
+    # Compute genome_offset from contigs
+    genome_ids = contigs["genome_id"].values
+    n_genomes = len(genomes)
+    genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
+    genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
+    genome_offset[1:] = np.cumsum(genome_counts)
+
     # Add metacooler-specific groups and attributes
-    with h5py.File(output_path, "a") as f:
-        # Overwrite chroms with contigs (soft link for cooler compat)
-        if "chroms" in f:
-            del f["chroms"]
-        f["chroms"] = h5py.SoftLink("contigs")
-
-        # Write genomes group
-        if "genomes" in f:
-            del f["genomes"]
-        g = f.create_group("genomes", track_order=True)
-        for col in genomes.columns:
-            data = genomes[col].values
-            if data.dtype == object or pd.api.types.is_string_dtype(data.dtype):
-                arr = [
-                    ""
-                    if (v is None or (isinstance(v, float) and np.isnan(v)))
-                    else str(v)
-                    for v in data
-                ]
-                max_len = max((len(s) for s in arr), default=1)
-                g.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
-            else:
-                g.create_dataset(col, data=data)
-
-        # Overwrite contigs group with genome_id
-        if "contigs" in f:
-            del f["contigs"]
-        c = f.create_group("contigs", track_order=True)
-        for col in contigs.columns:
-            data = contigs[col].values
-            if data.dtype.kind in ("O", "U"):
-                arr = [
-                    ""
-                    if (v is None or (isinstance(v, float) and np.isnan(v)))
-                    else str(v)
-                    for v in data
-                ]
-                max_len = max((len(s) for s in arr), default=1)
-                c.create_dataset(col, data=np.array(arr, dtype=f"S{max_len}"))
-            else:
-                c.create_dataset(col, data=data)
-
-        # Overwrite bins/chrom to remove enum dtype
-        chrom_data = f["bins"]["chrom"][:]
-        del f["bins"]["chrom"]
-        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
-
-        # Compute and write genome_offset (O(n_contigs) via bincount)
-        genome_ids = contigs["genome_id"].values
-        n_genomes = len(genomes)
-        genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
-        genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
-        genome_offset[1:] = np.cumsum(genome_counts)
-
-        idx = f["indexes"]
-        if "genome_offset" in idx:
-            del idx["genome_offset"]
-        idx.create_dataset("genome_offset", data=genome_offset)
-
-        # Set metacooler attributes
-        f.attrs["format"] = COOLER_FORMAT
-        f.attrs["format-url"] = COOLER_FORMAT_URL
-        f.attrs["metacooler-format"] = METACOOLER_FORMAT
-        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
-        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
-        f.attrs["generated-by"] = f"metacooler-{__version__}"
-        f.attrs["ngenomes"] = n_genomes
-        f.attrs["contig-ordering"] = contig_ordering
-        if assembly_name:
-            f.attrs["assembly-name"] = assembly_name
+    _finalize_metacool_file(
+        output_path,
+        genomes,
+        contigs,
+        None,
+        genome_offset,
+        contig_ordering=contig_ordering,
+        assembly_name=assembly_name,
+    )
 
     logger.info(f"Successfully created metacool file: {output_path}")

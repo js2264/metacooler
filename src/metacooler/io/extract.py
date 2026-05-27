@@ -123,37 +123,47 @@ def _extract_contig_ids(
     )
 
     genome_bin_set = set(genome_bin_indices.tolist())
-    pixels = mc.pixels()
+    genome_bin_array = np.array(sorted(genome_bin_set), dtype=np.int64)
+    valid_min, valid_max = genome_bin_array[0], genome_bin_array[-1]
+    chunksize = 1_000_000
 
-    mask = pixels["bin1_id"].isin(genome_bin_set) & pixels["bin2_id"].isin(
-        genome_bin_set
+    # Use bin1_offset index to find pixel range for this genome's bins
+    with __import__("h5py").File(str(mc.store), "r") as _f:
+        _root = _f[mc._group_path.lstrip("/")] if mc._group_path != "/" else _f
+        bin1_offset = _root["indexes"]["bin1_offset"][:]
+    pix_lo = int(bin1_offset[valid_min])
+    n_pix = len(mc._clr.pixels())
+    pix_hi = (
+        int(bin1_offset[valid_max + 1]) if valid_max + 1 < len(bin1_offset) else n_pix
     )
-    genome_pixels = pixels[mask].copy()
 
-    genome_pixels["bin1_id"] = genome_pixels["bin1_id"].map(global_to_local_bin)
-    genome_pixels["bin2_id"] = genome_pixels["bin2_id"].map(global_to_local_bin)
-    genome_pixels = genome_pixels.dropna(subset=["bin1_id", "bin2_id"])
-    genome_pixels["bin1_id"] = genome_pixels["bin1_id"].astype(np.int64)
-    genome_pixels["bin2_id"] = genome_pixels["bin2_id"].astype(np.int64)
-    genome_pixels["count"] = genome_pixels["count"].astype(np.int32)
-
-    swap = genome_pixels["bin1_id"] > genome_pixels["bin2_id"]
-    genome_pixels.loc[swap, ["bin1_id", "bin2_id"]] = genome_pixels.loc[
-        swap, ["bin2_id", "bin1_id"]
-    ].values
-    genome_pixels = genome_pixels.groupby(["bin1_id", "bin2_id"], as_index=False)[
-        "count"
-    ].sum()
+    def _pixel_stream():
+        for _i in range(pix_lo, pix_hi, chunksize):
+            chunk = mc._clr.pixels()[_i : _i + chunksize].copy()
+            mask = chunk["bin1_id"].isin(genome_bin_set) & chunk["bin2_id"].isin(
+                genome_bin_set
+            )
+            if not mask.any():
+                continue
+            chunk = chunk[mask].copy()
+            chunk["bin1_id"] = chunk["bin1_id"].map(global_to_local_bin)
+            chunk["bin2_id"] = chunk["bin2_id"].map(global_to_local_bin)
+            chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
+            chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
+            chunk["count"] = chunk["count"].astype(np.int32)
+            swap = chunk["bin1_id"] > chunk["bin2_id"]
+            chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
+                swap, ["bin2_id", "bin1_id"]
+            ].values
+            yield chunk[["bin1_id", "bin2_id", "count"]]
 
     cooler.create_cooler(
         str(output),
         bins=bins_df,
-        pixels=genome_pixels,
-        ordered=True,
+        pixels=_pixel_stream(),
+        ordered=False,
         symmetric_upper=True,
         assembly=assembly,
         metadata={"source-file": str(mc.store)},
     )
-    logger.info(
-        "Written %d bins, %d pixels to %s", len(bins_df), len(genome_pixels), output
-    )
+    logger.info("Written %d bins to %s", len(bins_df), output)

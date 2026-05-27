@@ -19,7 +19,7 @@ metacooler create pairs --force --contigs ../contigs_table_1.tsv --genomes ../ma
 metacooler create pairs --force --drop-unassigned --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv --pairs ../contacts_1_rep1.pairs.gz --bins 1000 --output assembly_1_rep1_1kb_dropped.metacool
 metacooler dump -t bins assembly_1_rep1_1kb.metacool > dump_bins_before_drop.tsv
 metacooler dump -t bins assembly_1_rep1_1kb_dropped.metacool > dump_bins_after_drop.tsv
-git diff --no-index dump_bins_before_drop.tsv dump_bins_after_drop.tsv
+git diff --no-index --compact-summary dump_bins_before_drop.tsv dump_bins_after_drop.tsv || true
 md5sum dump_bins_before_drop.tsv dump_bins_after_drop.tsv
 
 # ================================================================================

@@ -7,36 +7,8 @@ from pathlib import Path
 
 import rich_click as click
 
+from metacooler.cli.cmd_create import _reconstruct_command
 from metacooler.cli.main import MetaCoolURI, cli
-
-
-def _reconstruct_command() -> str:
-    """Reconstruct the exact command line invocation from click context."""
-    ctx = click.get_current_context()
-    assert ctx is not None
-    parts = [ctx.command_path]
-    for param in ctx.command.params:
-        if isinstance(param, click.Option):
-            value = ctx.params.get(param.name)
-            if value is not None and value != param.default:
-                opt_str = param.opts[0] if param.opts else f"--{param.name}"
-                if param.is_flag:
-                    if value:
-                        parts.append(opt_str)
-                elif param.multiple:
-                    for v in value:
-                        parts.extend([opt_str, str(v)])
-                else:
-                    parts.extend([opt_str, str(value)])
-        elif isinstance(param, click.Argument):
-            value = ctx.params.get(param.name)
-            if value is not None:
-                if isinstance(value, tuple):
-                    for v in value:
-                        parts.append(str(v))
-                else:
-                    parts.append(str(value))
-    return " ".join(parts)
 
 
 def _read_metadata_dict(uri: str) -> dict:

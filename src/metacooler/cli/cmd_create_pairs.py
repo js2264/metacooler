@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal, cast
 
 import rich_click as click
 import yaml
@@ -138,7 +139,12 @@ def cmd_create_pairs(
         contig_table_format=contigs_format,  # type: ignore
         fasta=fasta,
         assembly_name=assembly_name,
-        contig_ordering=contig_order,  # type: ignore
+        contig_ordering=cast(
+            Literal[
+                "genome-then-length", "genome-then-alpha", "fasta", "alpha", "custom"
+            ],
+            contig_order,
+        ),
         drop_unassigned=drop_unassigned,
         binsize=binsize,
         genomes_table=genomes_table,

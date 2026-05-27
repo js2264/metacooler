@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal, cast
 
 import rich_click as click
 
@@ -129,7 +130,10 @@ def dump(
 
     dump_table(
         uri=metacool_path,
-        table=table,  # type: ignore
+        table=cast(
+            Literal["bins", "chroms", "contigs", "genomes", "pixels", "indexes", "all"],
+            table,
+        ),
         genomes=genomes or None,
         contigs=contigs or None,
         range1=range1,
@@ -137,6 +141,6 @@ def dump(
         header=header,
         out=output,
         prefix=prefix,
-        pixels_format=pixels_format,  # type: ignore
+        pixels_format=cast(Literal["long", "wide"], pixels_format),
         weight=weight,
     )

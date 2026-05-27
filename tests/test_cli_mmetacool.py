@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from metacooler.cli.main import cli
 from metacooler.io.mmetacool import create_mmetacool, list_entries
+from metacooler.schema import COOLER_FORMAT
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def tiny_mcool(tmp_path: Path, tiny_metacooler: Path) -> Path:
     """A tiny .mcool file with one resolution."""
     out = tmp_path / "tiny.mcool"
     with h5py.File(out, "w") as dst:
-        dst.attrs["format"] = "HDF5::Cooler"
+        dst.attrs["format"] = COOLER_FORMAT
         res = dst.create_group("resolutions")
         with h5py.File(tiny_metacooler, "r") as src:
             src.copy(src["/"], res, name="1000")

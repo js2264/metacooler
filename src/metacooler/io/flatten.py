@@ -42,31 +42,34 @@ def flatten(
     bins["start"] = bins["start"].astype(np.int32)
     bins["end"] = bins["end"].astype(np.int32)
 
-    # Get pixels — bin IDs are unchanged
-    pixels = mc.pixels().copy()
-    pixels["bin1_id"] = pixels["bin1_id"].astype(np.int64)
-    pixels["bin2_id"] = pixels["bin2_id"].astype(np.int64)
-    pixels["count"] = pixels["count"].astype(np.int32)
+    # Stream pixels in chunks to avoid loading the full table into memory.
+    chunksize = 1_000_000
+    n_pix = mc._clr.info["nnz"]
 
-    # Enforce upper triangle
-    swap = pixels["bin1_id"] > pixels["bin2_id"]
-    pixels.loc[swap, ["bin1_id", "bin2_id"]] = pixels.loc[
-        swap, ["bin2_id", "bin1_id"]
-    ].values
+    def _pixel_stream():
+        for _i in range(0, n_pix, chunksize):
+            chunk = mc._clr.pixels()[_i : _i + chunksize].copy()
+            chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
+            chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
+            chunk["count"] = chunk["count"].astype(np.int32)
+            swap = chunk["bin1_id"] > chunk["bin2_id"]
+            chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
+                swap, ["bin2_id", "bin1_id"]
+            ].values
+            yield chunk[["bin1_id", "bin2_id", "count"]]
 
     logger.info(
-        "Flattening %s → %s: %d contigs, %d bins, %d pixels",
+        "Flattening %s → %s: %d contigs, %d bins",
         uri,
         output,
         len(contigs),
         len(bins),
-        len(pixels),
     )
 
     cooler.create_cooler(
         str(output),
         bins=bins,
-        pixels=pixels,
+        pixels=_pixel_stream(),
         ordered=True,
         symmetric_upper=True,
         metadata={"source-file": str(uri), "flattened": True},

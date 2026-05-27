@@ -38,7 +38,11 @@ def _reconstruct_command() -> str:
         elif isinstance(param, click.Argument):
             value = ctx.params.get(param.name)
             if value is not None:
-                parts.append(str(value))
+                if isinstance(value, tuple):
+                    for v in value:
+                        parts.append(str(v))
+                else:
+                    parts.append(str(value))
     return " ".join(parts)
 
 

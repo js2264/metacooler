@@ -1,20 +1,22 @@
 """HDF5 format constants, dtypes, and validators for metacooler."""
 
 from __future__ import annotations
+from typing import Literal
 
 from pathlib import Path
 
 import h5py
+import cooler
 import numpy as np
 import pandas as pd
 
-METACOOLER_FORMAT = "MetaCooler::1.0"
+METACOOLER_FORMAT = "HDF5::MetaCooler"
 METACOOLER_FORMAT_VERSION = 1
 METACOOLER_FORMAT_URL = "https://github.com/js2264/metacooler"
-COOLER_FORMAT = "HDF5::Cooler"
-COOLER_FORMAT_URL = "https://github.com/open2c/cooler"
 MMETACOOLER_FORMAT = "HDF5::MMetaCooler"
 MMETACOOLER_FORMAT_VERSION = 1
+COOLER_FORMAT: Literal["HDF5::Cooler"] = cooler.create._constants.MAGIC
+COOLER_FORMAT_URL = "https://github.com/open2c/cooler"
 
 # Dense matrix size guard: refuse to allocate matrices larger than this
 DENSE_MATRIX_BIN_LIMIT = 10_000
@@ -97,7 +99,7 @@ def validate(uri: str | Path) -> None:
 
         # --- genomes table ---
         g = f["genomes"]
-        for col in ("name", "length", "n_contigs"):
+        for col in ("name", "length", "n_contigs", "n_bins"):
             if col not in g:
                 raise MetaCoolerFormatError(f"Missing column in /genomes: {col}")
 
