@@ -41,12 +41,12 @@ DATA = Path(__file__).parent / "data"
 A1_REP1_1KB_NGENOMES = 11
 A1_REP1_1KB_NCONTIGS = 44
 A1_REP1_1KB_NBINS = 661
-A1_REP1_1KB_NNZ = 21799
+A1_REP1_1KB_NNZ = 21633
 A1_REP1_1KB_SUM = 50000
 A1_REP1_1KB_BINSIZE = 1000
 
 # assembly_1_rep2_1kb merged properties
-MERGED_NNZ = 36584
+MERGED_NNZ = 36249
 MERGED_SUM = 100000
 
 # ---------------------------------------------------------------------------
@@ -59,137 +59,137 @@ MERGED_SUM = 100000
 # __unbinned__ has empty metadata columns (tabs present but values empty).
 EXPECTED_GENOMES_ROWS: list[tuple] = [
     ("__unbinned__", "42000", "5", "42", "", "", "", ""),
-    ("MAG_01", "60000", "3", "60", "Firmicutes", "0.85", "0.27", "medium"),
-    ("MAG_02", "124000", "4", "124", "Firmicutes", "0.74", "0.11", "medium"),
-    ("MAG_03", "80000", "5", "80", "Proteobacteria", "0.96", "0.29", "low"),
-    ("MAG_04", "24000", "3", "24", "Bacteroidetes", "0.75", "0.3", "low"),
-    ("MAG_05", "41000", "4", "41", "Proteobacteria", "0.99", "0.47", "high"),
-    ("MAG_06", "83000", "5", "83", "Bacteroidetes", "0.78", "0.15", "high"),
-    ("MAG_07", "30000", "3", "30", "Proteobacteria", "0.99", "0.2", "high"),
-    ("MAG_08", "49000", "4", "49", "Bacteroidetes", "0.6", "0.27", "low"),
-    ("MAG_09", "103000", "5", "103", "Proteobacteria", "0.55", "0.2", "low"),
-    ("MAG_10", "25000", "3", "25", "Proteobacteria", "0.75", "0.39", "low"),
+    ("MAG_01", "60000", "3", "60", "Bacteroidetes", "0.63", "0.1", "high"),
+    ("MAG_02", "124000", "4", "124", "Firmicutes", "0.92", "0.14", "low"),
+    ("MAG_03", "80000", "5", "80", "Proteobacteria", "0.73", "0.03", "low"),
+    ("MAG_04", "24000", "3", "24", "Firmicutes", "0.99", "0.24", "medium"),
+    ("MAG_05", "41000", "4", "41", "Proteobacteria", "0.89", "0.27", "high"),
+    ("MAG_06", "83000", "5", "83", "Proteobacteria", "0.56", "0.49", "high"),
+    ("MAG_07", "30000", "3", "30", "Proteobacteria", "0.89", "0.37", "high"),
+    ("MAG_08", "49000", "4", "49", "Firmicutes", "0.9", "0.47", "high"),
+    ("MAG_09", "103000", "5", "103", "Proteobacteria", "0.95", "0.04", "low"),
+    ("MAG_10", "25000", "3", "25", "Proteobacteria", "0.99", "0.42", "medium"),
 ]
 
 # First 20 contig rows (name, length, genome_id, gc_content, coverage)
 EXPECTED_CONTIGS_ROWS_20: list[tuple] = [
-    ("contig_0_2", "25000", "1", "0.54", "66.47"),
-    ("contig_0_0", "22000", "1", "0.47", "71.7"),
-    ("contig_0_1", "13000", "1", "0.59", "10.0"),
-    ("contig_1_0", "50000", "2", "0.45", "87.98"),
-    ("contig_1_3", "50000", "2", "0.54", "20.81"),
-    ("contig_1_1", "12000", "2", "0.48", "25.74"),
-    ("contig_1_2", "12000", "2", "0.5", "23.26"),
-    ("contig_2_0", "27000", "3", "0.57", "71.51"),
-    ("contig_2_2", "23000", "3", "0.44", "30.4"),
-    ("contig_2_1", "10000", "3", "0.6", "12.01"),
-    ("contig_2_3", "10000", "3", "0.46", "55.85"),
-    ("contig_2_4", "10000", "3", "0.59", "8.28"),
-    ("contig_3_0", "18000", "4", "0.6", "13.78"),
-    ("contig_3_1", "3000", "4", "0.45", "37.7"),
-    ("contig_3_2", "3000", "4", "0.5", "92.94"),
-    ("contig_4_2", "19000", "5", "0.45", "8.81"),
-    ("contig_4_0", "9000", "5", "0.51", "99.4"),
-    ("contig_4_3", "7000", "5", "0.52", "8.28"),
-    ("contig_4_1", "6000", "5", "0.59", "75.43"),
-    ("contig_5_1", "48000", "6", "0.56", "63.69"),
+    ("contig_1_023", "25000", "1", "0.42", "66.93"),
+    ("contig_1_036", "22000", "1", "0.56", "37.79"),
+    ("contig_1_012", "13000", "1", "0.49", "45.37"),
+    ("contig_1_005", "50000", "2", "0.56", "63.69"),
+    ("contig_1_034", "50000", "2", "0.41", "28.51"),
+    ("contig_1_001", "12000", "2", "0.59", "75.43"),
+    ("contig_1_020", "12000", "2", "0.57", "35.01"),
+    ("contig_1_029", "27000", "3", "0.54", "11.43"),
+    ("contig_1_019", "23000", "3", "0.51", "10.62"),
+    ("contig_1_027", "10000", "3", "0.44", "74.74"),
+    ("contig_1_030", "10000", "3", "0.58", "67.79"),
+    ("contig_1_033", "10000", "3", "0.58", "59.19"),
+    ("contig_1_000", "18000", "4", "0.51", "99.4"),
+    ("contig_1_002", "3000", "4", "0.45", "8.81"),
+    ("contig_1_037", "3000", "4", "0.6", "93.22"),
+    ("contig_1_042", "19000", "5", "0.52", "18.45"),
+    ("contig_1_043", "9000", "5", "0.42", "97.78"),
+    ("contig_1_026", "7000", "5", "0.54", "88.11"),
+    ("contig_1_025", "6000", "5", "0.44", "7.45"),
+    ("contig_1_007", "48000", "6", "0.41", "10.44"),
 ]
 
 # First 20 chrom rows (name, length) – same order as contigs
 EXPECTED_CHROMS_ROWS_20: list[tuple] = [
-    ("contig_0_2", "25000"),
-    ("contig_0_0", "22000"),
-    ("contig_0_1", "13000"),
-    ("contig_1_0", "50000"),
-    ("contig_1_3", "50000"),
-    ("contig_1_1", "12000"),
-    ("contig_1_2", "12000"),
-    ("contig_2_0", "27000"),
-    ("contig_2_2", "23000"),
-    ("contig_2_1", "10000"),
-    ("contig_2_3", "10000"),
-    ("contig_2_4", "10000"),
-    ("contig_3_0", "18000"),
-    ("contig_3_1", "3000"),
-    ("contig_3_2", "3000"),
-    ("contig_4_2", "19000"),
-    ("contig_4_0", "9000"),
-    ("contig_4_3", "7000"),
-    ("contig_4_1", "6000"),
-    ("contig_5_1", "48000"),
+    ("contig_1_023", "25000"),
+    ("contig_1_036", "22000"),
+    ("contig_1_012", "13000"),
+    ("contig_1_005", "50000"),
+    ("contig_1_034", "50000"),
+    ("contig_1_001", "12000"),
+    ("contig_1_020", "12000"),
+    ("contig_1_029", "27000"),
+    ("contig_1_019", "23000"),
+    ("contig_1_027", "10000"),
+    ("contig_1_030", "10000"),
+    ("contig_1_033", "10000"),
+    ("contig_1_000", "18000"),
+    ("contig_1_002", "3000"),
+    ("contig_1_037", "3000"),
+    ("contig_1_042", "19000"),
+    ("contig_1_043", "9000"),
+    ("contig_1_026", "7000"),
+    ("contig_1_025", "6000"),
+    ("contig_1_007", "48000"),
 ]
 
-# First 20 bin rows (chrom_name, start, end) – 1 kb bins on contig_0_2
+# First 20 bin rows (chrom_name, start, end) – 1 kb bins on contig_1_023
 EXPECTED_BINS_ROWS_20: list[tuple] = [
-    ("contig_0_2", "0", "1000"),
-    ("contig_0_2", "1000", "2000"),
-    ("contig_0_2", "2000", "3000"),
-    ("contig_0_2", "3000", "4000"),
-    ("contig_0_2", "4000", "5000"),
-    ("contig_0_2", "5000", "6000"),
-    ("contig_0_2", "6000", "7000"),
-    ("contig_0_2", "7000", "8000"),
-    ("contig_0_2", "8000", "9000"),
-    ("contig_0_2", "9000", "10000"),
-    ("contig_0_2", "10000", "11000"),
-    ("contig_0_2", "11000", "12000"),
-    ("contig_0_2", "12000", "13000"),
-    ("contig_0_2", "13000", "14000"),
-    ("contig_0_2", "14000", "15000"),
-    ("contig_0_2", "15000", "16000"),
-    ("contig_0_2", "16000", "17000"),
-    ("contig_0_2", "17000", "18000"),
-    ("contig_0_2", "18000", "19000"),
-    ("contig_0_2", "19000", "20000"),
+    ("contig_1_023", "0", "1000"),
+    ("contig_1_023", "1000", "2000"),
+    ("contig_1_023", "2000", "3000"),
+    ("contig_1_023", "3000", "4000"),
+    ("contig_1_023", "4000", "5000"),
+    ("contig_1_023", "5000", "6000"),
+    ("contig_1_023", "6000", "7000"),
+    ("contig_1_023", "7000", "8000"),
+    ("contig_1_023", "8000", "9000"),
+    ("contig_1_023", "9000", "10000"),
+    ("contig_1_023", "10000", "11000"),
+    ("contig_1_023", "11000", "12000"),
+    ("contig_1_023", "12000", "13000"),
+    ("contig_1_023", "13000", "14000"),
+    ("contig_1_023", "14000", "15000"),
+    ("contig_1_023", "15000", "16000"),
+    ("contig_1_023", "16000", "17000"),
+    ("contig_1_023", "17000", "18000"),
+    ("contig_1_023", "18000", "19000"),
+    ("contig_1_023", "19000", "20000"),
 ]
 
 # First 20 pixel rows (bin1_id, bin2_id, count)
 EXPECTED_PIXELS_ROWS_20: list[tuple] = [
-    ("0", "1", "2"),
+    ("0", "0", "1"),
+    ("0", "1", "1"),
     ("0", "2", "1"),
-    ("0", "3", "1"),
-    ("0", "4", "2"),
-    ("0", "5", "3"),
-    ("0", "7", "1"),
-    ("0", "8", "1"),
+    ("0", "4", "1"),
+    ("0", "5", "1"),
+    ("0", "8", "2"),
     ("0", "9", "1"),
+    ("0", "10", "4"),
     ("0", "11", "2"),
-    ("0", "14", "1"),
+    ("0", "12", "1"),
+    ("0", "13", "1"),
+    ("0", "14", "3"),
     ("0", "15", "3"),
-    ("0", "16", "2"),
-    ("0", "17", "4"),
+    ("0", "16", "1"),
+    ("0", "17", "1"),
     ("0", "19", "1"),
-    ("0", "20", "1"),
-    ("0", "21", "4"),
-    ("0", "22", "2"),
-    ("0", "23", "3"),
-    ("0", "24", "3"),
-    ("0", "25", "1"),
+    ("0", "20", "2"),
+    ("0", "22", "1"),
+    ("0", "24", "1"),
+    ("0", "25", "3"),
 ]
 
-# First 20 pixels for range query contig_0_0:5000-15000
-# bin_id 30 = contig_0_0[5000-6000], 31 = [6000-7000], …, 39 = [14000-15000]
+# First 20 pixels for range query contig_1_023:5000-15000
+# contig_1_023 is the first contig (bins 0–24); bins 5–14 = positions 5000–15000
 EXPECTED_PIXELS_RANGE_ROWS_20: list[tuple] = [
-    ("30", "30", "1"),
-    ("30", "31", "1"),
-    ("30", "32", "2"),
-    ("30", "33", "3"),
-    ("30", "34", "2"),
-    ("30", "37", "2"),
-    ("30", "38", "2"),
-    ("30", "39", "2"),
-    ("31", "33", "3"),
-    ("31", "34", "1"),
-    ("31", "35", "2"),
-    ("31", "36", "1"),
-    ("31", "37", "1"),
-    ("31", "39", "3"),
-    ("32", "33", "3"),
-    ("32", "36", "1"),
-    ("32", "38", "3"),
-    ("32", "39", "1"),
-    ("33", "34", "1"),
-    ("33", "37", "2"),
+    ("5", "5", "1"),
+    ("5", "6", "1"),
+    ("5", "8", "1"),
+    ("5", "10", "2"),
+    ("5", "12", "2"),
+    ("5", "13", "1"),
+    ("5", "14", "2"),
+    ("6", "6", "1"),
+    ("6", "7", "2"),
+    ("6", "8", "1"),
+    ("6", "9", "5"),
+    ("6", "10", "2"),
+    ("6", "11", "2"),
+    ("6", "13", "2"),
+    ("6", "14", "5"),
+    ("7", "7", "1"),
+    ("7", "8", "2"),
+    ("7", "9", "1"),
+    ("7", "10", "2"),
+    ("7", "11", "1"),
 ]
 
 
@@ -718,7 +718,7 @@ class TestDump:
     def test_dump_pixels_range(self, runner, a1_rep1_1kb):
         result = runner.invoke(
             cli,
-            ["dump", "-t", "pixels", "-r", "contig_0_0:5000-15000", str(a1_rep1_1kb)],
+            ["dump", "-t", "pixels", "-r", "contig_1_023:5000-15000", str(a1_rep1_1kb)],
         )
         assert result.exit_code == 0, result.output
         lines = [ln for ln in result.output.strip().split("\n") if ln]
@@ -734,9 +734,9 @@ class TestDump:
                 "-t",
                 "pixels",
                 "-r",
-                "contig_0_0:5000-15000",
+                "contig_1_023:5000-15000",
                 "-r2",
-                "contig_0_1:0-10000",
+                "contig_1_036:0-10000",
                 str(a1_rep1_1kb),
             ],
         )
@@ -846,13 +846,13 @@ class TestDump:
             )
 
     def test_dump_bins_first_contig_is_correct(self, runner, a1_rep1_1kb):
-        """All bins for the first contig (contig_0_2, 25 kb) appear first."""
+        """All bins for the first contig (contig_1_023, 25 kb) appear first."""
         result = runner.invoke(cli, ["dump", "-t", "bins", str(a1_rep1_1kb)])
         rows = _parse_rows(result.output)
-        contig_0_2_bins = [r for r in rows if r[0] == "contig_0_2"]
-        assert len(contig_0_2_bins) == 25  # 25 × 1 kb bins
+        contig_1_023_bins = [r for r in rows if r[0] == "contig_1_023"]
+        assert len(contig_1_023_bins) == 25  # 25 × 1 kb bins
         # Starts must be 0, 1000, …, 24000 in order
-        starts = [int(r[1]) for r in contig_0_2_bins]
+        starts = [int(r[1]) for r in contig_1_023_bins]
         assert starts == list(range(0, 25000, 1000))
 
     def test_dump_pixels_exact_first_20_rows(self, runner, a1_rep1_1kb):
@@ -866,10 +866,10 @@ class TestDump:
             )
 
     def test_dump_pixels_range_exact_first_20_rows(self, runner, a1_rep1_1kb):
-        """Range query contig_0_0:5000-15000 returns the correct pixels in order."""
+        """Range query contig_1_023:5000-15000 returns the correct pixels in order."""
         result = runner.invoke(
             cli,
-            ["dump", "-t", "pixels", "-r", "contig_0_0:5000-15000", str(a1_rep1_1kb)],
+            ["dump", "-t", "pixels", "-r", "contig_1_023:5000-15000", str(a1_rep1_1kb)],
         )
         assert result.exit_code == 0, result.output
         rows = _parse_rows(result.output)
@@ -880,17 +880,17 @@ class TestDump:
             )
 
     def test_dump_pixels_range_bin_ids_within_range(self, runner, a1_rep1_1kb):
-        """All pixels from range query have bin1_id in [30, 39] (contig_0_0:5000-15000)."""
+        """All pixels from range query have bin1_id in [5, 14] (contig_1_023:5000-15000)."""
         result = runner.invoke(
             cli,
-            ["dump", "-t", "pixels", "-r", "contig_0_0:5000-15000", str(a1_rep1_1kb)],
+            ["dump", "-t", "pixels", "-r", "contig_1_023:5000-15000", str(a1_rep1_1kb)],
         )
         rows = _parse_rows(result.output)
-        # contig_0_0 starts at bin 25 (after 25 bins for contig_0_2)
-        # bins 30–39 correspond to positions 5000–15000 on contig_0_0
+        # contig_1_023 is the first contig (bins 0–24)
+        # bins 5–14 correspond to positions 5000–15000 on contig_1_023
         for r in rows:
             bin1, bin2 = int(r[0]), int(r[1])
-            assert 30 <= bin1 <= 39 or 30 <= bin2 <= 39
+            assert 5 <= bin1 <= 14 or 5 <= bin2 <= 14
 
 
 # ---------------------------------------------------------------------------
@@ -1561,7 +1561,7 @@ class TestExtract:
         )
         c = cooler.Cooler(str(out))
         assert c.info["nbins"] == 60
-        assert c.info["nnz"] == 1543
+        assert c.info["nnz"] == 1503
 
     def test_extract_multiple_genomes(self, runner, tmp_path, a1_rep1_1kb):
         out = tmp_path / "MAG_01-02.cool"
@@ -1617,11 +1617,11 @@ class TestExtract:
         mag01 = cooler.Cooler(str(tmp_path / "split_MAG_01.cool"))
         mag02 = cooler.Cooler(str(tmp_path / "split_MAG_02.cool"))
         assert mag01.info["nbins"] == 60
-        assert mag01.info["nnz"] == 1543
+        assert mag01.info["nnz"] == 1503
         assert mag02.info["nbins"] == 124
 
     def test_extract_single_contig(self, runner, tmp_path, a1_rep1_1kb):
-        out = tmp_path / "contig_0_0.cool"
+        out = tmp_path / "contig_1_023.cool"
         result = runner.invoke(
             cli,
             [
@@ -1629,7 +1629,7 @@ class TestExtract:
                 "--output",
                 str(out),
                 "--contigs",
-                "contig_0_0",
+                "contig_1_023",
                 str(a1_rep1_1kb),
             ],
         )
@@ -1637,8 +1637,8 @@ class TestExtract:
         assert out.exists()
         c = cooler.Cooler(str(out))
         assert c.info["nchroms"] == 1
-        assert c.info["nbins"] == 22
-        assert c.info["nnz"] == 204
+        assert c.info["nbins"] == 25
+        assert c.info["nnz"] == 243
 
     def test_extract_multiple_contigs(self, runner, tmp_path, a1_rep1_1kb):
         out = tmp_path / "two_contigs.cool"
@@ -1649,7 +1649,7 @@ class TestExtract:
                 "--output",
                 str(out),
                 "--contigs",
-                "contig_0_0,contig_0_1",
+                "contig_1_023,contig_1_036",
                 str(a1_rep1_1kb),
             ],
         )
@@ -1669,7 +1669,7 @@ class TestExtract:
                 str(out),
                 "--split",
                 "--contigs",
-                "contig_0_0,contig_0_1",
+                "contig_1_023,contig_1_036",
                 str(a1_rep1_1kb),
             ],
         )

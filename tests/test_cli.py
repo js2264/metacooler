@@ -152,7 +152,7 @@ class TestShow:
         out = tmp_path / "show.png"
         result = runner.invoke(
             cli,
-            ["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)],
+            ["show", "--level", "genome", "-o", str(out), "--dpi", "50", "-f", str(tiny_metacooler)],
         )
         assert result.exit_code == 0
         assert out.exists()
@@ -161,7 +161,7 @@ class TestShow:
         out = tmp_path / "show.png"
         result = runner.invoke(
             cli,
-            ["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)],
+            ["show", "--level", "contig", "-o", str(out), "--dpi", "50", "-f", str(tiny_metacooler)],
         )
         assert result.exit_code == 0
         assert out.exists()
