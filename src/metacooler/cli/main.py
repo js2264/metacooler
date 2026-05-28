@@ -72,6 +72,7 @@ def cli() -> None:
 # Import subcommands so they register
 from metacooler.cli import (  # noqa: E402, F401
     cmd_aggregate,
+    cmd_attrs,
     cmd_binnify,
     cmd_cp,
     cmd_create,
@@ -89,5 +90,6 @@ from metacooler.cli import (  # noqa: E402, F401
     cmd_rm,
     cmd_show,
     cmd_stack,
+    cmd_tree,
     cmd_zoomify,
 )

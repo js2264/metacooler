@@ -48,3 +48,29 @@ class TestMerge:
             out = tmp_path / "merged.metacool"
             with pytest.raises(ValueError, match="Contigs table mismatch"):
                 merge([tiny_metacooler, other], out)
+
+    def test_merge_bins_chrom_dtype_is_not_enum(self, tiny_metacooler, tmp_path):
+        """bins/chrom must be plain int32 (no HDF5 enum), not an HDF5 enum dtype."""
+        import h5py
+
+        out = tmp_path / "merged.metacool"
+        merge([tiny_metacooler, tiny_metacooler], out)
+        with h5py.File(out, "r") as f:
+            chrom_dtype = f["bins"]["chrom"].dtype
+        assert chrom_dtype == "int32", (
+            f"Expected int32 but got {chrom_dtype} — enum dtype not stripped"
+        )
+
+    def test_merge_pixel_sums_double(self, tiny_metacooler, tmp_path):
+        """Merging identical files should double all pixel counts."""
+        import h5py
+
+        out = tmp_path / "merged.metacool"
+        merge([tiny_metacooler, tiny_metacooler], out)
+        with h5py.File(tiny_metacooler, "r") as f:
+            orig_sum = int(f["pixels"]["count"][:].sum())
+        with h5py.File(out, "r") as f:
+            merged_sum = int(f["pixels"]["count"][:].sum())
+        assert merged_sum == 2 * orig_sum, (
+            f"Expected {2 * orig_sum} total counts but got {merged_sum}"
+        )

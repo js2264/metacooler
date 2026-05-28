@@ -12,6 +12,13 @@ __all__ = [
     "is_metacooler",
     "is_mmetacooler",
     "parse_uri",
+    "create_mmetacool",
+    "add_entry",
+    "remove_entry",
+    "copy_entry",
+    "move_entry",
+    "list_entries",
+    "copy_entry_cross_file",
 ]
 
 
@@ -40,4 +47,34 @@ def __getattr__(name: str) -> object:
         from metacooler.uri import parse_uri as _parse_uri
 
         return _parse_uri
+    if name == "create_mmetacool":
+        from metacooler.io.mmetacool import create_mmetacool as _create_mmetacool
+
+        return _create_mmetacool
+    if name == "add_entry":
+        from metacooler.io.mmetacool import add_entry as _add_entry
+
+        return _add_entry
+    if name == "remove_entry":
+        from metacooler.io.mmetacool import remove_entry as _remove_entry
+
+        return _remove_entry
+    if name == "copy_entry":
+        from metacooler.io.mmetacool import copy_entry as _copy_entry
+
+        return _copy_entry
+    if name == "move_entry":
+        from metacooler.io.mmetacool import move_entry as _move_entry
+
+        return _move_entry
+    if name == "list_entries":
+        from metacooler.io.mmetacool import list_entries as _list_entries
+
+        return _list_entries
+    if name == "copy_entry_cross_file":
+        from metacooler.io.mmetacool import (
+            copy_entry_cross_file as _copy_entry_cross_file,
+        )
+
+        return _copy_entry_cross_file
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

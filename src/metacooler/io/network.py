@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ def network(
     weight: str = "count",
     out: str | Path | None = None,
     header: bool = False,
+    chunksize: int = 1_000_000,
 ) -> None:
     """Export a network edge list from a metacool file.
 
@@ -30,6 +32,7 @@ def network(
         weight: Column name in the pixels table to use as edge weight.
         out: Output file path. If None, writes to stdout.
         header: If ``True``, write a ``node1\\tnode2\\tvalue`` header line.
+        chunksize: Number of pixels to process per chunk.
 
     Raises:
         ValueError: If *weight* column does not exist in the pixels table.
@@ -37,44 +40,71 @@ def network(
     from metacooler.api import MetaCooler
 
     mc = MetaCooler(uri)
-    pixels = mc.pixels()
 
     # Validate weight column
-    if weight not in pixels.columns:
+    with mc.open() as f:
+        pixel_cols = list(f["pixels"].keys())
+    if weight not in pixel_cols:
         raise ValueError(
             f"Weight column {weight!r} not found in pixels table. "
-            f"Available columns: {list(pixels.columns)}"
+            f"Available columns: {pixel_cols}"
         )
 
+    n_pix = len(mc._clr.pixels())
+
     if level == "bin":
-        # Raw pixel edge list
-        edges = pd.DataFrame(
-            {
-                "node1": pixels["bin1_id"].values,
-                "node2": pixels["bin2_id"].values,
-                "value": pixels[weight].values,
-            }
+        # Raw pixel edge list — stream chunks directly
+        rows = []
+        for lo in range(0, n_pix, chunksize):
+            chunk = mc._clr.pixels()[lo : lo + chunksize]
+            rows.append(
+                pd.DataFrame(
+                    {
+                        "node1": chunk["bin1_id"].values,
+                        "node2": chunk["bin2_id"].values,
+                        "value": chunk[weight].values,
+                    }
+                )
+            )
+        edges = (
+            pd.concat(rows, ignore_index=True)
+            if rows
+            else pd.DataFrame(columns=["node1", "node2", "value"])
         )
+
     elif level == "contig":
         bins = mc.bins()
         bin_to_contig = bins["chrom"].cat.codes.values
 
-        c1 = bin_to_contig[pixels["bin1_id"].values]
-        c2 = bin_to_contig[pixels["bin2_id"].values]
-        vals = pixels[weight].values
+        # Incremental aggregation using a dict accumulator to avoid OOM
+        accumulator: dict[tuple[int, int], int] = {}
+        for lo in range(0, n_pix, chunksize):
+            chunk = mc._clr.pixels()[lo : lo + chunksize]
+            c1 = bin_to_contig[chunk["bin1_id"].values].copy()
+            c2 = bin_to_contig[chunk["bin2_id"].values].copy()
+            vals = chunk[weight].values
 
-        # Enforce upper-triangular at the aggregated level
-        swap = c1 > c2
-        c1[swap], c2[swap] = c2[swap].copy(), c1[swap].copy()
+            swap = c1 > c2
+            c1[swap], c2[swap] = c2[swap].copy(), c1[swap].copy()
 
-        edge_df = pd.DataFrame({"node1": c1, "node2": c2, "value": vals})
-        edges = edge_df.groupby(["node1", "node2"], as_index=False)["value"].sum()
+            for i in range(len(c1)):
+                key = (int(c1[i]), int(c2[i]))
+                accumulator[key] = accumulator.get(key, 0) + int(vals[i])
 
-        # Map contig IDs to names
-        contigs = mc.contigs
-        contig_names = contigs["name"].values
-        edges["node1"] = contig_names[edges["node1"].values]
-        edges["node2"] = contig_names[edges["node2"].values]
+        if accumulator:
+            keys = np.array(list(accumulator.keys()), dtype=np.int64)
+            vals_arr = np.array(list(accumulator.values()), dtype=np.int64)
+            contigs = mc.contigs
+            contig_names = contigs["name"].values
+            edges = pd.DataFrame(
+                {
+                    "node1": contig_names[keys[:, 0]],
+                    "node2": contig_names[keys[:, 1]],
+                    "value": vals_arr,
+                }
+            )
+        else:
+            edges = pd.DataFrame(columns=["node1", "node2", "value"])
 
     elif level == "genome":
         bins = mc.bins()
@@ -82,22 +112,35 @@ def network(
         bin_to_contig = bins["chrom"].cat.codes.values
         contig_to_genome = contigs["genome_id"].values
 
-        g1 = contig_to_genome[bin_to_contig[pixels["bin1_id"].values]]
-        g2 = contig_to_genome[bin_to_contig[pixels["bin2_id"].values]]
-        vals = pixels[weight].values
+        accumulator2: dict[tuple[int, int], int] = {}
+        for lo in range(0, n_pix, chunksize):
+            chunk = mc._clr.pixels()[lo : lo + chunksize]
+            g1 = contig_to_genome[bin_to_contig[chunk["bin1_id"].values]].copy()
+            g2 = contig_to_genome[bin_to_contig[chunk["bin2_id"].values]].copy()
+            vals = chunk[weight].values
 
-        # Enforce upper-triangular
-        swap = g1 > g2
-        g1[swap], g2[swap] = g2[swap].copy(), g1[swap].copy()
+            swap = g1 > g2
+            g1[swap], g2[swap] = g2[swap].copy(), g1[swap].copy()
 
-        edge_df = pd.DataFrame({"node1": g1, "node2": g2, "value": vals})
-        edges = edge_df.groupby(["node1", "node2"], as_index=False)["value"].sum()
+            for i in range(len(g1)):
+                key = (int(g1[i]), int(g2[i]))
+                accumulator2[key] = accumulator2.get(key, 0) + int(vals[i])
 
-        # Map genome IDs to names
-        genomes = mc.genomes
-        genome_names = genomes["name"].values
-        edges["node1"] = genome_names[edges["node1"].values]
-        edges["node2"] = genome_names[edges["node2"].values]
+        if accumulator2:
+            keys = np.array(list(accumulator2.keys()), dtype=np.int64)
+            vals_arr = np.array(list(accumulator2.values()), dtype=np.int64)
+            genomes = mc.genomes
+            genome_names = genomes["name"].values
+            edges = pd.DataFrame(
+                {
+                    "node1": genome_names[keys[:, 0]],
+                    "node2": genome_names[keys[:, 1]],
+                    "value": vals_arr,
+                }
+            )
+        else:
+            edges = pd.DataFrame(columns=["node1", "node2", "value"])
+
     else:
         raise ValueError(f"level must be 'bin', 'contig', or 'genome', got {level!r}")
 

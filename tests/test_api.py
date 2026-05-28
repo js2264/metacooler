@@ -358,3 +358,34 @@ class TestMetaCoolerMmetacoolURI:
         info = mc.info
         assert info["format"] == METACOOLER_FORMAT
         assert info["ncontigs"] == 4
+
+
+class TestMetaCoolerMetadata:
+    def test_metadata_property_empty_when_not_set(self, tiny_metacooler):
+        mc = MetaCooler(tiny_metacooler)
+        assert mc.metadata == {}
+
+    def test_metadata_written_by_from_pairs(
+        self,
+        tiny_fasta,
+        tiny_contigs_table,
+        tiny_bins_bed,
+        tiny_pairs,
+        tmp_path,
+    ):
+        from metacooler.io.create import from_pairs
+
+        out = tmp_path / "with_meta.metacool"
+        from_pairs(
+            out,
+            bins=tiny_bins_bed,
+            pairs=tiny_pairs,
+            contig_genome_map=tiny_contigs_table,
+            contig_table_format="contigs",
+            metadata={"project": "test", "sample": "s1"},
+            chunksize=1000,
+        )
+        mc = MetaCooler(out)
+        meta = mc.metadata
+        assert meta.get("project") == "test"
+        assert meta.get("sample") == "s1"

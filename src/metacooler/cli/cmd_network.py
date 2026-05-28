@@ -38,6 +38,13 @@ from metacooler.cli.main import MetaCoolURI, cli
     help="Write a header line (node1, node2, value) to the output.",
 )
 @click.option(
+    "--chunksize",
+    type=int,
+    default=1_000_000,
+    show_default=True,
+    help="Number of pixels to process per chunk (memory control).",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
@@ -49,6 +56,7 @@ def cmd_network(
     weight: str,
     output: Path | None,
     header: bool,
+    chunksize: int,
     verbose: bool,
 ) -> None:
     """Export a network edge list (TSV, no header by default).
@@ -70,4 +78,5 @@ def cmd_network(
         weight=weight,
         out=output,
         header=header,
+        chunksize=chunksize,
     )

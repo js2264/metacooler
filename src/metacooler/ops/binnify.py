@@ -48,7 +48,6 @@ def binnify(
     contigs = mc.contigs
     genomes = mc.genomes
     old_bins = mc.bins()
-    old_pixels = mc.pixels()
 
     # Get contig codes for each bin
     bin_chrom_codes = old_bins["chrom"].cat.codes.values
@@ -128,24 +127,45 @@ def binnify(
     # Filter out unmapped bins
     valid_mask = old_to_new >= 0
 
-    # Remap pixels
-    b1 = old_pixels["bin1_id"].values
-    b2 = old_pixels["bin2_id"].values
-    counts = old_pixels["count"].values
+    # Remap pixels in chunks and accumulate into a dict to handle the many-to-one
+    # bin mapping: multiple source pixels can land on the same coarser output pair.
+    def _remap_pixel_chunks(
+        chunksize: int = 1_000_000,
+    ):
+        accumulator: dict[tuple[int, int], int] = {}
+        n_pix = len(mc._clr.pixels())
+        for lo in range(0, n_pix, chunksize):
+            chunk = mc._clr.pixels()[lo : lo + chunksize]
+            b1 = chunk["bin1_id"].values
+            b2 = chunk["bin2_id"].values
+            counts = chunk["count"].values
 
-    # Filter pixels where both bins are mapped
-    pixel_mask = valid_mask[b1] & valid_mask[b2]
-    new_b1 = old_to_new[b1[pixel_mask]]
-    new_b2 = old_to_new[b2[pixel_mask]]
-    new_counts = counts[pixel_mask]
+            pixel_mask = valid_mask[b1] & valid_mask[b2]
+            if not pixel_mask.any():
+                continue
+            new_b1 = old_to_new[b1[pixel_mask]]
+            new_b2 = old_to_new[b2[pixel_mask]]
+            new_counts = counts[pixel_mask]
 
-    # Enforce upper triangle
-    swap = new_b1 > new_b2
-    new_b1[swap], new_b2[swap] = new_b2[swap].copy(), new_b1[swap].copy()
+            # Enforce upper triangle
+            swap = new_b1 > new_b2
+            new_b1[swap], new_b2[swap] = new_b2[swap].copy(), new_b1[swap].copy()
 
-    # Aggregate
-    pixel_df = pd.DataFrame({"bin1_id": new_b1, "bin2_id": new_b2, "count": new_counts})
-    pixel_df = pixel_df.groupby(["bin1_id", "bin2_id"], as_index=False)["count"].sum()
+            # Accumulate counts — many old pairs can map to the same new pair
+            for i1, i2, c in zip(
+                new_b1.tolist(), new_b2.tolist(), new_counts.tolist(), strict=False
+            ):
+                key = (int(i1), int(i2))
+                accumulator[key] = accumulator.get(key, 0) + int(c)
+
+        if accumulator:
+            keys_sorted = sorted(accumulator)
+            b1_out = np.array([k[0] for k in keys_sorted], dtype=np.int64)
+            b2_out = np.array([k[1] for k in keys_sorted], dtype=np.int64)
+            counts_out = np.array([accumulator[k] for k in keys_sorted], dtype=np.int32)
+            yield pd.DataFrame(
+                {"bin1_id": b1_out, "bin2_id": b2_out, "count": counts_out}
+            )
 
     # Build output bins with contig names
     contig_names = contigs["name"].values
@@ -158,12 +178,11 @@ def binnify(
     )
 
     logger.info(
-        "Re-binned %s → %s: binsize=%d, %d bins, %d pixels",
+        "Re-binned %s → %s: binsize=%d, %d bins",
         uri,
         output,
         binsize,
         len(new_bins_out),
-        len(pixel_df),
     )
 
     # Recompute n_bins per genome from the new bins
@@ -184,7 +203,7 @@ def binnify(
     _write_rebinned_metacool(
         output=Path(output),
         bins=new_bins_out,
-        pixels=pixel_df,
+        pixels=_remap_pixel_chunks(),
         genomes=genomes,
         contigs=contigs,
         binsize=binsize,
@@ -195,16 +214,27 @@ def binnify(
 def _write_rebinned_metacool(
     output: Path,
     bins: pd.DataFrame,
-    pixels: pd.DataFrame,
+    pixels,
     genomes: pd.DataFrame,
     contigs: pd.DataFrame,
     binsize: int,
     source_uri: str | Path,
 ) -> None:
-    """Write a re-binned metacool file preserving the full metacooler schema."""
+    """Write a re-binned metacool file preserving the full metacooler schema.
+
+    Args:
+        output: Destination path for the output ``.metacool`` file.
+        bins: Bins DataFrame with contig names in the ``chrom`` column.
+        pixels: Iterable of pixel DataFrames (streamed; never fully in RAM).
+        genomes: Genomes DataFrame.
+        contigs: Contigs DataFrame.
+        binsize: New bin size in base pairs.
+        source_uri: Source file URI (used for logging only).
+    """
     import cooler
 
     from metacooler.io._utils import _finalize_metacool_file
+    from metacooler.schema import validate
 
     # Pre-compute index offsets from the bins DataFrame
     contig_names = contigs["name"].values
@@ -219,7 +249,7 @@ def _write_rebinned_metacool(
     genome_counts = np.bincount(bin_genome_ids.astype(np.int64), minlength=len(genomes))
     genome_offset = np.concatenate([[0], np.cumsum(genome_counts)]).astype(np.int64)
 
-    # Create the cooler first
+    # Create the cooler first; the generator yields one pre-sorted, aggregated DataFrame
     cooler.create_cooler(
         str(output),
         bins=bins,
@@ -237,4 +267,5 @@ def _write_rebinned_metacool(
         contig_ordering="rebinned",
     )
 
+    validate(output)
     logger.info("Written rebinned metacool to %s", output)

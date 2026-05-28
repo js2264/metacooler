@@ -889,3 +889,100 @@ class TestCreatePairsPixelCorrectness:
             pix_meta.reset_index(drop=True),
             check_like=False,
         )
+
+
+# ===========================================================================
+# create pairs & cool — sort_in_memory option
+# ===========================================================================
+
+
+class TestCreatePairsSortInMemory:
+    """Test --sort-in-memory and --sort-external options for create pairs."""
+
+    def test_sort_in_memory_flag(self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table):
+        """--sort-in-memory forces in-memory sorting."""
+        out = tmp_path / "out_inmem.metacool"
+        result = runner.invoke(
+            cli,
+            _base_pairs_args(
+                out, tiny_pairs, tiny_bins_bed, tiny_contigs_table,
+                extra=["--sort-in-memory"]
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        with h5py.File(out, "r") as f:
+            assert "pixels" in f
+
+    def test_sort_external_flag(self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table):
+        """--sort-external forces cooler external sort."""
+        out = tmp_path / "out_external.metacool"
+        result = runner.invoke(
+            cli,
+            _base_pairs_args(
+                out, tiny_pairs, tiny_bins_bed, tiny_contigs_table,
+                extra=["--sort-external"]
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        with h5py.File(out, "r") as f:
+            assert "pixels" in f
+
+    def test_sort_default_auto(self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table):
+        """Default (no flag) uses auto-detect."""
+        out = tmp_path / "out_auto.metacool"
+        result = runner.invoke(
+            cli,
+            _base_pairs_args(out, tiny_pairs, tiny_bins_bed, tiny_contigs_table),
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        with h5py.File(out, "r") as f:
+            assert "pixels" in f
+
+
+class TestCreateCoolSortInMemory:
+    """Test --sort-in-memory and --sort-external options for create cool."""
+
+    def test_sort_in_memory_flag(self, runner, tmp_path, tiny_cool, tiny_contigs_table):
+        """--sort-in-memory forces in-memory sorting for create cool."""
+        out = tmp_path / "out_inmem.metacool"
+        result = runner.invoke(
+            cli,
+            _base_cool_args(
+                out, tiny_cool, tiny_contigs_table,
+                extra=["--sort-in-memory"]
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        with h5py.File(out, "r") as f:
+            assert "pixels" in f
+
+    def test_sort_external_flag(self, runner, tmp_path, tiny_cool, tiny_contigs_table):
+        """--sort-external forces cooler external sort for create cool."""
+        out = tmp_path / "out_external.metacool"
+        result = runner.invoke(
+            cli,
+            _base_cool_args(
+                out, tiny_cool, tiny_contigs_table,
+                extra=["--sort-external"]
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        with h5py.File(out, "r") as f:
+            assert "pixels" in f
+
+    def test_sort_default_auto(self, runner, tmp_path, tiny_cool, tiny_contigs_table):
+        """Default (no flag) uses auto-detect for create cool."""
+        out = tmp_path / "out_auto.metacool"
+        result = runner.invoke(
+            cli,
+            _base_cool_args(out, tiny_cool, tiny_contigs_table),
+        )
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        with h5py.File(out, "r") as f:
+            assert "pixels" in f

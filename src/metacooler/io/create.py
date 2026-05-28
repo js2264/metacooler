@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 _UNBINNED_SENTINELS: frozenset[str] = frozenset(
     {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", ""}
 )
+_SORT_IN_MEMORY_PAIRS_SIZE_BYTES = 2 * 1024**3  # 2 GiB
+_SORT_IN_MEMORY_PIXEL_THRESHOLD = 100_000_000  # 100 M pixels
 
 logger = logging.getLogger("metacooler")
 
@@ -820,6 +822,7 @@ def from_pairs(
     pairs_kwargs: dict | None = None,
     metadata: dict | None = None,
     chunksize: int = 1_000_000,
+    sort_in_memory: bool | None = None,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
@@ -847,6 +850,11 @@ def from_pairs(
             indices, etc.).
         metadata: Additional metadata dict stored in file attrs.
         chunksize: Number of pairs to process per chunk.
+        sort_in_memory: If ``True``, collect all pixels in RAM and sort before
+            writing (fast for small files).  If ``False``, pass the unsorted
+            stream to cooler's external sort (scalable for large files).  If
+            ``None`` (default), auto-detect based on pairs file size: files
+            larger than 2 GiB use ``False`` with a logged warning.
     """
     uri = Path(uri)
     if pairs_kwargs is None:
@@ -856,6 +864,19 @@ def from_pairs(
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
     timer = pd.Timestamp.now()
+
+    # --- Auto-detect sort_in_memory based on pairs file size ---
+    if sort_in_memory is None:
+        pairs_size = Path(pairs).stat().st_size
+        if pairs_size > _SORT_IN_MEMORY_PAIRS_SIZE_BYTES:
+            logger.warning(
+                "Pairs file is %.1f GiB — switching to sort_in_memory=False "
+                "(cooler external sort). Pass sort_in_memory=True to override.",
+                pairs_size / 1024**3,
+            )
+            sort_in_memory = False
+        else:
+            sort_in_memory = True
 
     # --- Parse contig map and optional genomes metadata table ---
     cg_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
@@ -950,11 +971,17 @@ def from_pairs(
     )
 
     logger.info(f"Starting to create cooler file at {uri}...")
+    if sort_in_memory:
+        pixel_source = _sort_and_dedup_pixels(raw_pixels)
+        ordered = True
+    else:
+        pixel_source = raw_pixels
+        ordered = False
     cooler.create_cooler(
         str(uri),
         bins=bins_df,
-        pixels=_sort_and_dedup_pixels(raw_pixels),
-        ordered=True,
+        pixels=pixel_source,
+        ordered=ordered,
         symmetric_upper=True,
         assembly=assembly_name,
         metadata=metadata or {},
@@ -1004,6 +1031,7 @@ def from_cool(
     drop_unassigned: bool = False,
     metadata: dict | None = None,
     nproc: int = 1,
+    sort_in_memory: bool | None = None,
 ) -> None:
     """Create a metacool file from an existing cool file.
 
@@ -1025,6 +1053,11 @@ def from_cool(
         nproc: Number of parallel reader threads for pixel remapping.
             Values greater than 1 use a ``ThreadPoolExecutor`` to overlap
             HDF5 reads across chunks.
+        sort_in_memory: If ``True``, collect all pixels in RAM and sort before
+            writing (fast for small files).  If ``False``, pass the unsorted
+            stream to cooler's external sort (scalable for large files).  If
+            ``None`` (default), auto-detect based on pixel count: files with
+            more than 100 M pixels use ``False`` with a logged warning.
 
     Raises:
         ValueError: If ``cool_uri`` is not a valid cooler file.
@@ -1038,7 +1071,20 @@ def from_cool(
         raise ValueError(f"Not a valid cooler file: {cool_path}")
     clr = cooler.Cooler(str(cool_path))
     bins = pd.DataFrame(clr.bins()[:])
-    logger.info(f"Loaded cool file: {len(bins)} bins, {clr.info['nnz']} pixels")
+    n_pixels = clr.info["nnz"]
+    logger.info(f"Loaded cool file: {len(bins)} bins, {n_pixels} pixels")
+
+    # --- Auto-detect sort_in_memory based on pixel count ---
+    if sort_in_memory is None:
+        if n_pixels > _SORT_IN_MEMORY_PIXEL_THRESHOLD:
+            logger.warning(
+                "Input has %d pixels — switching to sort_in_memory=False "
+                "(cooler external sort). Pass sort_in_memory=True to override.",
+                n_pixels,
+            )
+            sort_in_memory = False
+        else:
+            sort_in_memory = True
 
     # Build contig lengths from bins (use actual contigs in bins, not chroms table)
     chroms = clr.chroms()[:]
@@ -1105,11 +1151,17 @@ def from_cool(
     raw_pixels = _stream_remapped_pixels(
         str(cool_path), clr.info["nnz"], old_to_new_bin, nproc
     )
+    if sort_in_memory:
+        pixel_source = _sort_and_dedup_pixels(raw_pixels)
+        ordered = True
+    else:
+        pixel_source = raw_pixels
+        ordered = False
     cooler.create_cooler(
         str(output_path),
         bins=bins_remapped,
-        pixels=_sort_and_dedup_pixels(raw_pixels),
-        ordered=True,
+        pixels=pixel_source,
+        ordered=ordered,
         symmetric_upper=True,
         assembly=assembly_name or "imported",
         metadata=metadata or {},

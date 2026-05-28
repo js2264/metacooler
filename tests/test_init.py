@@ -65,6 +65,13 @@ class TestInit:
             "is_metacooler",
             "is_mmetacooler",
             "parse_uri",
+            "create_mmetacool",
+            "add_entry",
+            "remove_entry",
+            "copy_entry",
+            "move_entry",
+            "list_entries",
+            "copy_entry_cross_file",
         }
         assert expected == set(metacooler.__all__)
 

@@ -80,6 +80,7 @@ def _aggregate_pixel_stream(
     mc: MetaCooler,
     level: Literal["contig", "genome"] = "contig",
     chunksize: int = 1_000_000,
+    count_col: str = "count",
 ) -> Generator[pd.DataFrame, None, None]:
     """Yield aggregated pixel chunks without building a sparse matrix.
 
@@ -91,6 +92,7 @@ def _aggregate_pixel_stream(
         mc: Open MetaCooler instance.
         level: Aggregation level — ``"contig"`` or ``"genome"``.
         chunksize: Number of pixels to process per chunk.
+        count_col: Pixel column to use as contact count.
 
     Yields:
         DataFrames with columns ``bin1_id``, ``bin2_id``, ``count``
@@ -117,7 +119,7 @@ def _aggregate_pixel_stream(
         chunk = mc._clr.pixels()[i : i + chunksize]
         c1 = mapping[chunk["bin1_id"].values].copy()
         c2 = mapping[chunk["bin2_id"].values].copy()
-        vals = chunk["count"].values
+        vals = chunk[count_col].values
 
         # Enforce upper triangle
         swap = c1 > c2
@@ -145,7 +147,15 @@ def aggregate(
     """Aggregate a metacool file to contig or genome level.
 
     The output is a standard ``.cool`` file where the "chromosomes" are
-    either contigs or genomes.
+    either contigs or genomes.  Pixels are streamed chunk-by-chunk; the
+    full contact matrix is never materialised in memory.
+
+    Args:
+        uri: Path to the source ``.metacool`` file.
+        output: Destination path for the output ``.cool`` file.
+        level: Aggregation level — ``"contig"`` or ``"genome"``.
+        count_col: Pixel column to use as contact count (default: ``"count"``).
+        chunksize: Number of pixels to process per chunk.
     """
     mc = MetaCooler(uri)
 
@@ -160,18 +170,6 @@ def aggregate(
     else:
         raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
 
-    agg = _aggregate_sparse(mc, level=level, chunksize=chunksize)
-    coo = agg.tocoo()
-
-    pixels = pd.DataFrame(
-        {
-            "bin1_id": coo.row.astype(np.int64),
-            "bin2_id": coo.col.astype(np.int64),
-            "count": coo.data.astype(np.int32),
-        }
-    )
-    pixels = pixels[pixels["bin1_id"] <= pixels["bin2_id"]]
-
     bins_out = pd.DataFrame(
         {
             "chrom": chroms["chrom"].values,
@@ -183,7 +181,9 @@ def aggregate(
     cooler.create_cooler(
         str(output),
         bins=bins_out,
-        pixels=pixels,
-        ordered=True,
+        pixels=_aggregate_pixel_stream(
+            mc, level=level, chunksize=chunksize, count_col=count_col
+        ),
+        ordered=False,
         symmetric_upper=True,
     )

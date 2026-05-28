@@ -99,6 +99,13 @@ def merge(
             del fdst["indexes"]["genome_offset"]
         fdst["indexes"].copy(fsrc["indexes"]["genome_offset"], "genome_offset")
 
+        # Strip cooler's enum dtype from bins/chrom — cooler.merge_coolers()
+        # always writes bins/chrom as an HDF5 enum type, which is inconsistent
+        # with the metacooler schema that stores it as plain int32.
+        chrom_data = fdst["bins"]["chrom"][:]
+        del fdst["bins"]["chrom"]
+        fdst["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+
         # Set attrs
         fdst.attrs["format"] = COOLER_FORMAT
         fdst.attrs["format-url"] = COOLER_FORMAT_URL

@@ -20,7 +20,10 @@ _CONTIGS_FORMAT_HELP = """
 def _reconstruct_command() -> str:
     """Reconstruct the exact command line invocation from the current click context."""
     ctx = click.get_current_context()
-    assert ctx is not None
+    if ctx is None:
+        raise RuntimeError(
+            "_reconstruct_command() called outside of a click command context."
+        )
     parts = [ctx.command_path]
     for param in ctx.command.params:
         if isinstance(param, click.Option):

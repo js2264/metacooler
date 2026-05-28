@@ -57,6 +57,19 @@ from metacooler.cli.cmd_metadata import _stringify_values
     show_default=True,
     help="Number of parallel reader threads for pixel remapping.",
 )
+@click.option(
+    "--sort-in-memory/--sort-external",
+    "sort_in_memory",
+    is_flag=True,
+    default=None,
+    show_default="auto-detect",
+    help=(
+        "Control pixel sorting strategy. "
+        "--sort-in-memory: collect all pixels in RAM and sort before writing (fast for small files). "
+        "--sort-external: stream unsorted pixels to cooler's external sort (scalable for large files). "
+        "Default: auto-detect based on pixel count (threshold: 100 M pixels)."
+    ),
+)
 def cmd_create_cool(
     cool_path: Path,
     output: Path,
@@ -67,6 +80,7 @@ def cmd_create_cool(
     assembly_name: str | None,
     drop_unassigned: bool,
     nproc: int,
+    sort_in_memory: bool | None,
     metadata: Path | None,
     force: bool,
     verbose: bool,
@@ -118,4 +132,5 @@ def cmd_create_cool(
         drop_unassigned=drop_unassigned,
         metadata=meta,
         nproc=nproc,
+        sort_in_memory=sort_in_memory,
     )

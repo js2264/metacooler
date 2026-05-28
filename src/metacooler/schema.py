@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -9,6 +10,8 @@ import cooler
 import h5py
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("metacooler")
 
 METACOOLER_FORMAT = "HDF5::MetaCooler"
 METACOOLER_FORMAT_VERSION = 1
@@ -135,7 +138,7 @@ def validate(uri: str | Path) -> None:
         n_bins = len(b["chrom"])
         n_pixels = len(p["bin1_id"])
         if n_pixels == 0:
-            raise MetaCoolerFormatError("Empty pixels table")
+            logger.warning("Empty pixels table")
 
         if len(idx["chrom_offset"]) != n_contigs + 1:
             raise MetaCoolerFormatError(

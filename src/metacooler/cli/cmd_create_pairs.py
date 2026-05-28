@@ -71,6 +71,19 @@ from metacooler.cli.cmd_metadata import _stringify_values
     show_default=True,
     help="Number of pairs to process per chunk.",
 )
+@click.option(
+    "--sort-in-memory/--sort-external",
+    "sort_in_memory",
+    is_flag=True,
+    default=None,
+    show_default="auto-detect",
+    help=(
+        "Control pixel sorting strategy. "
+        "--sort-in-memory: collect all pixels in RAM and sort before writing (fast for small files). "
+        "--sort-external: stream unsorted pixels to cooler's external sort (scalable for large files). "
+        "Default: auto-detect based on pairs file size (threshold: 2 GiB)."
+    ),
+)
 def cmd_create_pairs(
     output: Path,
     bins: str,
@@ -83,6 +96,7 @@ def cmd_create_pairs(
     contig_order: str,
     drop_unassigned: bool,
     chunksize: int,
+    sort_in_memory: bool | None,
     force: bool,
     verbose: bool,
     metadata: Path | None,
@@ -141,5 +155,6 @@ def cmd_create_pairs(
         binsize=binsize,
         genomes_table=genomes_table,
         chunksize=chunksize,
+        sort_in_memory=sort_in_memory,
         metadata=meta,
     )

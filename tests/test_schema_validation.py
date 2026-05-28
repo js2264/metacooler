@@ -130,7 +130,8 @@ class TestValidate:
         ):
             validate(path)
 
-    def test_empty_pixels_raises(self, tmp_path):
+    def test_empty_pixels_warns(self, tmp_path):
+        """Empty pixels table should log a warning, not raise an error."""
         path = tmp_path / "empty_pix.metacool"
         with h5py.File(path, "w") as f:
             f.attrs["format"] = COOLER_FORMAT
@@ -155,8 +156,8 @@ class TestValidate:
             idx = f.create_group("indexes")
             idx.create_dataset("chrom_offset", data=np.array([0, 0]))
             idx.create_dataset("bin1_offset", data=np.array([0, 0]))
-        with pytest.raises(MetaCoolerFormatError, match="Empty pixels"):
-            validate(path)
+        # Should not raise — empty pixels is now a warning only
+        validate(path)
 
     def test_bin1_offset_wrong_length_raises(self, tmp_path):
         path = tmp_path / "bad_bin1off.metacool"

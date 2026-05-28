@@ -143,12 +143,14 @@ class MetaCooler:
     def info(self) -> dict:
         """Merged metadata in metacool format."""
         base = dict(self._clr.info)
-        # Promote metacooler-specific attrs over their cooler equivalents
-        base["format"] = base.pop("metacooler-format")
-        base["format-url"] = base.pop("metacooler-format-url")
-        base["format-version"] = base.pop("metacooler-format-version")
-        base["ordering"] = base.pop("contig-ordering")
-        base["ncontigs"] = base.pop("nchroms")
+        # Promote metacooler-specific attrs over their cooler equivalents.
+        # Use .pop(key, None) so that files written by older metacooler
+        # versions (or partially-written files) don't raise KeyError.
+        base["format"] = base.pop("metacooler-format", None)
+        base["format-url"] = base.pop("metacooler-format-url", None)
+        base["format-version"] = base.pop("metacooler-format-version", None)
+        base["ordering"] = base.pop("contig-ordering", None)
+        base["ncontigs"] = base.pop("nchroms", None)
         # Remove metadata field if present (accessed via .metadata property)
         base.pop("metadata", None)
         # Cast numeric fields to int (cooler may return numpy scalars or strings)
