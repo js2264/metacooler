@@ -24,21 +24,26 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=click.Choice(["contig", "genome"]),
     default="contig",
     show_default=True,
-    help="Aggregation level.",
+    help=(
+        "Aggregation level for the output chromosomes. "
+        "[cyan]contig[/cyan]: one chromosome per contig (default). "
+        "[cyan]genome[/cyan]: sum all contacts between genome pairs, "
+        "producing one chromosome per genome."
+    ),
 )
 @click.option(
     "--count-col",
     type=str,
     default="count",
     show_default=True,
-    help="Pixel value column to aggregate.",
+    help="Pixel value column to aggregate (default: [cyan]count[/cyan]).",
 )
 @click.option(
     "--chunksize",
     type=int,
     default=1_000_000,
     show_default=True,
-    help="Pixels per chunk.",
+    help="Number of pixels read per chunk (controls peak memory usage).",
 )
 @click.option(
     "-f",
@@ -61,7 +66,12 @@ def cmd_aggregate(
     force: bool = False,
     verbose: bool = False,
 ) -> None:
-    """Aggregate a metacool file to a standard .cool file."""
+    """Aggregate a metacool contact map to a standard ``.cool`` file.
+
+    Writes a cooler-compatible output where each "chromosome" is either a
+    contig (``--level contig``) or a genome (``--level genome``).  Pixels
+    are processed in chunks so the operation scales to large files.
+    """
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.aggregate import aggregate
 

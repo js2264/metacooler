@@ -899,14 +899,19 @@ class TestCreatePairsPixelCorrectness:
 class TestCreatePairsSortInMemory:
     """Test --sort-in-memory and --sort-external options for create pairs."""
 
-    def test_sort_in_memory_flag(self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table):
+    def test_sort_in_memory_flag(
+        self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
+    ):
         """--sort-in-memory forces in-memory sorting."""
         out = tmp_path / "out_inmem.metacool"
         result = runner.invoke(
             cli,
             _base_pairs_args(
-                out, tiny_pairs, tiny_bins_bed, tiny_contigs_table,
-                extra=["--sort-in-memory"]
+                out,
+                tiny_pairs,
+                tiny_bins_bed,
+                tiny_contigs_table,
+                extra=["--sort-in-memory"],
             ),
         )
         assert result.exit_code == 0, result.output
@@ -914,14 +919,19 @@ class TestCreatePairsSortInMemory:
         with h5py.File(out, "r") as f:
             assert "pixels" in f
 
-    def test_sort_external_flag(self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table):
+    def test_sort_external_flag(
+        self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
+    ):
         """--sort-external forces cooler external sort."""
         out = tmp_path / "out_external.metacool"
         result = runner.invoke(
             cli,
             _base_pairs_args(
-                out, tiny_pairs, tiny_bins_bed, tiny_contigs_table,
-                extra=["--sort-external"]
+                out,
+                tiny_pairs,
+                tiny_bins_bed,
+                tiny_contigs_table,
+                extra=["--sort-external"],
             ),
         )
         assert result.exit_code == 0, result.output
@@ -929,7 +939,9 @@ class TestCreatePairsSortInMemory:
         with h5py.File(out, "r") as f:
             assert "pixels" in f
 
-    def test_sort_default_auto(self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table):
+    def test_sort_default_auto(
+        self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
+    ):
         """Default (no flag) uses auto-detect."""
         out = tmp_path / "out_auto.metacool"
         result = runner.invoke(
@@ -951,8 +963,7 @@ class TestCreateCoolSortInMemory:
         result = runner.invoke(
             cli,
             _base_cool_args(
-                out, tiny_cool, tiny_contigs_table,
-                extra=["--sort-in-memory"]
+                out, tiny_cool, tiny_contigs_table, extra=["--sort-in-memory"]
             ),
         )
         assert result.exit_code == 0, result.output
@@ -966,8 +977,7 @@ class TestCreateCoolSortInMemory:
         result = runner.invoke(
             cli,
             _base_cool_args(
-                out, tiny_cool, tiny_contigs_table,
-                extra=["--sort-external"]
+                out, tiny_cool, tiny_contigs_table, extra=["--sort-external"]
             ),
         )
         assert result.exit_code == 0, result.output

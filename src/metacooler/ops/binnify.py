@@ -132,6 +132,20 @@ def binnify(
     def _remap_pixel_chunks(
         chunksize: int = 1_000_000,
     ):
+        """Remap old bin IDs to new bin IDs and accumulate counts.
+
+        Streams pixels from the source file in chunks, remaps each
+        ``bin1_id`` / ``bin2_id`` via *old_to_new*, enforces the upper
+        triangle, and accumulates pixel counts in a dict.  Yields a
+        single sorted DataFrame at the end.
+
+        Args:
+            chunksize: Number of pixels to load per chunk.
+
+        Yields:
+            One ``pd.DataFrame`` with columns ``bin1_id``, ``bin2_id``,
+            ``count`` containing all remapped pixels.
+        """
         accumulator: dict[tuple[int, int], int] = {}
         n_pix = len(mc._clr.pixels())
         for lo in range(0, n_pix, chunksize):

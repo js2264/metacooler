@@ -52,12 +52,20 @@ class MetaCoolerFormatError(ValueError):
 
 
 def is_metacooler(uri: str | Path) -> bool:
-    """Return True if *uri* points to a valid metacool file.
+    """Return ``True`` if *uri* points to a valid ``.metacool`` file.
 
-    Checks for the ``metacooler-format`` HDF5 attribute and the presence of
-    the ``genomes/`` group.  Note that ``cooler.fileops.is_cooler()`` will
-    *also* return ``True`` for a metacool file because of the soft link
-    ``chroms → contigs`` and the ``format = "HDF5::Cooler"`` attribute.
+    Checks for the ``metacooler-format`` HDF5 attribute equal to
+    ``HDF5::MetaCooler`` and the presence of the ``/genomes`` group.
+    Note that ``cooler.fileops.is_cooler()`` will *also* return ``True``
+    for a metacool file because of the soft-link ``chroms → contigs``
+    and the ``format = "HDF5::Cooler"`` attribute.
+
+    Args:
+        uri: Path to the file to test.
+
+    Returns:
+        ``True`` if the file is a valid metacool file, ``False`` otherwise
+        (including if the file does not exist or cannot be opened).
     """
     path = Path(uri)
     if not path.exists():
@@ -73,7 +81,13 @@ def is_metacooler(uri: str | Path) -> bool:
 
 
 def validate(uri: str | Path) -> None:
-    """Validate that *uri* is a well-formed metacool file.
+    """Validate that *uri* is a well-formed ``.metacool`` file.
+
+    Performs a structural integrity check: required groups, columns,
+    indexes, and cross-count consistency.
+
+    Args:
+        uri: Path to the ``.metacool`` file to validate.
 
     Raises:
         MetaCoolerFormatError: If any required group, dataset, or attribute
@@ -169,10 +183,18 @@ def validate(uri: str | Path) -> None:
 
 
 def is_mmetacooler(uri: str | Path) -> bool:
-    """Return True if *uri* points to a valid ``.mmetacool`` file.
+    """Return ``True`` if *uri* points to a valid ``.mmetacool`` file.
 
-    Checks for the ``format`` attribute equal to ``HDF5::MMetaCooler``
-    and the presence of the ``entries/`` key.
+    Checks for the ``format`` attribute equal to ``HDF5::MMetaCooler`` and
+    the presence of the top-level ``entries/`` group.
+
+    Args:
+        uri: Path to the file to test.
+
+    Returns:
+        ``True`` if the file is a valid mmetacool collection, ``False``
+        otherwise (including if the file does not exist or cannot be
+        opened).
     """
     path = Path(uri)
     if not path.exists():
@@ -190,8 +212,12 @@ def is_mmetacooler(uri: str | Path) -> bool:
 def validate_mmetacooler(uri: str | Path) -> None:
     """Validate that *uri* is a well-formed ``.mmetacool`` file.
 
-    Checks top-level attributes, the ``entries/`` key, and that each
-    entry contains the required metacooler tables.
+    Checks top-level attributes, the ``entries/`` group, and verifies
+    that each entry contains the required metacooler tables (``bins``,
+    ``pixels``, ``contigs``, ``genomes``, ``indexes``).
+
+    Args:
+        uri: Path to the ``.mmetacool`` file to validate.
 
     Raises:
         MetaCoolerFormatError: If the structure is invalid.
@@ -228,7 +254,16 @@ def validate_mmetacooler(uri: str | Path) -> None:
 def list_metacoolers(uri: str | Path) -> list[str]:
     """Return HDF5 group paths of all metacooler entries in an mmetacool file.
 
-    Returns paths of the form ``/entries/<name>`` for each entry.
+    Returns paths of the form ``/entries/<name>`` for each entry in the
+    ``/entries`` group.
+
+    Args:
+        uri: Path to the ``.mmetacool`` file.
+
+    Returns:
+        List of HDF5 group paths (e.g. ``["/entries/sample1",
+        "/entries/sample2"]``).  Returns an empty list if the file has no
+        ``entries`` group.
     """
     path = Path(uri)
     with h5py.File(path, "r") as f:
@@ -241,7 +276,17 @@ def read_table(uri: str | Path, group: str) -> pd.DataFrame:
     """Read an HDF5 table group as a pandas DataFrame.
 
     Matches cooler behaviour: fixed-length byte strings are decoded to
-    unicode, and the column order follows the dataset creation order.
+    unicode, and column order follows the HDF5 dataset creation order.
+
+    Args:
+        uri: Path to the HDF5 file.
+        group: HDF5 group path containing the table datasets (e.g.
+            ``"genomes"`` or ``"entries/sample1/contigs"``).
+
+    Returns:
+        DataFrame where each HDF5 dataset in *group* becomes a column.
+        Byte-string columns are decoded to ``str``; all other dtypes are
+        returned as-is.
     """
     path = Path(uri)
     with h5py.File(path, "r", track_order=True) as f:

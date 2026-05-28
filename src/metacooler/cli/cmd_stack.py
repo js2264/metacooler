@@ -10,7 +10,13 @@ from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="stack", help="Combine metacool files into a single mmetacool file.")
-@click.argument("input_files", nargs=-1, type=MetaCoolURI(), required=True)
+@click.argument(
+    "input_files",
+    nargs=-1,
+    type=MetaCoolURI(),
+    required=True,
+    metavar="INPUT_FILES...",
+)
 @click.option(
     "-o",
     "--output",
@@ -22,7 +28,11 @@ from metacooler.cli.main import MetaCoolURI, cli
     "--names",
     type=str,
     default=None,
-    help="Comma-separated entry names (must match number of inputs).",
+    help=(
+        "Comma-separated entry names for the output collection "
+        "(must match number of inputs). "
+        "Defaults to the file stem of each input (e.g. [cyan]sample.metacool[/cyan] → [cyan]sample[/cyan])."
+    ),
 )
 @click.option(
     "-f",

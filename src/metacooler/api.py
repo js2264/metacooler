@@ -34,6 +34,21 @@ class MetaCooler:
     """
 
     def __init__(self, store: str | Path):
+        """Open a ``.metacool`` (or mmetacool entry) file.
+
+        Args:
+            store: File path, optionally with a URI group suffix
+                (``file.mmetacool::entries/entry_name``).
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If a group path is given but the file is not an
+                mmetacool, or if a plain path points to an mmetacool file
+                without specifying an entry.
+            KeyError: If the requested HDF5 group does not exist inside
+                the mmetacool file.
+        """
+
         from metacooler.uri import parse_uri
 
         raw = str(store)
@@ -104,44 +119,136 @@ class MetaCooler:
         return cast(pd.DataFrame, self._clr.bins()[:])
 
     def bins(self, **kw) -> pd.DataFrame:
+        """Return the bins table as a DataFrame.
+
+        Delegates to ``cooler.Cooler.bins()``.  The result is cached on
+        the first call (when no keyword arguments are given).
+
+        Args:
+            **kw: Keyword arguments forwarded to ``cooler.Cooler.bins()``.
+
+        Returns:
+            DataFrame with columns ``chrom`` (categorical contig ID),
+            ``start``, and ``end`` (int32), plus any extra columns written
+            at creation time.
+        """
         if kw:
             return cast(pd.DataFrame, self._clr.bins(**kw)[:])
         return self._bins_cache
 
     def pixels(self, join: bool = False, **kw) -> pd.DataFrame:
+        """Return the pixels table as a DataFrame.
+
+        Delegates to ``cooler.Cooler.pixels()``.
+
+        Args:
+            join: If ``True``, annotate each pixel with its bin coordinates
+                (adds ``chrom1``, ``start1``, ``end1``, ``chrom2``, ``start2``,
+                ``end2`` columns).
+            **kw: Additional keyword arguments forwarded to
+                ``cooler.Cooler.pixels()``.
+
+        Returns:
+            DataFrame with at least ``bin1_id``, ``bin2_id``, and ``count``
+            columns.  When *join* is ``True``, bin coordinate columns are
+            prepended.
+        """
         return cast(pd.DataFrame, self._clr.pixels(join=join, **kw)[:])
 
     def matrix(self, **kw):
+        """Return a cooler matrix selector for slicing the contact matrix.
+
+        Delegates to ``cooler.Cooler.matrix()``.
+
+        Args:
+            **kw: Keyword arguments forwarded to ``cooler.Cooler.matrix()``.
+                Commonly ``balance=False`` to retrieve raw counts.
+
+        Returns:
+            A ``cooler.core.RangeSelector2D`` that can be sliced with bin
+            index ranges or region strings.
+        """
         return self._clr.matrix(**kw)
 
     def chroms(self, **kw) -> pd.DataFrame:
+        """Return the chroms table as a DataFrame (alias for contigs).
+
+        In a metacool file ``chroms`` is a soft-link to the ``contigs``
+        group for cooler compatibility.  This method delegates to
+        ``cooler.Cooler.chroms()``.
+
+        Args:
+            **kw: Keyword arguments forwarded to ``cooler.Cooler.chroms()``.
+
+        Returns:
+            DataFrame with at least ``name`` and ``length`` columns.
+        """
         return cast(pd.DataFrame, self._clr.chroms(**kw)[:])
 
     def extent(self, region: str) -> tuple[int, int]:
+        """Return the half-open bin index range for a region string.
+
+        Delegates to ``cooler.Cooler.extent()``.
+
+        Args:
+            region: Region string in the format ``contig`` or
+                ``contig:start-end`` (1-based, fully closed).
+
+        Returns:
+            ``(lo, hi)`` — half-open bin indices such that bins ``[lo, hi)``
+            overlap the requested region.
+        """
         return self._clr.extent(region)
 
     def offset(self, region: str) -> int:
+        """Return the first bin index for a region string.
+
+        Delegates to ``cooler.Cooler.offset()``.
+
+        Args:
+            region: Region string in the format ``contig`` or
+                ``contig:start-end`` (1-based, fully closed).
+
+        Returns:
+            0-based integer index of the first bin that overlaps *region*.
+        """
         return self._clr.offset(region)
 
     @property
     def binsize(self) -> int | None:
+        """Uniform bin size in base pairs, or ``None`` if bins are variable-width."""
         return self._clr.binsize
 
     @property
     def chromnames(self) -> list[str]:
+        """List of contig names in the order they appear in the file."""
         return self._clr.chromnames
 
     @property
     def chromsizes(self) -> pd.Series:
+        """Series mapping each contig name to its length in base pairs."""
         return self._clr.chromsizes
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Shape of the square contact matrix ``(n_bins, n_bins)``."""
         return self._clr.shape
 
     @property
     def info(self) -> dict:
-        """Merged metadata in metacool format."""
+        """Merged file-level attributes in normalised metacooler format.
+
+        Reads the root HDF5 attributes via ``cooler.Cooler.info``, then
+        renames metacooler-specific keys (e.g. ``metacooler-format`` →
+        ``format``) and casts numeric fields to plain Python ``int``.  The
+        ``metadata`` key is removed from the result — use
+        :attr:`metadata` instead.
+
+        Returns:
+            Dictionary of file-level attributes including ``format``,
+            ``format-version``, ``bin-size``, ``nbins``, ``nnz``, ``sum``,
+            ``ngenomes``, ``ncontigs``, ``ordering``, and ``assembly``.
+        """
         base = dict(self._clr.info)
         # Promote metacooler-specific attrs over their cooler equivalents.
         # Use .pop(key, None) so that files written by older metacooler
@@ -170,7 +277,14 @@ class MetaCooler:
 
     @property
     def metadata(self) -> dict:
-        """The contents of the optional ``metadata`` group as a nested dict."""
+        """Contents of the optional ``metadata`` group as a nested dict.
+
+        Returns an empty dict if no metadata was stored at creation time.
+
+        Returns:
+            Nested dictionary of user-defined metadata values, or ``{}``
+            if the file contains no metadata.
+        """
         base = dict(self._clr.info)
         meta = base.pop("metadata", None)
         if meta is None:
@@ -184,7 +298,14 @@ class MetaCooler:
     # ------------------------------------------------------------------
     @functools.cached_property
     def genomes(self) -> pd.DataFrame:
-        """The ``/genomes`` table as a DataFrame."""
+        """The ``/genomes`` table as a DataFrame.
+
+        Loaded once and then cached.  The table has at least the columns
+        ``name`` (str), ``length`` (int), and ``n_contigs`` (int).
+
+        Returns:
+            DataFrame indexed 0 … n_genomes-1 with one row per genome.
+        """
         if self._group_path != "/":
             grp = self._group_path.lstrip("/") + "/genomes"
             return read_table(self._store, grp)
@@ -192,7 +313,15 @@ class MetaCooler:
 
     @functools.cached_property
     def contigs(self) -> pd.DataFrame:
-        """The ``/contigs`` table as a DataFrame (includes ``genome_id``)."""
+        """The ``/contigs`` table as a DataFrame.
+
+        Loaded once and then cached.  The table has at least the columns
+        ``name`` (str), ``length`` (int), and ``genome_id`` (int, 0-based
+        index into the :attr:`genomes` table).
+
+        Returns:
+            DataFrame indexed 0 … n_contigs-1 with one row per contig.
+        """
         if self._group_path != "/":
             grp = self._group_path.lstrip("/") + "/contigs"
             return read_table(self._store, grp)
@@ -202,7 +331,20 @@ class MetaCooler:
     # Selectors
     # ------------------------------------------------------------------
     def bins_for_genome(self, genome: str) -> pd.DataFrame:
-        """Return all bins belonging to *genome*."""
+        """Return all bins belonging to *genome*.
+
+        Args:
+            genome: Name of the genome as it appears in the ``/genomes``
+                table.
+
+        Returns:
+            Subset of the bins table (copy) containing only rows whose
+            ``chrom`` (contig) belongs to *genome*.  Index values are
+            preserved from the original bins table.
+
+        Raises:
+            KeyError: If *genome* is not present in this file.
+        """
         genomes = self.genomes
         contigs = self.contigs
         if genome not in genomes["name"].values:
@@ -215,7 +357,20 @@ class MetaCooler:
         return bins[bins["chrom"].cat.codes.isin(contig_ids)].copy()
 
     def bins_for_contig(self, contig: str) -> pd.DataFrame:
-        """Return all bins belonging to *contig*."""
+        """Return all bins belonging to *contig*.
+
+        Args:
+            contig: Name of the contig as it appears in the ``/contigs``
+                table.
+
+        Returns:
+            Subset of the bins table (copy) containing only rows whose
+            ``chrom`` equals *contig*.  Index values are preserved from
+            the original bins table.
+
+        Raises:
+            KeyError: If *contig* is not present in this file.
+        """
         contigs = self.contigs
         if contig not in contigs["name"].values:
             raise KeyError(
@@ -226,10 +381,24 @@ class MetaCooler:
         return bins[bins["chrom"].cat.codes == cid].copy()
 
     def pixels_for_genome_pair(self, g1: str, g2: str) -> pd.DataFrame:
-        """Return pixels where one bin is in *g1* and the other in *g2*.
+        """Return pixels where one bin is in *g1* and the other is in *g2*.
 
-        Uses ``genome_extent`` index lookups instead of loading the full pixel
-        table — safe for large datasets.
+        Uses ``genome_extent`` index lookups to limit the scan to the
+        relevant pixel rows — the full pixel table is never loaded into
+        memory.
+
+        Args:
+            g1: Name of the first genome.
+            g2: Name of the second genome.  May be the same as *g1* to
+                retrieve intra-genomic contacts.
+
+        Returns:
+            DataFrame with columns ``bin1_id``, ``bin2_id``, and ``count``
+            (plus any extra pixel columns).  Returns an empty DataFrame with
+            those columns if no matching pixels exist.
+
+        Raises:
+            KeyError: If either *g1* or *g2* is not present in this file.
         """
         genomes = self.genomes
         for g in (g1, g2):
@@ -285,7 +454,20 @@ class MetaCooler:
     # Extent helpers
     # ------------------------------------------------------------------
     def genome_extent(self, genome: str) -> tuple[int, int]:
-        """Return the inclusive bin-id range for *genome*."""
+        """Return the half-open bin-index range for all bins in *genome*.
+
+        Args:
+            genome: Name of the genome as it appears in the ``/genomes``
+                table.
+
+        Returns:
+            ``(lo, hi)`` — half-open integer interval such that bins
+            ``[lo, hi)`` all belong to *genome*.  Returns ``(0, 0)`` if
+            *genome* has no bins.
+
+        Raises:
+            KeyError: If *genome* is not present in this file.
+        """
         genomes = self.genomes
         contigs = self.contigs
         if genome not in genomes["name"].values:
@@ -301,7 +483,20 @@ class MetaCooler:
         return (int(sel.index[0]), int(sel.index[-1]) + 1)
 
     def contig_extent(self, contig: str) -> tuple[int, int]:
-        """Return the inclusive bin-id range for *contig*."""
+        """Return the half-open bin-index range for all bins in *contig*.
+
+        Args:
+            contig: Name of the contig as it appears in the ``/contigs``
+                table.
+
+        Returns:
+            ``(lo, hi)`` — half-open integer interval such that bins
+            ``[lo, hi)`` all belong to *contig*.  Returns ``(0, 0)`` if
+            *contig* has no bins.
+
+        Raises:
+            KeyError: If *contig* is not present in this file.
+        """
         contigs = self.contigs
         if contig not in contigs["name"].values:
             raise KeyError(
@@ -322,15 +517,24 @@ class MetaCooler:
         path: str | Path,
         level: Literal["contig", "genome"] = "contig",
     ) -> None:
-        """Export an aggregated matrix as a standard ``.cool`` file.
+        """Export an aggregated contact matrix as a standard ``.cool`` file.
 
         The output is a regular cooler file where the "chromosomes" are
-        either contigs or genomes, making it immediately compatible with
-        the cooler/cooltools/HiGlass ecosystem.
+        either contigs (``level="contig"``) or genomes
+        (``level="genome"``), making it immediately compatible with the
+        cooler / cooltools / HiGlass ecosystem.
 
-        Pixels are streamed chunk-by-chunk; the full contact matrix is never
-        materialised in memory.  ``cooler`` performs an external sort to merge
-        cross-chunk duplicates.
+        Pixels are streamed in chunks; the full contact matrix is never
+        held in memory simultaneously.  ``cooler`` performs an external
+        sort to merge cross-chunk duplicates.
+
+        Args:
+            path: Destination path for the ``.cool`` file.  The file
+                must not already exist.
+            level: Aggregation level for the output chromosomes.
+                ``"contig"`` keeps one row per contig (default);
+                ``"genome"`` sums all contacts between genome pairs,
+                producing one chromosome per genome.
         """
         import cooler as clr
 
@@ -371,6 +575,15 @@ class MetaCooler:
     # ------------------------------------------------------------------
     @contextlib.contextmanager
     def open(self, mode: str = "r"):
-        """Context manager for the root HDF5 file."""
+        """Context manager that opens the underlying HDF5 file.
+
+        Args:
+            mode: h5py file-open mode.  ``"r"`` (default) opens read-only;
+                ``"r+"`` opens for in-place modification.
+
+        Yields:
+            The root ``h5py.File`` object.  When the ``with`` block exits
+            the file is closed automatically.
+        """
         with h5py.File(self._store, mode) as f:
             yield f

@@ -1,4 +1,19 @@
-"""metacooler: Hi-C contact maps for metagenomes."""
+"""metacooler: Hi-C contact maps for metagenomes.
+
+Public names are loaded lazily on first access via ``__getattr__`` to keep
+import time fast and avoid circular dependencies.  All symbols listed in
+``__all__`` are importable directly from ``metacooler``:
+
+.. code-block:: python
+
+    import metacooler
+    mc = metacooler.MetaCooler("file.metacool")
+    metacooler.from_pairs(...)
+
+Each ``if name == "..."`` branch inside :func:`__getattr__` imports the real
+symbol from its submodule and returns it; Python then caches the resolved
+attribute on the module object so subsequent accesses skip the lookup.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +38,17 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    """Lazily import public symbols from their submodules on first access.
+
+    Args:
+        name: Attribute name requested from the ``metacooler`` package.
+
+    Returns:
+        The resolved symbol from its source submodule.
+
+    Raises:
+        AttributeError: If *name* is not a recognised public attribute.
+    """
     if name == "MetaCooler":
         from metacooler.api import MetaCooler as _MetaCooler
 

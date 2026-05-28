@@ -18,6 +18,25 @@ class MetaCoolURI(click.ParamType):
     name = "METACOOL_URI"
 
     def convert(self, value: str, param, ctx) -> str:
+        """Validate a metacool URI argument and return the string value.
+
+        Args:
+            value: Raw string value provided by the user on the command
+                line.  Accepts plain file paths or
+                ``file.mmetacool::entries/entry`` URIs.
+            param: The Click ``Parameter`` object (passed through for error
+                reporting).
+            ctx: The Click ``Context`` object (passed through for error
+                reporting).
+
+        Returns:
+            The original *value* string unchanged if the file exists.
+
+        Raises:
+            click.exceptions.BadParameter: If the file portion of the URI
+                does not exist on disk.
+        """
+
         from metacooler.uri import parse_uri
 
         file_path, _ = parse_uri(value)

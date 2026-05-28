@@ -47,7 +47,12 @@ _INFO_KEY_ORDER = [
     help="Increase verbosity (debug logging).",
 )
 def cmd_info(metacool_path: str, table_out: bool, verbose: bool) -> None:
-    """Display metadata and statistics for a metacool file."""
+    """Display metadata and statistics for a metacool or cooler file.
+
+    Accepts ``.metacool`` files, mmetacool entries (via URI syntax), and
+    plain ``.cool``/``.mcool`` files.  Outputs a JSON object by default;
+    pass ``--table`` for a rich formatted table.
+    """
     import cooler
     import h5py
     from cooler.fileops import is_cooler, is_multires_file

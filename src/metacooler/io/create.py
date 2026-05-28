@@ -42,7 +42,28 @@ def _read_contig_lengths(
     fasta: str | Path | None = None,
     pairs: str | Path | None = None,
 ) -> dict[str, int]:
-    """Extract contig lengths from bins, fasta, or pairs header."""
+    """Extract contig name → length mapping from one of three sources.
+
+    Exactly one of *bins*, *fasta*, or *pairs* should be provided.  When
+    *fasta* is given, sequence lengths are read directly from the FASTA
+    index.  When *bins* is given, the maximum ``end`` value per contig is
+    used as the length.  When *pairs* is given, ``#chromsize:`` header
+    lines are parsed.
+
+    Args:
+        bins: Pre-loaded bins DataFrame with columns ``chrom``, ``start``,
+            ``end``.  Lengths are inferred as ``max(end)`` per contig.
+        fasta: Path to a FASTA (or gzip-compressed ``.fa.gz``) file.  The
+            file is indexed with pyfaidx to retrieve exact sequence lengths.
+        pairs: Path to a ``.pairs`` (or ``.pairs.gz``) file whose header
+            contains ``#chromsize: <name> <length>`` lines.
+
+    Returns:
+        Mapping of contig name to sequence length in base pairs.
+
+    Raises:
+        ValueError: If none of the three sources can provide contig lengths.
+    """
     if fasta is not None:
         fasta_path = Path(fasta)
         if fasta_path.suffix == ".gz":
@@ -88,9 +109,17 @@ def _read_contig_lengths(
 
 
 def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
-    """Parse #chromsize: lines from a pairs file header.
+    """Parse ``#chromsize:`` lines from the header of a pairs file.
 
-    Returns a dict {contig_name: length} or None if no chromsizes found.
+    Reads lines from the beginning of the file until the first non-comment
+    line is encountered.  Handles plain-text and gzip-compressed files.
+
+    Args:
+        pairs_path: Path to the pairs (or ``.pairs.gz``) file.
+
+    Returns:
+        Mapping of contig name to length extracted from the header, or
+        ``None`` if no ``#chromsize:`` lines were found.
     """
     path = Path(pairs_path)
     opener = gzip.open if path.suffix == ".gz" else open
@@ -114,7 +143,36 @@ def _build_contig_order(
     ] = "genome-then-alpha",
     custom_order: list[str] | None = None,
 ) -> list[str]:
-    """Return contig names in canonical order."""
+    """Return contig names sorted according to *ordering*.
+
+    Args:
+        contig_lengths: Mapping of contig name to length.  Keys determine
+            the full set of contigs to order.
+        contig_genome_map: Mapping of contig name to genome name.  Contigs
+            not present default to ``"__unbinned__"``.
+        ordering: Strategy used to sort contigs:
+
+            * ``"genome-then-alpha"`` — group by genome (alphabetical),
+              then sort contigs alphabetically within each group.
+            * ``"genome-then-length"`` — group by genome (alphabetical),
+              then sort contigs longest-first within each group.
+            * ``"fasta"`` — preserve insertion order of *contig_lengths*
+              (i.e. FASTA record order).
+            * ``"alpha"`` — strict global alphabetical order.
+            * ``"custom"`` — use the explicit list provided in
+              *custom_order*.
+
+        custom_order: Explicit list of contig names.  Required when
+            *ordering* is ``"custom"``; ignored otherwise.
+
+    Returns:
+        Ordered list of all contig names from *contig_lengths*.
+
+    Raises:
+        ValueError: If *ordering* is ``"custom"`` and *custom_order* is
+            ``None``, or if *custom_order* is missing any contig.
+        ValueError: If *ordering* is an unrecognised string.
+    """
     all_contigs = set(contig_lengths.keys())
 
     if ordering == "fasta":
@@ -175,15 +233,26 @@ def _build_genomes_table(
     extra_genomes_df: pd.DataFrame | None = None,
     keep_unbinned: bool = True,
 ) -> pd.DataFrame:
-    """Build the genomes DataFrame from contig data.
+    """Build the ``/genomes`` DataFrame from contig data.
 
     Args:
-        contig_order: Ordered list of contig names.
-        contig_lengths: Mapping of contig name → length.
-        contig_genome_map: Mapping of contig name → genome name.
-        extra_genomes_df: Optional DataFrame from a genomes table file
-            (column ``genome_id`` plus any extra columns).  Extra columns
-            are merged into the output by genome name.
+        contig_order: Ordered list of contig names (typically the output of
+            :func:`_build_contig_order`).
+        contig_lengths: Mapping of contig name to length.
+        contig_genome_map: Mapping of contig name to genome name.  Contigs
+            absent from this map are assigned to ``"__unbinned__"``.
+        extra_genomes_df: Optional DataFrame from a genomes-metadata TSV
+            file (column ``genome_id`` plus any additional columns).  When
+            provided, the extra columns are left-merged into the output by
+            genome name.
+        keep_unbinned: If ``True`` (default), include a row for the
+            ``"__unbinned__"`` pseudo-genome whenever at least one contig
+            is unmapped.  Set to ``False`` to omit it from the output.
+
+    Returns:
+        DataFrame with columns ``name``, ``length``, ``n_contigs``, and
+        any extra columns from *extra_genomes_df*.  Rows are ordered with
+        ``"__unbinned__"`` first (when present), then alphabetically.
     """
     # Collect genome names
     genome_names = set()
@@ -247,7 +316,23 @@ def _build_contigs_table(
     genomes: pd.DataFrame,
     contig_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build the contigs DataFrame with genome_id and optional extra columns."""
+    """Build the ``/contigs`` DataFrame with genome IDs and optional extra columns.
+
+    Args:
+        contig_order: Ordered list of contig names.
+        contig_lengths: Mapping of contig name to length in base pairs.
+        contig_genome_map: Mapping of contig name to genome name.
+        genomes: The already-built ``/genomes`` DataFrame; used to look up
+            each genome's integer index (``genome_id``).
+        contig_df: Optional DataFrame parsed from a contigs-metadata TSV
+            file.  Extra columns beyond ``contig_name`` and ``genome_id``
+            are left-merged into the output by contig name.
+
+    Returns:
+        DataFrame with columns ``name``, ``length``, ``genome_id``, and
+        any extra columns from *contig_df*.  Row order matches
+        *contig_order*.
+    """
     genome_name_to_id = {name: i for i, name in enumerate(genomes["name"])}
 
     df = pd.DataFrame(
@@ -296,7 +381,24 @@ def _build_bins(
     contig_order: list[str],
     contig_name_to_id: dict[str, int],
 ) -> pd.DataFrame:
-    """Read a BED file (or DataFrame) of bins and remap chrom names to contig ids."""
+    """Load a BED-format bins file (or DataFrame) and remap contig names to IDs.
+
+    Args:
+        bins: Path to a tab-separated BED file with columns ``chrom``,
+            ``start``, ``end`` (no header), or an already-loaded DataFrame
+            with those columns.
+        contig_order: Ordered list of contig names; used for validation
+            only.
+        contig_name_to_id: Mapping from contig name to integer ID.
+
+    Returns:
+        DataFrame with columns ``chrom`` (int32 contig ID), ``start``
+        (int32), ``end`` (int32).
+
+    Raises:
+        ValueError: If any contig name in the bins file is not found in
+            *contig_name_to_id*.
+    """
     if isinstance(bins, str | Path):
         df = pd.read_csv(
             bins,
@@ -321,7 +423,23 @@ def _tile_bins(
     contig_name_to_id: dict[str, int],
     binsize: int,
 ) -> pd.DataFrame:
-    """Generate fixed-size bins tiling each contig."""
+    """Generate fixed-size bins tiling every contig.
+
+    Each contig is divided into non-overlapping windows of width *binsize*;
+    the last bin per contig may be shorter than *binsize*.
+
+    Args:
+        contig_order: Ordered list of contig names; bin rows are emitted in
+            this order.
+        contig_lengths: Mapping of contig name to length.
+        contig_name_to_id: Mapping of contig name to integer ID (used as
+            the ``chrom`` column value).
+        binsize: Bin width in base pairs.
+
+    Returns:
+        DataFrame with columns ``chrom`` (int32 contig ID), ``start``
+        (int32, 0-based), and ``end`` (int32, clamped to contig length).
+    """
     parts = []
     for contig in contig_order:
         cid = contig_name_to_id[contig]
@@ -334,7 +452,18 @@ def _tile_bins(
 
 
 def _count_pairs_header(path: Path) -> int:
-    """Count the number of ``#``-prefixed header lines at the top of a pairs file."""
+    """Count the number of ``#``-prefixed header lines at the top of a pairs file.
+
+    Reads lines sequentially until the first non-comment line is found.
+    Handles plain text, ``.gz``/``.bgz`` (gzip), and ``.bz2`` compressed
+    files.
+
+    Args:
+        path: Path to the pairs file.
+
+    Returns:
+        Integer count of consecutive header lines starting with ``#``.
+    """
     import bz2 as _bz2
     import gzip as _gzip
 
@@ -508,6 +637,16 @@ def _bin_pairs_chunk(
 
 
 def _total_time_str(start_time: pd.Timestamp) -> str:
+    """Format elapsed time since *start_time* as a human-readable string.
+
+    Args:
+        start_time: Timestamp captured at the beginning of the operation
+            (e.g. ``pd.Timestamp.now()``).
+
+    Returns:
+        Formatted string such as ``"3.2s"``, ``"1m:24s"``, or
+        ``"1h:3m:47s"`` depending on the elapsed duration.
+    """
     tottime = pd.Timestamp.now() - start_time
     if tottime.total_seconds() >= 3600:
         return f"{int(tottime.total_seconds() // 3600)}h:{int((tottime.total_seconds() % 3600) // 60)}m:{int(tottime.total_seconds() % 60)}s"

@@ -25,7 +25,19 @@ if TYPE_CHECKING:
 
 
 def _hash_group(f: h5py.File, group: str) -> str:
-    """Return an MD5 hex digest of a group's datasets."""
+    """Return an MD5 hex digest of all datasets in a group.
+
+    Used to compare ``contigs`` and ``genomes`` tables across files for
+    merge compatibility checking.
+
+    Args:
+        f: Open ``h5py.File`` (or any HDF5 group-like object).
+        group: HDF5 group path to hash (e.g. ``"contigs"`` or ``"genomes"``).
+
+    Returns:
+        Lowercase hex MD5 digest string of all dataset values, sorted by
+        key name for determinism.
+    """
     h = hashlib.md5(usedforsecurity=False)
     g = f[group]
     for key in sorted(g.keys()):
@@ -44,11 +56,26 @@ def merge(
     inputs: Iterable[str | Path],
     output: str | Path,
 ) -> None:
-    """Merge multiple metacool files with identical axes.
+    """Merge multiple ``.metacool`` files with identical axes into one.
 
-    All input files must have identical ``contigs``, ``genomes`` tables
-    and ``contig-ordering`` attributes.  Pixels are concatenated and
-    re-sorted externally.
+    All input files must have identical ``contigs`` and ``genomes`` tables
+    and the same ``contig-ordering`` attribute.  Pixels from all inputs are
+    concatenated, re-sorted externally by ``cooler.merge_coolers()``, and
+    saved to *output*.  Metacooler-specific groups (``genomes``, ``contigs``,
+    ``genome_offset``, format attributes) are then copied from the first
+    input file.
+
+    Args:
+        inputs: Iterable of paths to the input ``.metacool`` files.  At
+            least two files are required.
+        output: Destination path for the merged ``.metacool`` file.
+
+    Raises:
+        ValueError: If fewer than two inputs are provided, if the
+            ``contigs`` or ``genomes`` tables differ across files, or if
+            the ``contig-ordering`` attribute is inconsistent.
+        MetaCoolerFormatError: If any input file fails the metacooler
+            format validation check.
     """
     inputs = [Path(p) for p in inputs]
     if len(inputs) < 2:

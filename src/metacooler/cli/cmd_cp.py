@@ -8,8 +8,18 @@ from metacooler.cli.main import cli
 
 
 @cli.command(name="cp", help="Copy an entry within or between mmetacool files.")
-@click.argument("src", type=str)
-@click.argument("dst", type=str)
+@click.argument(
+    "src",
+    type=str,
+    metavar="SRC",
+    help="Source URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
+)
+@click.argument(
+    "dst",
+    type=str,
+    metavar="DST",
+    help="Destination URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
+)
 @click.option(
     "-f",
     "--force",

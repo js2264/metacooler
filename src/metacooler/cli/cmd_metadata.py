@@ -18,7 +18,19 @@ def metadata() -> None:
 
 
 def _check_mmetacool(metacool_path: str) -> None:
-    """Raise an error if the file is an mmetacool without a group path."""
+    """Raise a ClickException if the URI points to an mmetacool without an entry.
+
+    When a bare mmetacool file path is given (no ``::entries/…`` suffix),
+    this helper prints the available entry URIs so the user knows what to
+    specify.
+
+    Args:
+        metacool_path: Raw CLI argument string — plain path or URI.
+
+    Raises:
+        click.ClickException: If the file is an mmetacool and no entry
+            path was specified in the URI.
+    """
     from metacooler.schema import is_mmetacooler, list_metacoolers
     from metacooler.uri import parse_uri
 
@@ -65,7 +77,15 @@ def metadata_list(metacool_path: str, verbose: bool) -> None:
 
 
 def _read_metadata(f):
-    """Read and parse the 'metadata' attribute from an open HDF5 file."""
+    """Read and parse the ``metadata`` attribute from an open HDF5 group.
+
+    Args:
+        f: An open ``h5py.File`` or ``h5py.Group`` object.
+
+    Returns:
+        Parsed metadata as a plain Python dict.  Returns ``{}`` if the
+        attribute is absent or is an empty JSON object.
+    """
     raw = f.attrs.get("metadata", "{}")
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
@@ -164,7 +184,16 @@ def metadata_remove(metacool_path: str, key: str, verbose: bool) -> None:
 
 
 def _stringify_values(obj):
-    """Recursively convert every leaf value to a plain string."""
+    """Recursively convert every leaf value in a nested structure to a string.
+
+    Args:
+        obj: Any Python object.  Dicts and lists are traversed recursively;
+            all other values are converted with ``str()``.
+
+    Returns:
+        A new structure of the same shape with all leaf values replaced by
+        their string representations.
+    """
     if isinstance(obj, dict):
         return {k: _stringify_values(v) for k, v in obj.items()}
     if isinstance(obj, list):

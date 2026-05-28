@@ -12,7 +12,19 @@ from metacooler.schema import COOLER_FORMAT
 
 
 def _is_mcool(file_path: Path) -> bool:
-    """Return True if *file_path* is a cooler multi-resolution (.mcool) file."""
+    """Return ``True`` if *file_path* is a cooler multi-resolution (``.mcool``) file.
+
+    A file is considered an mcool if it contains a ``/resolutions`` group
+    and at least one child group inside it with the cooler ``format``
+    attribute set to ``HDF5::Cooler``.
+
+    Args:
+        file_path: Path to the HDF5 file to inspect.
+
+    Returns:
+        ``True`` if the file is a valid mcool collection, ``False``
+        otherwise (including if the file cannot be opened).
+    """
     try:
         with h5py.File(file_path, "r") as f:
             if "resolutions" not in f:

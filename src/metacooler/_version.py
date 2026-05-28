@@ -1,4 +1,4 @@
-"""Fixed version for metacooler."""
+"""Package version string for metacooler."""
 
 from __future__ import annotations
 

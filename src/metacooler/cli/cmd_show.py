@@ -15,14 +15,14 @@ from metacooler.cli.main import MetaCoolURI, cli
     "-f",
     "--file",
     type=MetaCoolURI(),
-    help="Path to a .metacool file or to a mmetacool entry",
+    help="Path to a ``.metacool`` file or mmetacool entry URI.",
     required=True,
 )
 @click.option(
     "-o",
     "--output",
     type=click.Path(path_type=Path),
-    help="Save to file instead of displaying.",
+    help="Save heatmap to this file instead of opening an interactive window.",
     required=True,
 )
 @click.option(
@@ -30,7 +30,12 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=click.Choice(["bin", "contig", "genome"]),
     default="genome",
     show_default=True,
-    help="Heatmap resolution.",
+    help=(
+        "Resolution of the contact heatmap. "
+        "[cyan]bin[/cyan]: one pixel per bin (finest). "
+        "[cyan]contig[/cyan]: aggregate contacts per contig. "
+        "[cyan]genome[/cyan]: aggregate contacts per genome (coarsest, default)."
+    ),
 )
 @click.option(
     "--genome",
@@ -48,14 +53,19 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=click.Choice(["log1p", "log10", "none"]),
     default="log1p",
     show_default=True,
-    help="Value transform.",
+    help=(
+        "Pixel value transform applied before colouring. "
+        "[cyan]log1p[/cyan]: log(1 + count) (default, good for sparse data). "
+        "[cyan]log10[/cyan]: log10(1 + count). "
+        "[cyan]none[/cyan]: raw counts."
+    ),
 )
 @click.option(
     "--cmap",
     type=str,
     default="afmhot_r",
     show_default=True,
-    help="Matplotlib colormap.",
+    help="Matplotlib colormap name (e.g. [cyan]afmhot_r[/cyan], [cyan]Reds[/cyan]).",
 )
 @click.option(
     "--vmax",

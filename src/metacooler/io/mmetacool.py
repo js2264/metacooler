@@ -13,7 +13,15 @@ logger = logging.getLogger("metacooler")
 
 
 def _init_mmetacool_attrs(f: h5py.File) -> None:
-    """Write the top-level attributes for a new .mmetacool file."""
+    """Write the top-level format attributes for a new ``.mmetacool`` file.
+
+    Sets ``format`` to ``HDF5::MMetaCooler`` and ``format-version`` to the
+    current :data:`~metacooler.schema.MMETACOOLER_FORMAT_VERSION`.
+
+    Args:
+        f: Open ``h5py.File`` in write or append mode.  Attributes are
+            written directly to the file root (``f.attrs``).
+    """
     f.attrs["format"] = MMETACOOLER_FORMAT
     f.attrs["format-version"] = MMETACOOLER_FORMAT_VERSION
 

@@ -1,3 +1,10 @@
+"""I/O utilities for reading genome-metadata tables.
+
+This module provides helpers for parsing the TSV-formatted genome/MAG
+metadata file that describes which genomes are present in a metagenomic
+Hi-C dataset.
+"""
+
 from pathlib import Path
 
 import pandas as pd

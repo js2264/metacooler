@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import rich_click as click
@@ -10,7 +9,7 @@ from rich.console import Console
 from rich.tree import Tree
 
 if TYPE_CHECKING:
-    import h5py
+    pass
 
 from metacooler.cli.main import MetaCoolURI, cli
 

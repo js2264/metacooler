@@ -8,8 +8,18 @@ from metacooler.cli.main import cli
 
 
 @cli.command(name="mv", help="Move (rename) an entry within an mmetacool file.")
-@click.argument("src", type=str)
-@click.argument("dst", type=str)
+@click.argument(
+    "src",
+    type=str,
+    metavar="SRC",
+    help="Source URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
+)
+@click.argument(
+    "dst",
+    type=str,
+    metavar="DST",
+    help="Destination URI (same file): [cyan]file.mmetacool::entries/new_name[/cyan].",
+)
 @click.option(
     "-f",
     "--force",

@@ -12,7 +12,16 @@ from metacooler.cli.main import MetaCoolURI, cli
 
 
 def _read_metadata_dict(uri: str) -> dict:
-    """Read and parse the 'metadata' attribute from a metacool file."""
+    """Read and parse the ``metadata`` attribute from a metacool file.
+
+    Args:
+        uri: Plain file path or metacool URI
+            (``file.mmetacool::entries/entry_name``).
+
+    Returns:
+        Metadata as a plain Python dict.  Returns ``{}`` if the
+        attribute is absent.
+    """
     import h5py
 
     from metacooler.uri import parse_uri
@@ -53,7 +62,13 @@ def cmd_merge(
     force: bool,
     verbose: bool,
 ) -> None:
-    """Merge multiple metacooler files."""
+    """Merge multiple ``.metacool`` files with identical axes.
+
+    All input files must have the same contigs, genomes, and
+    ``contig-ordering`` attribute.  Pixel tables are concatenated and
+    re-sorted externally.  Metadata from all inputs is merged and the
+    command line is appended for provenance.
+    """
     import h5py
 
     from metacooler.cli.logging_utils import setup_logging

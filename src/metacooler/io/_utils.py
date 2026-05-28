@@ -26,7 +26,21 @@ logger = logging.getLogger("metacooler")
 
 
 def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
-    """Convert a string/object array to fixed-length bytes for HDF5 storage."""
+    """Convert a string/object NumPy array to fixed-length bytes for HDF5 storage.
+
+    h5py cannot write arrays with ``dtype=object`` or pandas ``StringDtype``
+    directly.  This function converts them to NumPy fixed-length byte-string
+    arrays (``dtype="S<n>"``) suitable for ``h5py.Dataset.create_dataset()``.
+
+    Args:
+        arr: Input array.  Arrays with dtype ``"O"``, ``"U"``, ``"S"``, or
+            pandas ``"string"`` are converted; all other dtypes are returned
+            unchanged via ``numpy.asarray()``.
+
+    Returns:
+        A NumPy array with dtype ``S<n>`` where *n* is the length of the
+        longest encoded string.  Non-string inputs are returned as-is.
+    """
     if arr.dtype.kind in ("O", "U", "S") or str(arr.dtype) == "string":
         str_arr = [
             "" if (v is None or (isinstance(v, float) and np.isnan(v))) else str(v)
@@ -49,19 +63,35 @@ def _finalize_metacool_file(
 ) -> None:
     """Add metacooler-specific groups and attributes to a cooler file.
 
-    Handles: chroms soft-link, genomes/contigs HDF5 groups (with byte-string
-    encoding), stripping the enum dtype from ``bins/chrom``, writing index
-    offsets, and setting all format attributes.
+    Opens *path* in HDF5 ``"a"`` (append) mode and performs the following
+    in-place modifications:
+
+    - Replaces ``/chroms`` with a soft-link to ``/contigs`` for cooler
+      compatibility.
+    - Writes the ``/genomes`` and ``/contigs`` HDF5 groups (with
+      fixed-length byte-string encoding).
+    - Strips the enum dtype from ``/bins/chrom`` and rewrites it as plain
+      ``int32``.
+    - Writes ``indexes/chrom_offset`` and ``indexes/genome_offset``.
+    - Sets all format attributes (``format``, ``metacooler-format``,
+      ``ngenomes``, ``contig-ordering``, etc.).
 
     Args:
         path: Path to the cooler file to finalize (opened in append mode).
-        genomes: ``/genomes`` DataFrame.
-        contigs: ``/contigs`` DataFrame.
-        chrom_offset: Pre-computed ``chrom_offset`` array (length n_contigs+1).
-            If ``None``, computed from the ``bins/chrom`` dataset.
-        genome_offset: Pre-computed ``genome_offset`` array (length n_genomes+1).
-        contig_ordering: Value for the ``contig-ordering`` HDF5 attribute.
-        assembly_name: Optional assembly name stored in ``assembly-name`` attr.
+        genomes: ``/genomes`` DataFrame with columns ``name``, ``length``,
+            ``n_contigs``, and ``n_bins``.
+        contigs: ``/contigs`` DataFrame with columns ``name``, ``length``,
+            and ``genome_id``.
+        chrom_offset: Pre-computed ``chrom_offset`` array of length
+            ``n_contigs + 1``.  If ``None``, it is computed on the fly
+            from the ``bins/chrom`` dataset.
+        genome_offset: Pre-computed ``genome_offset`` array of length
+            ``n_genomes + 1``.
+        contig_ordering: Value written to the ``contig-ordering`` HDF5
+            attribute.  Typically ``"genome-then-alpha"``,
+            ``"pairs-header"``, or ``"genomeid-then-alpha"``.
+        assembly_name: Optional assembly name written to the
+            ``assembly-name`` attribute.  Omitted if ``None``.
     """
     with h5py.File(path, "a") as f:
         # Recreate chroms as a soft link to contigs (cooler compat)

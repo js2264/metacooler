@@ -18,7 +18,20 @@ _CONTIGS_FORMAT_HELP = """
 
 
 def _reconstruct_command() -> str:
-    """Reconstruct the exact command line invocation from the current click context."""
+    """Reconstruct the exact command-line invocation from the current Click context.
+
+    Called from within a running Click command to produce a string
+    representation of all non-default options and arguments, which is
+    then stored in the output file's ``metadata.commands`` attribute for
+    provenance tracking.
+
+    Returns:
+        A shell-escaped string of the form ``metacooler <subcommand>
+        [OPTIONS] [ARGS]``.
+
+    Raises:
+        RuntimeError: If called outside of an active Click command context.
+    """
     ctx = click.get_current_context()
     if ctx is None:
         raise RuntimeError(

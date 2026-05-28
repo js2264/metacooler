@@ -14,7 +14,17 @@ from metacooler.cli.main import MetaCoolURI, cli
 
 
 def _convert_attr(val: object) -> object:
-    """Convert HDF5 attribute values to YAML-friendly Python types."""
+    """Convert an HDF5 attribute value to a YAML-friendly Python type.
+
+    Handles numpy scalars (→ int/float), bytes (→ str), and strings that
+    encode JSON objects, ISO datetimes, or the literal ``"null"`` / ``"{}"``.
+
+    Args:
+        val: Raw attribute value as returned by h5py.
+
+    Returns:
+        A plain Python int, float, str, dict, list, datetime, or ``None``.
+    """
     import json
     from datetime import datetime
 
@@ -44,7 +54,20 @@ def _convert_attr(val: object) -> object:
 
 
 def _collect_attrs_tree(obj: h5py.HLObject) -> dict:
-    """Recursively build a nested dict of HDF5 attrs, matching cooler attrs format."""
+    """Recursively build a nested dict of HDF5 attributes.
+
+    Mirrors the output format of ``cooler attrs``: each node in the tree
+    has an ``"@attrs"`` key containing its attribute dictionary, and child
+    groups are nested under their HDF5 key names.
+
+    Args:
+        obj: An open ``h5py.Group`` or ``h5py.Dataset``.
+
+    Returns:
+        Nested dict suitable for YAML serialisation.  Inaccessible
+        children (broken soft-links, permission errors) are represented
+        as ``{"@error": "inaccessible"}``.
+    """
     import h5py as _h5py
 
     result: dict = {}
@@ -64,7 +87,13 @@ def _collect_attrs_tree(obj: h5py.HLObject) -> dict:
     name="attrs", help="Display HDF5 attributes (YAML, same format as cooler attrs)."
 )
 @click.argument("metacool_path", type=MetaCoolURI())
-@click.argument("group_path", type=str, default="/")
+@click.argument(
+    "group_path",
+    type=str,
+    default="/",
+    metavar="GROUP_PATH",
+    help="HDF5 group path to inspect (default: [cyan]/[/cyan] — the file root).",
+)
 @click.option(
     "-v",
     "--verbose",

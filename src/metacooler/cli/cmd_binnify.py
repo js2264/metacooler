@@ -33,7 +33,11 @@ if TYPE_CHECKING:
     type=click.Choice(["contig", "genome"]),
     default="contig",
     show_default=True,
-    help="Tiling level for re-binning.",
+    help=(
+        "Tiling strategy for re-binning. "
+        "[cyan]contig[/cyan]: tile each contig independently (default). "
+        "[cyan]genome[/cyan]: concatenate all contigs of each genome before tiling."
+    ),
 )
 @click.option(
     "-f",

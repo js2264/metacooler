@@ -8,7 +8,12 @@ from metacooler.cli.main import cli
 
 
 @cli.command(name="rm", help="Remove an entry from an mmetacool file.")
-@click.argument("target", type=str)
+@click.argument(
+    "target",
+    type=str,
+    metavar="TARGET",
+    help="Entry URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
+)
 @click.option(
     "-f",
     "--force",
