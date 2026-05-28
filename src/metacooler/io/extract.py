@@ -9,6 +9,8 @@ import cooler
 import numpy as np
 import pandas as pd
 
+from metacooler.io._utils import _filter_by_genomes_and_contigs
+
 logger = logging.getLogger("metacooler")
 
 
@@ -44,34 +46,21 @@ def extract(
         raise ValueError("At least one of --genomes or --contigs must be specified.")
 
     mc = MetaCooler(uri)
-    all_genomes = mc.genomes
-    all_contigs = mc.contigs
+    selected_contig_ids = _filter_by_genomes_and_contigs(
+        mc, genomes=genomes, contigs=contigs
+    )
 
-    # Resolve contig IDs from genomes
-    selected_contig_ids: set[int] = set()
+    # Build genome_contig_map only when split mode needs it
     genome_contig_map: dict[str, list[int]] = {}
-
-    if genomes:
-        for g in genomes:
-            if g not in all_genomes["name"].values:
-                raise KeyError(
-                    f"Genome {g!r} not found. Available: {all_genomes['name'].tolist()}"
-                )
-            gid = int(all_genomes.loc[all_genomes["name"] == g].index[0])
-            cids = all_contigs.index[all_contigs["genome_id"] == gid].tolist()
-            selected_contig_ids.update(cids)
-            genome_contig_map[g] = cids
-
-    if contigs:
-        for c in contigs:
-            if c not in all_contigs["name"].values:
-                raise KeyError(
-                    f"Contig {c!r} not found. Available: {all_contigs['name'].tolist()}"
-                )
-            cid = int(all_contigs.loc[all_contigs["name"] == c].index[0])
-            selected_contig_ids.add(cid)
-
     if split and genomes:
+        all_genomes_df = mc.genomes
+        all_contigs = mc.contigs
+        for g in genomes:
+            gid = int(all_genomes_df.loc[all_genomes_df["name"] == g].index[0])
+            genome_contig_map[g] = all_contigs.index[
+                all_contigs["genome_id"] == gid
+            ].tolist()
+
         # Write one cool per genome
         output_path = Path(output)
         for g in genomes:

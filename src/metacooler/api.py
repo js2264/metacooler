@@ -245,7 +245,7 @@ class MetaCooler:
 
         chunks = []
         chunksize = 1_000_000
-        n_pix = len(self._clr.pixels())
+        n_pix = self.info["nnz"]
         # Use bin1_offset index to find the pixel range for bins [lo, hi)
         with h5py.File(self._store, "r") as f:
             root = f[self._group_path.lstrip("/")] if self._group_path != "/" else f

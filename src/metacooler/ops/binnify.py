@@ -204,7 +204,7 @@ def _write_rebinned_metacool(
     """Write a re-binned metacool file preserving the full metacooler schema."""
     import cooler
 
-    from metacooler.io.create import _finalize_metacool_file
+    from metacooler.io._utils import _finalize_metacool_file
 
     # Pre-compute index offsets from the bins DataFrame
     contig_names = contigs["name"].values

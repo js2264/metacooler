@@ -494,15 +494,23 @@ class TestFromCoolExtras:
         with h5py.File(out, "r") as f:
             assert f.attrs["assembly-name"] == "my_assembly"
 
-    def test_from_cool_drop_unassigned_raises_for_binned_contigs(self, tmp_path):
-        """drop_unassigned=True with unassigned contigs in bins should raise."""
+    def test_from_cool_drop_unassigned_succeeds(self, tmp_path):
+        """drop_unassigned=True should create a file with only assigned contigs."""
         out = tmp_path / "out.metacool"
-        with pytest.raises(
-            ValueError, match="Bins reference contigs not in contig_order"
-        ):
-            from_cool(
-                cool_uri=_COOL_PATH,
-                output=out,
-                contig_genome_map=_CONTIGS_TABLE,
-                drop_unassigned=True,
-            )
+        from_cool(
+            cool_uri=_COOL_PATH,
+            output=out,
+            contig_genome_map=_CONTIGS_TABLE,
+            drop_unassigned=True,
+        )
+        assert out.exists()
+        import cooler
+
+        clr = cooler.Cooler(str(out))
+        # All chroms in the output must come from the contigs table
+        import pandas as pd
+
+        contigs_table = pd.read_csv(_CONTIGS_TABLE, sep="\t")
+        assigned_contigs = set(contigs_table.iloc[:, 0].astype(str))
+        output_chroms = set(clr.chroms()[:]["name"].astype(str))
+        assert output_chroms <= assigned_contigs

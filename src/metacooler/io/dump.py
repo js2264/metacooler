@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from metacooler.api import MetaCooler
+from metacooler.io._utils import _filter_by_genomes_and_contigs
 from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
 
 if TYPE_CHECKING:
@@ -27,34 +28,6 @@ def _decode_chrom(series: pd.Series) -> pd.Series:
     ):
         series = series.str.decode("utf-8")
     return series
-
-
-def _filter_by_genomes_and_contigs(
-    mc: MetaCooler,
-    genomes: list[str] | None = None,
-    contigs: list[str] | None = None,
-) -> set[int]:
-    """Return the set of contig IDs matching the genome/contig filters."""
-    all_genomes = mc.genomes
-    all_contigs = mc.contigs
-    selected: set[int] = set()
-
-    if genomes:
-        for g in genomes:
-            if g not in all_genomes["name"].values:
-                raise KeyError(f"Genome {g!r} not found.")
-            gid = int(all_genomes.loc[all_genomes["name"] == g].index[0])
-            cids = all_contigs.index[all_contigs["genome_id"] == gid].tolist()
-            selected.update(cids)
-
-    if contigs:
-        for c in contigs:
-            if c not in all_contigs["name"].values:
-                raise KeyError(f"Contig {c!r} not found.")
-            cid = int(all_contigs.loc[all_contigs["name"] == c].index[0])
-            selected.add(cid)
-
-    return selected
 
 
 def dump_table(

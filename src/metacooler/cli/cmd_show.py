@@ -45,7 +45,7 @@ from metacooler.cli.main import MetaCoolURI, cli
 )
 @click.option(
     "--transform",
-    type=click.Choice(["log1p", "none"]),
+    type=click.Choice(["log1p", "log10", "none"]),
     default="log1p",
     show_default=True,
     help="Value transform.",
@@ -53,9 +53,22 @@ from metacooler.cli.main import MetaCoolURI, cli
 @click.option(
     "--cmap",
     type=str,
-    default="YlOrRd",
+    default="afmhot_r",
     show_default=True,
     help="Matplotlib colormap.",
+)
+@click.option(
+    "--vmax",
+    type=float,
+    default=None,
+    show_default=True,
+    help="Upper colormap bound. Defaults to the 99th percentile of non-zero values.",
+)
+@click.option(
+    "--separators/--no-separators",
+    default=True,
+    show_default=True,
+    help="Draw lines at genome/contig boundaries.",
 )
 @click.option(
     "--dpi",
@@ -95,6 +108,8 @@ def cmd_show(
     genomes: tuple[str, str] | None,
     transform: str,
     cmap: str,
+    vmax: float | None,
+    separators: bool,
     output: Path | None,
     dpi: int,
     range1: str | None,
@@ -118,8 +133,10 @@ def cmd_show(
         genomes=genomes,
         range1=range1,
         range2=range2,
-        transform=cast(Literal["log1p", "none"], transform),
+        transform=cast(Literal["log1p", "log10", "none"], transform),
         cmap=cmap,
+        vmax=vmax,
+        separators=separators,
         out=output,
         dpi=dpi,
     )

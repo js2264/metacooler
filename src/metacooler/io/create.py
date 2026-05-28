@@ -14,17 +14,12 @@ import numpy as np
 import pandas as pd
 from pyfaidx import Fasta
 
-from metacooler._version import __version__
+from metacooler.io._utils import _finalize_metacool_file
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
 from metacooler.schema import (
     CONTIGS_DTYPE,
-    COOLER_FORMAT,
-    COOLER_FORMAT_URL,
     GENOMES_DTYPE,
-    METACOOLER_FORMAT,
-    METACOOLER_FORMAT_URL,
-    METACOOLER_FORMAT_VERSION,
     validate,
 )
 
@@ -38,101 +33,6 @@ _UNBINNED_SENTINELS: frozenset[str] = frozenset(
 )
 
 logger = logging.getLogger("metacooler")
-
-
-def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
-    """Convert a string/object array to fixed-length bytes for HDF5 storage."""
-    if arr.dtype.kind in ("O", "U", "S") or str(arr.dtype) == "string":
-        str_arr = [
-            "" if (v is None or (isinstance(v, float) and np.isnan(v))) else str(v)
-            for v in arr
-        ]
-        max_len = max((len(s) for s in str_arr), default=1)
-        return np.array([s.encode("utf-8") for s in str_arr], dtype=f"S{max_len}")
-    return np.asarray(arr)
-
-
-def _finalize_metacool_file(
-    path: Path,
-    genomes: pd.DataFrame,
-    contigs: pd.DataFrame,
-    chrom_offset: np.ndarray | None,
-    genome_offset: np.ndarray,
-    *,
-    contig_ordering: str = "genome-then-alpha",
-    assembly_name: str | None = None,
-) -> None:
-    """Add metacooler-specific groups and attributes to a cooler file.
-
-    Handles: chroms soft-link, genomes/contigs HDF5 groups (with byte-string
-    encoding), stripping the enum dtype from ``bins/chrom``, writing index
-    offsets, and setting all format attributes.
-
-    Args:
-        path: Path to the cooler file to finalize (opened in append mode).
-        genomes: ``/genomes`` DataFrame.
-        contigs: ``/contigs`` DataFrame.
-        chrom_offset: Pre-computed ``chrom_offset`` array (length n_contigs+1).
-            If ``None``, computed from the ``bins/chrom`` dataset.
-        genome_offset: Pre-computed ``genome_offset`` array (length n_genomes+1).
-        contig_ordering: Value for the ``contig-ordering`` HDF5 attribute.
-        assembly_name: Optional assembly name stored in ``assembly-name`` attr.
-    """
-    with h5py.File(path, "a") as f:
-        # Recreate chroms as a soft link to contigs (cooler compat)
-        if "chroms" in f:
-            del f["chroms"]
-        f["chroms"] = h5py.SoftLink("contigs")
-
-        # Write /genomes
-        if "genomes" in f:
-            del f["genomes"]
-        g = f.create_group("genomes", track_order=True)
-        for col in genomes.columns:
-            g.create_dataset(col, data=_str_to_hdf5(genomes[col].values))
-
-        # Write /contigs
-        if "contigs" in f:
-            del f["contigs"]
-        c = f.create_group("contigs", track_order=True)
-        for col in contigs.columns:
-            c.create_dataset(col, data=_str_to_hdf5(contigs[col].values))
-
-        # Strip cooler's enum dtype from bins/chrom so it stores plain int32
-        chrom_data = f["bins"]["chrom"][:]
-        del f["bins"]["chrom"]
-        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
-
-        # Compute chrom_offset from bins if not provided
-        if chrom_offset is None:
-            n_contigs = len(contigs)
-            contig_counts = np.bincount(
-                chrom_data.astype(np.int64), minlength=n_contigs
-            )
-            chrom_offset = np.zeros(n_contigs + 1, dtype=np.int64)
-            chrom_offset[1:] = np.cumsum(contig_counts)
-
-        # Write index offsets
-        idx = f.require_group("indexes")
-        for key, data in (
-            ("chrom_offset", chrom_offset),
-            ("genome_offset", genome_offset),
-        ):
-            if key in idx:
-                del idx[key]
-            idx.create_dataset(key, data=data.astype(np.int64))
-
-        # Format attributes
-        f.attrs["format"] = COOLER_FORMAT
-        f.attrs["format-url"] = COOLER_FORMAT_URL
-        f.attrs["metacooler-format"] = METACOOLER_FORMAT
-        f.attrs["metacooler-format-url"] = METACOOLER_FORMAT_URL
-        f.attrs["metacooler-format-version"] = METACOOLER_FORMAT_VERSION
-        f.attrs["generated-by"] = f"metacooler-{__version__}"
-        f.attrs["ngenomes"] = len(genomes)
-        f.attrs["contig-ordering"] = contig_ordering
-        if assembly_name:
-            f.attrs["assembly-name"] = assembly_name
 
 
 def _read_contig_lengths(
@@ -561,9 +461,16 @@ def _bin_pairs_chunk(
     p2 = np.maximum(chunk["pos2"].values[valid] - 1, 0)
 
     if binsize is not None:
-        # Fixed-size bins: direct arithmetic
-        bin1 = chrom_offset[c1] + p1 // binsize
-        bin2 = chrom_offset[c2] + p2 // binsize
+        # Fixed-size bins: clamp so an out-of-range position never overflows
+        # into the next contig's bins.
+        bin1 = np.minimum(
+            chrom_offset[c1] + p1 // binsize,
+            chrom_offset[c1 + 1] - 1,
+        )
+        bin2 = np.minimum(
+            chrom_offset[c2] + p2 // binsize,
+            chrom_offset[c2 + 1] - 1,
+        )
     else:
         # Fragment-level bins: binary search within each contig's bin starts
         assert bin_starts is not None, "bin_starts required for fragment-level binning"
@@ -572,14 +479,16 @@ def _bin_pairs_chunk(
         for cid in np.unique(c1):
             mask = c1 == cid
             lo, hi = int(chrom_offset[cid]), int(chrom_offset[cid + 1])
-            bin1[mask] = (
-                lo + np.searchsorted(bin_starts[lo:hi], p1[mask], side="right") - 1
+            bin1[mask] = np.maximum(
+                lo,
+                lo + np.searchsorted(bin_starts[lo:hi], p1[mask], side="right") - 1,
             )
         for cid in np.unique(c2):
             mask = c2 == cid
             lo, hi = int(chrom_offset[cid]), int(chrom_offset[cid + 1])
-            bin2[mask] = (
-                lo + np.searchsorted(bin_starts[lo:hi], p2[mask], side="right") - 1
+            bin2[mask] = np.maximum(
+                lo,
+                lo + np.searchsorted(bin_starts[lo:hi], p2[mask], side="right") - 1,
             )
 
     # Enforce upper triangle
@@ -604,6 +513,293 @@ def _total_time_str(start_time: pd.Timestamp) -> str:
         return f"{int(tottime.total_seconds() // 60)}m:{int(tottime.total_seconds() % 60)}s"
     else:
         return f"{tottime.total_seconds():.1f}s"
+
+
+def _parse_contig_map(
+    contig_genome_map: dict[str, str] | str | Path,
+    contig_table_format: str,
+) -> tuple[dict[str, str], pd.DataFrame | None]:
+    """Parse and normalize a contig-to-genome mapping from a dict or file path.
+
+    Args:
+        contig_genome_map: Either a pre-built ``{contig: genome}`` mapping or a
+            path to a contig table file.
+        contig_table_format: Format string passed to ``parse_contigs_table`` when
+            *contig_genome_map* is a file path.
+
+    Returns:
+        Tuple of ``(cg_map, contig_df)`` where ``contig_df`` is ``None`` when
+        *contig_genome_map* is already a dict.
+    """
+    contig_df: pd.DataFrame | None = None
+    if isinstance(contig_genome_map, str | Path):
+        cg_map, contig_df = parse_contigs_table(
+            contig_genome_map, fmt=contig_table_format
+        )
+        logger.info(
+            f"Parsed contig-genome map for {len(cg_map)} contigs from {contig_genome_map}"
+        )
+    else:
+        cg_map = dict(contig_genome_map)
+        logger.info(f"Parsed contig-genome map for {len(cg_map)} contigs from dict")
+    cg_map = {k: _normalize_genome_name(v) for k, v in cg_map.items()}
+    return cg_map, contig_df
+
+
+def _load_extra_genomes_table(
+    genomes_table: str | Path | None,
+) -> pd.DataFrame | None:
+    """Load an optional genomes metadata table from disk.
+
+    Args:
+        genomes_table: Path to the TSV file, or ``None``.
+
+    Returns:
+        Parsed DataFrame or ``None`` if *genomes_table* is ``None``.
+    """
+    if genomes_table is None:
+        return None
+    df = parse_genomes_table(genomes_table)
+    logger.info(f"Parsed genomes table for {len(df)} genomes from {genomes_table}")
+    return df
+
+
+def _compute_all_offsets(
+    bins_df: pd.DataFrame,
+    contigs_df: pd.DataFrame,
+    genomes_df: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute chrom_offset and genome_offset; insert ``n_bins`` into genomes_df.
+
+    Args:
+        bins_df: Bins DataFrame with an integer ``chrom`` column (contig IDs).
+        contigs_df: Contigs DataFrame with an integer ``genome_id`` column.
+        genomes_df: Genomes DataFrame; ``n_bins`` is inserted at column position 3.
+
+    Returns:
+        ``(chrom_offset, genome_offset)`` — int64 arrays of length ``n_contigs+1``
+        and ``n_genomes+1`` respectively.
+    """
+    n_contigs = len(contigs_df)
+    n_genomes = len(genomes_df)
+
+    chrom_counts = np.bincount(
+        bins_df["chrom"].values.astype(np.int64), minlength=n_contigs
+    )
+    chrom_offset = np.zeros(n_contigs + 1, dtype=np.int64)
+    chrom_offset[1:] = np.cumsum(chrom_counts)
+
+    genome_ids = contigs_df["genome_id"].values
+    genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
+    genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
+    genome_offset[1:] = np.cumsum(genome_counts)
+
+    genome_bin_counts = np.bincount(
+        contigs_df["genome_id"].values.astype(np.int64),
+        weights=chrom_counts.astype(np.float64),
+        minlength=n_genomes,
+    ).astype(np.int64)
+    genomes_df.insert(3, "n_bins", genome_bin_counts)
+
+    return chrom_offset, genome_offset
+
+
+def _sort_and_dedup_pixels(
+    pixel_iter: Iterable[pd.DataFrame],
+    write_chunk: int = 5_000_000,
+) -> Iterable[pd.DataFrame]:
+    """Collect, globally sort, deduplicate, and yield pixel DataFrames.
+
+    Accumulates all pixel DataFrames from *pixel_iter* into RAM, performs a
+    single global groupby-sum + sort, then yields fixed-size sub-chunks ready
+    for HDF5 appending.
+
+    Args:
+        pixel_iter: Iterable of unsorted pixel DataFrames with columns
+            ``bin1_id``, ``bin2_id``, ``count``.
+        write_chunk: Maximum rows per yielded chunk.
+
+    Yields:
+        Sorted, deduplicated pixel DataFrames of at most *write_chunk* rows.
+    """
+    frames = list(pixel_iter)
+    if not frames:
+        return
+    logger.info("Sorting pixels in memory...")
+    all_pixels = pd.concat(frames, ignore_index=True)
+    del frames
+    all_pixels = all_pixels.groupby(["bin1_id", "bin2_id"], sort=True, as_index=False)[
+        "count"
+    ].sum()
+    logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
+    for lo in range(0, len(all_pixels), write_chunk):
+        yield all_pixels.iloc[lo : lo + write_chunk]
+
+
+def _stream_binned_pairs(
+    pairs: str | Path,
+    contig_name_to_id: dict[str, int],
+    chrom_offset: np.ndarray,
+    binsize: int | None,
+    bin_starts: np.ndarray | None,
+    chunksize: int,
+    pairs_kwargs: dict,
+) -> Iterable[pd.DataFrame]:
+    """Stream a pairs file and yield binned pixel DataFrames with progress.
+
+    Args:
+        pairs: Path to the pairs file (plain text, gzipped, or bgzipped).
+        contig_name_to_id: Mapping from contig name to integer ID.
+        chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
+        binsize: Fixed bin size, or ``None`` for fragment-level bins.
+        bin_starts: Flattened bin start positions; required when *binsize*
+            is ``None``.
+        chunksize: Rows per streaming batch.
+        pairs_kwargs: Extra keyword arguments forwarded to ``_stream_pairs``.
+
+    Yields:
+        Aggregated pixel DataFrames (``bin1_id``, ``bin2_id``, ``count``).
+    """
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+    con = Console(stderr=True)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]Binning pairs"),
+        TextColumn("{task.completed:,.0f} pairs processed"),
+        TimeElapsedColumn(),
+        console=con,
+        transient=True,
+        disable=not con.is_terminal,
+    ) as progress:
+        task = progress.add_task("", total=None)
+        for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
+            progress.update(task, advance=len(chunk))
+            result = _bin_pairs_chunk(
+                chunk, contig_name_to_id, chrom_offset, binsize, bin_starts
+            )
+            if result is not None and not result.empty:
+                yield result
+
+
+def _stream_remapped_pixels(
+    cool_path_str: str,
+    n_pixels: int,
+    old_to_new_bin: np.ndarray,
+    nproc: int,
+    chunksize: int = 1_000_000,
+) -> Iterable[pd.DataFrame]:
+    """Stream pixels from a cool file with bin-ID remapping and rich progress.
+
+    Args:
+        cool_path_str: Filesystem path to the source cool file.
+        n_pixels: Total pixel count (used for progress bar).
+        old_to_new_bin: Array mapping old bin indices to new bin indices.
+        nproc: Number of parallel reader threads (1 = serial).
+        chunksize: Pixels per read batch.
+
+    Yields:
+        Remapped pixel DataFrames with columns ``bin1_id``, ``bin2_id``,
+        ``count``.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeRemainingColumn,
+    )
+
+    thread_local = threading.local()
+
+    def _remap_chunk(lo: int, hi: int) -> pd.DataFrame:
+        if not hasattr(thread_local, "clr"):
+            thread_local.clr = cooler.Cooler(cool_path_str)
+        chunk = thread_local.clr.pixels()[lo:hi].copy()
+        chunk["bin1_id"] = old_to_new_bin[chunk["bin1_id"].values.astype(np.int64)]
+        chunk["bin2_id"] = old_to_new_bin[chunk["bin2_id"].values.astype(np.int64)]
+        # Drop pixels that touch a dropped contig (sentinel -1).
+        chunk = chunk[(chunk["bin1_id"] >= 0) & (chunk["bin2_id"] >= 0)].copy()
+        chunk["count"] = chunk["count"].astype(np.int32)
+        swap = chunk["bin1_id"] > chunk["bin2_id"]
+        chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
+            swap, ["bin2_id", "bin1_id"]
+        ].values
+        return chunk[["bin1_id", "bin2_id", "count"]]
+
+    ranges = [(i, min(i + chunksize, n_pixels)) for i in range(0, n_pixels, chunksize)]
+    con = Console(stderr=True)
+    with Progress(
+        TextColumn("[cyan]Remapping pixels"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("chunks"),
+        TimeRemainingColumn(),
+        console=con,
+        transient=True,
+        disable=not con.is_terminal,
+    ) as progress:
+        task = progress.add_task("", total=len(ranges))
+        if nproc == 1:
+            for lo, hi in ranges:
+                yield _remap_chunk(lo, hi)
+                progress.update(task, advance=1)
+        else:
+            with ThreadPoolExecutor(max_workers=nproc) as pool:
+                futures = [pool.submit(_remap_chunk, lo, hi) for lo, hi in ranges]
+                for f in futures:
+                    yield f.result()
+                    progress.update(task, advance=1)
+
+
+def _remap_bins(
+    bins: pd.DataFrame,
+    contig_order: list[str],
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Remap a bins DataFrame to new contig IDs and return the old→new bin mapping.
+
+    Bins are sorted by new chrom ID (stable sort) so that
+    ``cooler.create_cooler`` receives them in the canonical order.
+
+    Args:
+        bins: Original bins DataFrame (``chrom`` column contains contig names).
+        contig_order: List of contig names defining the new ordering.
+
+    Returns:
+        ``(bins_remapped, old_to_new_bin)`` where *bins_remapped* contains only
+        bins whose contig appears in *contig_order*, sorted by new chrom ID, and
+        *old_to_new_bin* is an array of length ``len(bins)`` mapping each original
+        bin index to its new position.  Bins for contigs absent from
+        *contig_order* receive a sentinel value of ``-1``; callers that stream
+        pixels must filter those rows before writing.
+    """
+    n_original = len(bins)
+    new_contig_name_to_id = {name: idx for idx, name in enumerate(contig_order)}
+    bins_work = bins.copy()
+    bins_work["chrom"] = bins_work["chrom"].map(new_contig_name_to_id)
+    # Bins whose contig is absent from contig_order map to NaN; drop them and
+    # record their original positions so the pixel remapper can use -1 as a
+    # sentinel to discard pixels touching dropped contigs.
+    kept_mask = bins_work["chrom"].notna().values
+    original_kept_indices = np.where(kept_mask)[0]
+    bins_remapped = bins_work.loc[kept_mask, ["chrom", "start", "end"]].copy()
+    bins_remapped = bins_remapped.astype(
+        {"chrom": np.int32, "start": np.int32, "end": np.int32}
+    )
+    sort_idx = np.argsort(bins_remapped["chrom"].values, kind="stable")
+    bins_remapped = bins_remapped.iloc[sort_idx].reset_index(drop=True)
+    n_kept = len(bins_remapped)
+    # Build full-size mapping: dropped bins → -1, kept bins → new sorted index.
+    old_to_new_bin = np.full(n_original, -1, dtype=np.int64)
+    old_to_new_bin[original_kept_indices[sort_idx]] = np.arange(n_kept, dtype=np.int64)
+    return bins_remapped, old_to_new_bin
 
 
 def from_pairs(
@@ -661,37 +857,11 @@ def from_pairs(
         raise TypeError("contig_genome_map must be a dict or a path")
     timer = pd.Timestamp.now()
 
-    # --- Parse contig table ---
-    contig_df: pd.DataFrame | None = None
-    if isinstance(contig_genome_map, str | Path):
-        cg_map, contig_df = parse_contigs_table(
-            contig_genome_map, fmt=contig_table_format
-        )
-        logger.info(
-            f"Parsed contig-genome map for {len(cg_map)} contigs from {contig_genome_map}"
-        )
-    elif isinstance(contig_genome_map, dict):
-        cg_map: dict[str, str] = contig_genome_map
-        logger.info(f"Parsed contig-genome map for {len(cg_map)} contigs from dict")
+    # --- Parse contig map and optional genomes metadata table ---
+    cg_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
+    extra_genomes_df = _load_extra_genomes_table(genomes_table)
 
-    # Normalize empty/NA genome names to __unbinned__
-    n_contigs0: int = len(cg_map)
-    cg_map = {k: _normalize_genome_name(v) for k, v in cg_map.items()}
-    n_contigs1: int = len(cg_map)
-    if n_contigs0 != n_contigs1:
-        logger.info(
-            f"Normalized {n_contigs0 - n_contigs1} contig genome names to __unbinned__"
-        )
-
-    # --- Parse optional genomes metadata table ---
-    extra_genomes_df: pd.DataFrame | None = None
-    if genomes_table is not None:
-        extra_genomes_df = parse_genomes_table(genomes_table)
-        logger.info(
-            f"Parsed genomes table for {len(extra_genomes_df)} genomes from {genomes_table}"
-        )
-
-    # --- Get contig lengths and build bins ---
+    # --- Resolve contig lengths and initial bins DataFrame ---
     if isinstance(bins, str | Path):
         bins_df = pd.read_csv(
             bins,
@@ -712,9 +882,9 @@ def from_pairs(
         raise TypeError("bins must be a path, DataFrame, or None")
     logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
 
-    # --- Filter unassigned ---
+    # --- Filter unassigned contigs ---
     if drop_unassigned:
-        n_contigs0: int = len(contig_lengths)
+        n_before = len(contig_lengths)
         contig_lengths = {
             ct: ls
             for ct, ls in contig_lengths.items()
@@ -722,18 +892,17 @@ def from_pairs(
         }
         if bins_df is not None:
             bins_df = bins_df[bins_df["chrom"].isin(contig_lengths)].copy()
-        n_contigs1: int = len(contig_lengths)
         logger.info(
-            f"Dropped {n_contigs0 - n_contigs1} unassigned contigs; {n_contigs1} remain"
+            f"Dropped {n_before - len(contig_lengths)} unassigned contigs; "
+            f"{len(contig_lengths)} remain"
         )
 
-    # --- Build canonical order ---
+    # --- Build canonical contig order and genome / contig tables ---
     contig_order = _build_contig_order(
         contig_lengths, cg_map, ordering=contig_ordering, custom_order=custom_order
     )
     logger.debug(f"Contig order: {contig_order[:10]} ... {contig_order[-10:]}")
 
-    # --- Build genomes / contigs tables ---
     genomes_df = _build_genomes_table(
         contig_order,
         contig_lengths,
@@ -746,10 +915,11 @@ def from_pairs(
         contig_order, contig_lengths, cg_map, genomes_df, contig_df
     )
     logger.info(
-        f"Built final genomes and contigs tables with {len(genomes_df)} genomes and {len(contigs_df)} contigs"
+        f"Built final genomes and contigs tables with {len(genomes_df)} genomes "
+        f"and {len(contigs_df)} contigs"
     )
 
-    # --- Build bins ---
+    # --- Build final bins table ---
     if bins_df is None:
         if binsize is None:
             raise ValueError("binsize required when bins is None")
@@ -758,108 +928,32 @@ def from_pairs(
         bins_df = _build_bins(bins_df, contig_order, contig_name_to_id)
     bins_df = bins_df.sort_values(["chrom", "start"]).reset_index(drop=True)
     logger.info(
-        f"Built final bins table with {len(bins_df)} bins tiling {len(contig_lengths)} contigs"
+        f"Built final bins table with {len(bins_df)} bins tiling "
+        f"{len(contig_lengths)} contigs"
     )
 
-    # --- Compute offsets ---
-    n_contigs = len(contigs_df)
-    n_bins = len(bins_df)
+    # --- Compute chrom / genome offsets and insert n_bins into genomes_df ---
+    chrom_offset, genome_offset = _compute_all_offsets(bins_df, contigs_df, genomes_df)
 
-    # chrom_offset: first bin index for each contig (O(n_bins) via bincount)
-    chrom_counts = np.bincount(
-        bins_df["chrom"].values.astype(np.int64), minlength=n_contigs
-    )
-    chrom_offset = np.zeros(n_contigs + 1, dtype=np.int64)
-    chrom_offset[1:] = np.cumsum(chrom_counts)
-    logger.debug(f"Chrom offsets: {chrom_offset[:10]} ... {chrom_offset[-10:]}")
-
-    # genome_offset: first contig index for each genome (O(n_contigs) via bincount)
-    n_genomes = len(genomes_df)
-    genome_ids = contigs_df["genome_id"].values
-    genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
-    genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
-    genome_offset[1:] = np.cumsum(genome_counts)
-    logger.debug(f"Genome offsets: {genome_offset[:10]} ... {genome_offset[-10:]}")
-
-    # n_bins per genome: sum chrom_counts by genome_id
-    genome_bin_counts = np.bincount(
-        contigs_df["genome_id"].values.astype(np.int64),
-        weights=chrom_counts.astype(np.float64),
-        minlength=n_genomes,
-    ).astype(np.int64)
-    genomes_df.insert(3, "n_bins", genome_bin_counts)
-    logger.debug(
-        f"Genome bin counts: {genome_bin_counts[:10]} ... {genome_bin_counts[-10:]}"
-    )
-
-    # --- Stream pairs and bin them ---
-    # Flattened bin start positions — needed for fragment-level binning.
-    _bin_starts: np.ndarray | None = (
+    # --- Stream pairs, bin, sort, and write the cooler file ---
+    bin_starts: np.ndarray | None = (
         None if binsize is not None else bins_df["start"].values.astype(np.int64)
     )
+    raw_pixels = _stream_binned_pairs(
+        pairs,
+        contig_name_to_id,
+        chrom_offset,
+        binsize,
+        bin_starts,
+        chunksize,
+        pairs_kwargs,
+    )
 
-    def pixel_stream():
-        """Yield aggregated pixel DataFrames one chunk at a time."""
-        from rich.console import Console
-        from rich.progress import (
-            Progress,
-            SpinnerColumn,
-            TextColumn,
-            TimeElapsedColumn,
-        )
-
-        _con = Console(stderr=True)
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[cyan]Binning pairs"),
-            TextColumn("{task.completed:,.0f} pairs processed"),
-            TimeElapsedColumn(),
-            console=_con,
-            transient=True,
-            disable=not _con.is_terminal,
-        ) as _progress:
-            _task = _progress.add_task("", total=None)
-            for _chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
-                _progress.update(_task, advance=len(_chunk))
-                _result = _bin_pairs_chunk(
-                    _chunk, contig_name_to_id, chrom_offset, binsize, _bin_starts
-                )
-                if _result is not None and not _result.empty:
-                    yield _result
-
-    def pixel_stream_sorted():
-        """Collect all per-chunk pixels, sort globally in RAM, yield sorted sub-chunks.
-
-        Accumulates the aggregated-per-chunk pixel DataFrames from
-        ``pixel_stream()``, concatenates them, performs a single global
-        groupby-sum + sort, and yields the result in write-friendly
-        sub-chunks.  This avoids cooler's temp-file external sort
-        (``ordered=False``) while still producing a correctly sorted,
-        duplicate-free pixel table for ``ordered=True``.
-        """
-        _WRITE_CHUNK = 5_000_000  # pixels per HDF5 append
-
-        frames = list(pixel_stream())
-        if not frames:
-            return
-
-        logger.info("Sorting pixels in memory...")
-        all_pixels = pd.concat(frames, ignore_index=True)
-        del frames
-        all_pixels = all_pixels.groupby(
-            ["bin1_id", "bin2_id"], sort=True, as_index=False
-        )["count"].sum()
-        logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
-
-        for _lo in range(0, len(all_pixels), _WRITE_CHUNK):
-            yield all_pixels.iloc[_lo : _lo + _WRITE_CHUNK]
-
-    # --- Create the cooler file ---
     logger.info(f"Starting to create cooler file at {uri}...")
     cooler.create_cooler(
         str(uri),
         bins=bins_df,
-        pixels=pixel_stream_sorted(),
+        pixels=_sort_and_dedup_pixels(raw_pixels),
         ordered=True,
         symmetric_upper=True,
         assembly=assembly_name,
@@ -879,14 +973,18 @@ def from_pairs(
         assembly_name=assembly_name,
     )
 
-    # Validate
+    # --- Validate ---
     logger.info("Validating created metacool file")
     validate(uri)
     with h5py.File(uri, "r") as f:
         nnz = len(f["pixels"]["count"])
         total = int(f["pixels"]["count"][:].sum())
+    n_bins = len(bins_df)
+    n_contigs = len(contigs_df)
+    n_genomes = len(genomes_df)
     logger.info(
-        f"Created {n_bins} bins from {n_contigs} contigs in {n_genomes} genomes. NNZ={nnz}, sum={total}.",
+        f"Created {n_bins} bins from {n_contigs} contigs in {n_genomes} genomes. "
+        f"NNZ={nnz}, sum={total}.",
     )
     logger.info(f"Created metacool file: {uri} ({_total_time_str(timer)} elapsed)")
 
@@ -933,33 +1031,26 @@ def from_cool(
     """
     cool_path = Path(cool_uri)
     output_path = Path(output)
+    timer = pd.Timestamp.now()
 
-    # Validate input cool file
+    # --- Validate and load cool file ---
     if not cooler.fileops.is_cooler(str(cool_path)):
         raise ValueError(f"Not a valid cooler file: {cool_path}")
-
-    # Load cool file data (bins are small; pixels are streamed below)
     clr = cooler.Cooler(str(cool_path))
-    bins = clr.bins()[:]
-
+    bins = pd.DataFrame(clr.bins()[:])
     logger.info(f"Loaded cool file: {len(bins)} bins, {clr.info['nnz']} pixels")
 
-    # Get contig names from cool file's chroms table
+    # Build contig lengths from bins (use actual contigs in bins, not chroms table)
     chroms = clr.chroms()[:]
     contig_id_to_name = dict(enumerate(chroms["name"]))
-
-    # Build contig lengths from bins (use actual contigs in bins, not chroms table)
     contig_lengths: dict[str, int] = {
         str(chrom): int(group["end"].max()) for chrom, group in bins.groupby("chrom")
     }
 
-    # Parse contig assignments
-    contig_map, contig_df = parse_contigs_table(contig_genome_map, contig_table_format)
+    # --- Parse contig assignments ---
+    contig_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
 
-    # Normalize empty/NA genome names to __unbinned__
-    contig_map = {k: _normalize_genome_name(v) for k, v in contig_map.items()}
-
-    # Drop contigs not present in the contig table (or assigned to __unbinned__)
+    # --- Filter unassigned contigs ---
     if drop_unassigned:
         contig_lengths = {
             ct: ln
@@ -967,7 +1058,7 @@ def from_cool(
             if ct in contig_map and contig_map[ct] != "__unbinned__"
         }
 
-    # Build contig order
+    # --- Build contig order ---
     if contig_ordering == "cool":
         # Preserve the original contig order from the cool file's chroms table,
         # filtered to only contigs present in contig_lengths (after drop_unassigned).
@@ -987,20 +1078,14 @@ def from_cool(
             ordering=contig_ordering,
         )
 
-    # Build genomes table
-    if genomes_table is not None:
-        genomes_df_extra = parse_genomes_table(genomes_table)
-    else:
-        genomes_df_extra = None
-
+    # --- Build genome / contig tables ---
+    extra_genomes_df = _load_extra_genomes_table(genomes_table)
     genomes = _build_genomes_table(
         contig_order=contig_order,
         contig_lengths=contig_lengths,
         contig_genome_map=contig_map,
-        extra_genomes_df=genomes_df_extra,
+        extra_genomes_df=extra_genomes_df,
     )
-
-    # Build contigs table
     contigs = _build_contigs_table(
         contig_order=contig_order,
         contig_lengths=contig_lengths,
@@ -1009,159 +1094,38 @@ def from_cool(
         contig_df=contig_df,
     )
 
-    # Remap bins to new contig IDs (based on reordered contigs)
-    new_contig_name_to_id = {name: idx for idx, name in enumerate(contig_order)}
+    # --- Remap bins to new contig IDs; compute offsets ---
+    bins_remapped, old_to_new_bin = _remap_bins(bins, contig_order)
+    chrom_offset, genome_offset = _compute_all_offsets(bins_remapped, contigs, genomes)
 
-    # Remap bins chrom column (bins have contig names, not IDs)
-    bins_remapped = bins.copy()
-    bins_remapped["chrom"] = bins_remapped["chrom"].map(new_contig_name_to_id)
-    if bins_remapped["chrom"].isna().any():
-        missing = bins_remapped[bins_remapped["chrom"].isna()]["chrom"].unique()
-        raise ValueError(f"Bins reference contigs not in contig_order: {missing}")
-
-    bins_remapped = bins_remapped[["chrom", "start", "end"]].copy()
-    bins_remapped["chrom"] = bins_remapped["chrom"].astype(np.int32)
-    bins_remapped["start"] = bins_remapped["start"].astype(np.int32)
-    bins_remapped["end"] = bins_remapped["end"].astype(np.int32)
-
-    # Sort bins by new chrom ID so cooler.create_cooler stores them in the correct
-    # order.  Without this, cooler renumbers enum codes by first-appearance order,
-    # decoupling the code→name mapping from the physical bin data (start/end).
-    sort_idx = np.argsort(bins_remapped["chrom"].values, kind="stable")
-    bins_remapped = bins_remapped.iloc[sort_idx].reset_index(drop=True)
-
-    # Build old-bin-ID → new-bin-ID mapping for pixel remapping
-    n_bins = len(bins_remapped)
-    old_to_new_bin = np.empty(n_bins, dtype=np.int64)
-    old_to_new_bin[sort_idx] = np.arange(n_bins, dtype=np.int64)
-
-    # n_bins per genome: sum bin counts by genome_id via contigs
-    _chrom_counts = np.bincount(
-        bins_remapped["chrom"].values.astype(np.int64), minlength=len(contigs)
-    )
-    _genome_bin_counts = np.bincount(
-        contigs["genome_id"].values.astype(np.int64),
-        weights=_chrom_counts.astype(np.float64),
-        minlength=len(genomes),
-    ).astype(np.int64)
-    genomes.insert(3, "n_bins", _genome_bin_counts)
-
-    # Stream and remap pixel bin IDs in chunks using a generator to avoid
-    # loading the full pixel table into memory.
-    _chunksize = 1_000_000
-    _n_pixels = clr.info["nnz"]
-    _cool_path_str = str(cool_path)  # pickling-safe string for thread-local opens
-
-    def _remap_chunk(lo: int, hi: int) -> pd.DataFrame:
-        """Read and remap a single pixel range; opens a thread-local Cooler handle."""
-        import threading
-
-        tl = _remap_chunk.__dict__.setdefault("_tl", threading.local())
-        if not hasattr(tl, "clr"):
-            tl.clr = cooler.Cooler(_cool_path_str)
-        _chunk = tl.clr.pixels()[lo:hi].copy()
-        _chunk["bin1_id"] = old_to_new_bin[_chunk["bin1_id"].values.astype(np.int64)]
-        _chunk["bin2_id"] = old_to_new_bin[_chunk["bin2_id"].values.astype(np.int64)]
-        _chunk["count"] = _chunk["count"].astype(np.int32)
-        _swap = _chunk["bin1_id"] > _chunk["bin2_id"]
-        _chunk.loc[_swap, ["bin1_id", "bin2_id"]] = _chunk.loc[
-            _swap, ["bin2_id", "bin1_id"]
-        ].values
-        return _chunk[["bin1_id", "bin2_id", "count"]]
-
-    def _remap_pixel_stream():
-        from rich.console import Console
-        from rich.progress import (
-            BarColumn,
-            MofNCompleteColumn,
-            Progress,
-            TaskProgressColumn,
-            TextColumn,
-            TimeRemainingColumn,
-        )
-
-        _ranges = [
-            (i, min(i + _chunksize, _n_pixels)) for i in range(0, _n_pixels, _chunksize)
-        ]
-        _con = Console(stderr=True)
-        with Progress(
-            TextColumn("[cyan]Remapping pixels"),
-            BarColumn(),
-            TaskProgressColumn(),
-            MofNCompleteColumn(),
-            TextColumn("chunks"),
-            TimeRemainingColumn(),
-            console=_con,
-            transient=True,
-            disable=not _con.is_terminal,
-        ) as _progress:
-            _task = _progress.add_task("", total=len(_ranges))
-
-            if nproc == 1:
-                for _lo, _hi in _ranges:
-                    yield _remap_chunk(_lo, _hi)
-                    _progress.update(_task, advance=1)
-            else:
-                # Parallel path: submit all ranges; h5py releases the GIL on reads
-                # so ThreadPoolExecutor gives genuine I/O overlap.
-                from concurrent.futures import ThreadPoolExecutor
-
-                with ThreadPoolExecutor(max_workers=nproc) as _pool:
-                    _futures = [
-                        _pool.submit(_remap_chunk, _lo, _hi) for _lo, _hi in _ranges
-                    ]
-                    for _f in _futures:
-                        yield _f.result()
-                        _progress.update(_task, advance=1)
-
+    # --- Stream, remap, sort, and write ---
     logger.info(
         f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
     )
-
-    def _remap_pixel_stream_sorted():
-        """Collect, globally sort, and dedup remapped pixel chunks in RAM."""
-        _WRITE_CHUNK = 5_000_000
-        frames = list(_remap_pixel_stream())
-        if not frames:
-            return
-        logger.info("Sorting remapped pixels in memory...")
-        all_pixels = pd.concat(frames, ignore_index=True)
-        del frames
-        all_pixels = all_pixels.groupby(
-            ["bin1_id", "bin2_id"], sort=True, as_index=False
-        )["count"].sum()
-        logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
-        for _lo in range(0, len(all_pixels), _WRITE_CHUNK):
-            yield all_pixels.iloc[_lo : _lo + _WRITE_CHUNK]
-
-    # Create cooler file from remapped bins and pixel stream.
-    # Pixels are sorted in RAM to avoid cooler's temp-file external sort.
+    raw_pixels = _stream_remapped_pixels(
+        str(cool_path), clr.info["nnz"], old_to_new_bin, nproc
+    )
     cooler.create_cooler(
         str(output_path),
         bins=bins_remapped,
-        pixels=_remap_pixel_stream_sorted(),
+        pixels=_sort_and_dedup_pixels(raw_pixels),
         ordered=True,
         symmetric_upper=True,
         assembly=assembly_name or "imported",
         metadata=metadata or {},
     )
 
-    # Compute genome_offset from contigs
-    genome_ids = contigs["genome_id"].values
-    n_genomes = len(genomes)
-    genome_counts = np.bincount(genome_ids.astype(np.int64), minlength=n_genomes)
-    genome_offset = np.zeros(n_genomes + 1, dtype=np.int64)
-    genome_offset[1:] = np.cumsum(genome_counts)
-
-    # Add metacooler-specific groups and attributes
+    # --- Add metacooler-specific groups and attributes ---
     _finalize_metacool_file(
         output_path,
         genomes,
         contigs,
-        None,
+        chrom_offset,
         genome_offset,
         contig_ordering=contig_ordering,
         assembly_name=assembly_name,
     )
 
-    logger.info(f"Successfully created metacool file: {output_path}")
+    logger.info(
+        f"Created metacool file: {output_path} ({_total_time_str(timer)} elapsed)"
+    )

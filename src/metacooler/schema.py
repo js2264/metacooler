@@ -21,7 +21,7 @@ COOLER_FORMAT_URL: Literal["https://github.com/open2c/cooler"] = (
 )
 
 # Dense matrix size guard: refuse to allocate matrices larger than this
-DENSE_MATRIX_BIN_LIMIT = 10_000
+DENSE_MATRIX_BIN_LIMIT = 50_000
 
 # Dtypes matching cooler conventions
 CHROMID_DTYPE = np.int32
