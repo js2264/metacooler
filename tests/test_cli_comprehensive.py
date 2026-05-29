@@ -517,7 +517,7 @@ class TestCreateCool:
         assert data["nnz"] == A1_REP1_1KB_NNZ
         assert data["sum"] == A1_REP1_1KB_SUM
 
-    def test_create_from_cool_ordering_is_cool(
+    def test_create_from_cool_ordering_is_genome_then_length(
         self,
         runner,
         tmp_path,
@@ -542,7 +542,7 @@ class TestCreateCool:
             ],
         )
         data = json.loads(runner.invoke(cli, ["info", str(out)]).output)
-        assert data["ordering"] == "cool"
+        assert data["ordering"] == "genome-then-length"
 
 
 # ---------------------------------------------------------------------------
@@ -1342,6 +1342,8 @@ class TestFlatten:
                 str(a1_rep1_cool),
                 "--output",
                 str(metacool),
+                "--contig-order",
+                "cool",
             ],
         )
         flat = tmp_path / "flat.cool"
@@ -1372,6 +1374,8 @@ class TestFlatten:
                 str(a1_rep1_cool),
                 "--output",
                 str(metacool),
+                "--contig-order", 
+                "cool"
             ],
         )
         flat = tmp_path / "flat.cool"
@@ -1411,6 +1415,8 @@ class TestFlatten:
                 str(a1_rep1_cool),
                 "--output",
                 str(metacool),
+                "--contig-order", 
+                "cool"
             ],
         )
         flat = tmp_path / "flat.cool"
