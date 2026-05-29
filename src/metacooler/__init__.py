@@ -15,8 +15,6 @@ symbol from its submodule and returns it; Python then caches the resolved
 attribute on the module object so subsequent accesses skip the lookup.
 """
 
-from __future__ import annotations
-
 from metacooler._version import __version__
 
 __all__ = [

@@ -32,9 +32,7 @@ from metacooler.cli.cmd_metadata import _stringify_values
 @shared_options
 @click.option(
     "--contig-order",
-    type=click.Choice(
-        ["genome-then-length", "genome-then-alpha", "fasta", "alpha", "custom"]
-    ),
+    type=click.Choice(["genome-then-length", "genome-then-alpha", "fasta", "alpha"]),
     default="genome-then-length",
     show_default=True,
     help=(
@@ -43,8 +41,7 @@ from metacooler.cli.cmd_metadata import _stringify_values
         - [yellow]genome-then-length[/yellow]: group by genome, longest-first within each genome.\n
         - [yellow]genome-then-alpha[/yellow]: group by genome, alphabetical within each genome.\n
         - [yellow]fasta[/yellow]: preserve order from the input FASTA (or pairs header).\n
-        - [yellow]alpha[/yellow]: sort all contigs alphabetically.\n
-        - [yellow]custom[/yellow]: explicit order supplied via the API only.
+        - [yellow]alpha[/yellow]: sort all contigs alphabetically.
         """
     ),
 )
@@ -72,16 +69,16 @@ from metacooler.cli.cmd_metadata import _stringify_values
     help="Number of pairs to process per chunk.",
 )
 @click.option(
-    "--sort-in-memory/--sort-external",
-    "sort_in_memory",
-    is_flag=True,
-    default=None,
-    show_default="auto-detect",
+    "--sort-strategy",
+    "sort_strategy",
+    type=click.Choice(["auto", "memory", "external"]),
+    default="auto",
+    show_default=True,
     help=(
-        "Control pixel sorting strategy. "
-        "--sort-in-memory: collect all pixels in RAM and sort before writing (fast for small files). "
-        "--sort-external: stream unsorted pixels to cooler's external sort (scalable for large files). "
-        "Default: auto-detect based on pairs file size (threshold: 2 GiB)."
+        "Pixel sorting strategy. "
+        "'auto': detect based on pairs file size (threshold: 2 GiB). "
+        "'memory': collect all pixels in RAM and sort before writing (fast for small files). "
+        "'external': stream unsorted pixels to cooler's external sort (scalable for large files)."
     ),
 )
 def cmd_create_pairs(
@@ -96,7 +93,7 @@ def cmd_create_pairs(
     contig_order: str,
     drop_unassigned: bool,
     chunksize: int,
-    sort_in_memory: bool | None,
+    sort_strategy: str,
     force: bool,
     verbose: bool,
     metadata: Path | None,
@@ -115,6 +112,11 @@ def cmd_create_pairs(
         )
     if force and output.exists():
         output.unlink()
+
+    # Map --sort-strategy to sort_in_memory bool
+    sort_in_memory: bool | None = {"auto": None, "memory": True, "external": False}[
+        sort_strategy
+    ]
 
     # Determine if bins is a path or an integer
     try:
@@ -142,13 +144,11 @@ def cmd_create_pairs(
         bins=bins_path,
         pairs=pairs,
         contig_genome_map=contigs,
-        contig_table_format=contigs_format,  # type: ignore
+        contig_table_format=contigs_format,
         fasta=fasta,
         assembly_name=assembly_name,
         contig_ordering=cast(
-            Literal[
-                "genome-then-length", "genome-then-alpha", "fasta", "alpha", "custom"
-            ],
+            Literal["genome-then-length", "genome-then-alpha", "fasta", "alpha"],
             contig_order,
         ),
         drop_unassigned=drop_unassigned,

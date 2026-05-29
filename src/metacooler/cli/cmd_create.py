@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import rich_click as click
@@ -59,7 +60,7 @@ def _reconstruct_command() -> str:
                         parts.append(str(v))
                 else:
                     parts.append(str(value))
-    return " ".join(parts)
+    return shlex.join(parts)
 
 
 def shared_options(f):

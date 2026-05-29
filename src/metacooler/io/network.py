@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -53,31 +52,27 @@ def network(
     n_pix = len(mc._clr.pixels())
 
     if level == "bin":
-        # Raw pixel edge list — stream chunks directly
-        rows = []
-        for lo in range(0, n_pix, chunksize):
-            chunk = mc._clr.pixels()[lo : lo + chunksize]
-            rows.append(
-                pd.DataFrame(
+        # Raw pixel edge list — stream chunks directly to output file
+        with open(out, "w") if out else sys.stdout as fout:
+            if header:
+                fout.write("node1\tnode2\tvalue\n")
+            for lo in range(0, n_pix, chunksize):
+                chunk = mc._clr.pixels()[lo : lo + chunksize]
+                df = pd.DataFrame(
                     {
                         "node1": chunk["bin1_id"].values,
                         "node2": chunk["bin2_id"].values,
                         "value": chunk[weight].values,
                     }
                 )
-            )
-        edges = (
-            pd.concat(rows, ignore_index=True)
-            if rows
-            else pd.DataFrame(columns=["node1", "node2", "value"])
-        )
+                fout.write(df.to_csv(sep="\t", index=False, header=False))
+        return
 
     elif level == "contig":
         bins = mc.bins()
         bin_to_contig = bins["chrom"].cat.codes.values
 
-        # Incremental aggregation using a dict accumulator to avoid OOM
-        accumulator: dict[tuple[int, int], int] = {}
+        partial_frames: list[pd.DataFrame] = []
         for lo in range(0, n_pix, chunksize):
             chunk = mc._clr.pixels()[lo : lo + chunksize]
             c1 = bin_to_contig[chunk["bin1_id"].values].copy()
@@ -87,20 +82,25 @@ def network(
             swap = c1 > c2
             c1[swap], c2[swap] = c2[swap].copy(), c1[swap].copy()
 
-            for i in range(len(c1)):
-                key = (int(c1[i]), int(c2[i]))
-                accumulator[key] = accumulator.get(key, 0) + int(vals[i])
+            df = pd.DataFrame({"node1": c1, "node2": c2, "value": vals})
+            partial_frames.append(
+                df.groupby(["node1", "node2"], sort=False, as_index=False)[
+                    "value"
+                ].sum()
+            )
 
-        if accumulator:
-            keys = np.array(list(accumulator.keys()), dtype=np.int64)
-            vals_arr = np.array(list(accumulator.values()), dtype=np.int64)
+        if partial_frames:
+            combined = pd.concat(partial_frames, ignore_index=True)
+            agg = combined.groupby(["node1", "node2"], sort=True, as_index=False)[
+                "value"
+            ].sum()
             contigs = mc.contigs
             contig_names = contigs["name"].values
             edges = pd.DataFrame(
                 {
-                    "node1": contig_names[keys[:, 0]],
-                    "node2": contig_names[keys[:, 1]],
-                    "value": vals_arr,
+                    "node1": contig_names[agg["node1"].values],
+                    "node2": contig_names[agg["node2"].values],
+                    "value": agg["value"].values,
                 }
             )
         else:
@@ -112,7 +112,7 @@ def network(
         bin_to_contig = bins["chrom"].cat.codes.values
         contig_to_genome = contigs["genome_id"].values
 
-        accumulator2: dict[tuple[int, int], int] = {}
+        partial_frames2: list[pd.DataFrame] = []
         for lo in range(0, n_pix, chunksize):
             chunk = mc._clr.pixels()[lo : lo + chunksize]
             g1 = contig_to_genome[bin_to_contig[chunk["bin1_id"].values]].copy()
@@ -122,20 +122,25 @@ def network(
             swap = g1 > g2
             g1[swap], g2[swap] = g2[swap].copy(), g1[swap].copy()
 
-            for i in range(len(g1)):
-                key = (int(g1[i]), int(g2[i]))
-                accumulator2[key] = accumulator2.get(key, 0) + int(vals[i])
+            df = pd.DataFrame({"node1": g1, "node2": g2, "value": vals})
+            partial_frames2.append(
+                df.groupby(["node1", "node2"], sort=False, as_index=False)[
+                    "value"
+                ].sum()
+            )
 
-        if accumulator2:
-            keys = np.array(list(accumulator2.keys()), dtype=np.int64)
-            vals_arr = np.array(list(accumulator2.values()), dtype=np.int64)
+        if partial_frames2:
+            combined2 = pd.concat(partial_frames2, ignore_index=True)
+            agg2 = combined2.groupby(["node1", "node2"], sort=True, as_index=False)[
+                "value"
+            ].sum()
             genomes = mc.genomes
             genome_names = genomes["name"].values
             edges = pd.DataFrame(
                 {
-                    "node1": genome_names[keys[:, 0]],
-                    "node2": genome_names[keys[:, 1]],
-                    "value": vals_arr,
+                    "node1": genome_names[agg2["node1"].values],
+                    "node2": genome_names[agg2["node2"].values],
+                    "value": agg2["value"].values,
                 }
             )
         else:

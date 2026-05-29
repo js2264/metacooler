@@ -132,8 +132,8 @@ def cmd_show(
 
     setup_logging(verbose, command_name="metacooler show")
 
-    # --range implies bin-level rendering
-    if range1 is not None and level == "genome":
+    # --range implies bin-level rendering for any non-bin level
+    if range1 is not None and level != "bin":
         level = "bin"
 
     show(

@@ -5,6 +5,9 @@ from __future__ import annotations
 import contextlib
 import gzip
 import logging
+import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -68,25 +71,22 @@ def _read_contig_lengths(
         logging.info("Extracting contig lengths from FASTA index")
         fasta_path = Path(fasta)
         if fasta_path.suffix == ".gz":
-            # pyfaidx doesn't handle plain gzip; decompress to temp
+            # pyfaidx doesn't handle plain gzip; stream-decompress to temp file
             logging.info("Unzipping FASTA to temporary file for pyfaidx indexing")
-            import tempfile
-
-            with (
-                tempfile.NamedTemporaryFile(
-                    mode="wb", suffix=".fa", delete=False
-                ) as tmp,
-                gzip.open(fasta_path, "rb") as gz,
-            ):
-                tmp.write(gz.read())
-            fa_path = Path(tmp.name)
+            tmp_fd = tempfile.NamedTemporaryFile(mode="wb", suffix=".fa", delete=False)  # noqa: SIM115
+            fa_path = Path(tmp_fd.name)
             fai_path = fa_path.parent / (fa_path.name + ".fai")
+            fa = None
             try:
-                fa = Fasta(tmp.name)
+                with gzip.open(fasta_path, "rb") as gz:
+                    shutil.copyfileobj(gz, tmp_fd)
+                tmp_fd.close()
+                fa = Fasta(str(fa_path))
                 result = {name: len(record) for name, record in fa.items()}
             finally:
                 with contextlib.suppress(Exception):
-                    fa.close()
+                    if fa is not None:
+                        fa.close()
                 fa_path.unlink(missing_ok=True)
                 fai_path.unlink(missing_ok=True)
             return result
@@ -141,9 +141,8 @@ def _build_contig_order(
     contig_lengths: dict[str, int],
     contig_genome_map: dict[str, str],
     ordering: Literal[
-        "genome-then-alpha", "genome-then-length", "fasta", "alpha", "custom"
+        "genome-then-alpha", "genome-then-length", "fasta", "alpha"
     ] = "genome-then-alpha",
-    custom_order: list[str] | None = None,
 ) -> list[str]:
     """Return contig names sorted according to *ordering*.
 
@@ -161,18 +160,11 @@ def _build_contig_order(
             * ``"fasta"`` — preserve insertion order of *contig_lengths*
               (i.e. FASTA record order).
             * ``"alpha"`` — strict global alphabetical order.
-            * ``"custom"`` — use the explicit list provided in
-              *custom_order*.
-
-        custom_order: Explicit list of contig names.  Required when
-            *ordering* is ``"custom"``; ignored otherwise.
 
     Returns:
         Ordered list of all contig names from *contig_lengths*.
 
     Raises:
-        ValueError: If *ordering* is ``"custom"`` and *custom_order* is
-            ``None``, or if *custom_order* is missing any contig.
         ValueError: If *ordering* is an unrecognised string.
     """
     all_contigs = set(contig_lengths.keys())
@@ -183,14 +175,6 @@ def _build_contig_order(
 
     if ordering == "alpha":
         return sorted(all_contigs)
-
-    if ordering == "custom":
-        if custom_order is None:
-            raise ValueError("custom_order required when ordering='custom'")
-        missing = all_contigs - set(custom_order)
-        if missing:
-            raise ValueError(f"custom_order missing contigs: {missing}")
-        return custom_order
 
     if ordering == "genome-then-alpha":
         # Group by genome, then alphabetical order within each genome
@@ -261,12 +245,9 @@ def _build_genomes_table(
     for contig in contig_order:
         genome_names.add(contig_genome_map.get(contig, "__unbinned__"))
 
-    # Only inject __unbinned__ when at least one contig actually lands in it
-    has_unbinned = any(
-        contig_genome_map.get(c, "__unbinned__") == "__unbinned__" for c in contig_order
-    )
-    if keep_unbinned and has_unbinned and "__unbinned__" not in genome_names:
-        genome_names.add("__unbinned__")
+    # Only inject __unbinned__ when at least one contig actually lands in it;
+    # the loop above already adds "__unbinned__" to genome_names when any contig
+    # lacks an assignment, so no extra injection is needed here.
 
     # Sort: __unbinned__ first (if present), then alphabetical
     sorted_names = sorted(genome_names - {"__unbinned__"})
@@ -337,17 +318,22 @@ def _build_contigs_table(
     """
     genome_name_to_id = {name: i for i, name in enumerate(genomes["name"])}
 
+    def _get_genome_id(c: str) -> int:
+        gname = contig_genome_map.get(c, "__unbinned__")
+        gid = genome_name_to_id.get(gname)
+        if gid is None:
+            gid = genome_name_to_id.get("__unbinned__")
+        if gid is None:
+            raise ValueError(
+                f"Contig {c!r} has no genome assignment and __unbinned__ is absent"
+            )
+        return gid
+
     df = pd.DataFrame(
         {
             "name": contig_order,
             "length": [contig_lengths[c] for c in contig_order],
-            "genome_id": [
-                genome_name_to_id.get(
-                    contig_genome_map.get(c, "__unbinned__"),
-                    genome_name_to_id.get("__unbinned__", 0),
-                )
-                for c in contig_order
-            ],
+            "genome_id": [_get_genome_id(c) for c in contig_order],
         }
     )
 
@@ -411,10 +397,11 @@ def _build_bins(
     else:
         df = bins.copy()
     # Map chrom name -> contig id
-    df["chrom"] = df["chrom"].map(contig_name_to_id)
-    if df["chrom"].isna().any():
-        missing = df[df["chrom"].isna()]["chrom"].unique()
+    mapped = df["chrom"].map(contig_name_to_id)
+    if mapped.isna().any():
+        missing = df["chrom"][mapped.isna()].unique()
         raise ValueError(f"Bins reference unknown contigs: {missing}")
+    df["chrom"] = mapped
     return df[["chrom", "start", "end"]]
 
 
@@ -589,8 +576,16 @@ def _bin_pairs_chunk(
     c1 = c1_codes[valid].astype(np.int32)
     c2 = c2_codes[valid].astype(np.int32)
     # Convert 1-based pairs positions to 0-based, clamp at 0
-    p1 = np.maximum(chunk["pos1"].values[valid] - 1, 0)
-    p2 = np.maximum(chunk["pos2"].values[valid] - 1, 0)
+    raw_p1 = chunk["pos1"].values[valid] - 1
+    raw_p2 = chunk["pos2"].values[valid] - 1
+    neg_mask = (raw_p1 < 0) | (raw_p2 < 0)
+    if neg_mask.any():
+        logger.warning(
+            "%d pairs clamped: negative 0-based positions encountered in chunk",
+            int(neg_mask.sum()),
+        )
+    p1 = np.maximum(raw_p1, 0)
+    p2 = np.maximum(raw_p2, 0)
 
     if binsize is not None:
         # Fixed-size bins: clamp so an out-of-range position never overflows
@@ -637,24 +632,24 @@ def _bin_pairs_chunk(
     return df.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"].sum()
 
 
-def _total_time_str(start_time: pd.Timestamp) -> str:
+def _total_time_str(start_time: float) -> str:
     """Format elapsed time since *start_time* as a human-readable string.
 
     Args:
-        start_time: Timestamp captured at the beginning of the operation
-            (e.g. ``pd.Timestamp.now()``).
+        start_time: Monotonic counter value captured at the beginning of the
+            operation (e.g. ``time.perf_counter()``).
 
     Returns:
         Formatted string such as ``"3.2s"``, ``"1m:24s"``, or
         ``"1h:3m:47s"`` depending on the elapsed duration.
     """
-    tottime = pd.Timestamp.now() - start_time
-    if tottime.total_seconds() >= 3600:
-        return f"{int(tottime.total_seconds() // 3600)}h:{int((tottime.total_seconds() % 3600) // 60)}m:{int(tottime.total_seconds() % 60)}s"
-    elif tottime.total_seconds() >= 60:
-        return f"{int(tottime.total_seconds() // 60)}m:{int(tottime.total_seconds() % 60)}s"
+    secs = time.perf_counter() - start_time
+    if secs >= 3600:
+        return f"{int(secs // 3600)}h:{int((secs % 3600) // 60)}m:{int(secs % 60)}s"
+    elif secs >= 60:
+        return f"{int(secs // 60)}m:{int(secs % 60)}s"
     else:
-        return f"{tottime.total_seconds():.1f}s"
+        return f"{secs:.1f}s"
 
 
 def _parse_contig_map(
@@ -768,11 +763,13 @@ def _sort_and_dedup_pixels(
     if not frames:
         return
     logger.info("Sorting pixels in memory...")
+    _t0 = time.time()
     all_pixels = pd.concat(frames, ignore_index=True)
     del frames
     all_pixels = all_pixels.groupby(["bin1_id", "bin2_id"], sort=True, as_index=False)[
         "count"
     ].sum()
+    logger.info(f"Sorting pixels in memory... DONE ({time.time() - _t0:.1f}s elapsed)")
     logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
     for lo in range(0, len(all_pixels), write_chunk):
         yield all_pixels.iloc[lo : lo + write_chunk]
@@ -894,9 +891,19 @@ def _stream_remapped_pixels(
                 yield _remap_chunk(lo, hi)
                 progress.update(task, advance=1)
         else:
+            from collections import deque
+
             with ThreadPoolExecutor(max_workers=nproc) as pool:
-                futures = [pool.submit(_remap_chunk, lo, hi) for lo, hi in ranges]
-                for f in futures:
+                in_flight: deque = deque()
+                for lo, hi in ranges:
+                    in_flight.append(pool.submit(_remap_chunk, lo, hi))
+                    # Keep at most nproc+1 futures in flight to bound memory
+                    if len(in_flight) > nproc:
+                        f = in_flight.popleft()
+                        yield f.result()
+                        progress.update(task, advance=1)
+                while in_flight:
+                    f = in_flight.popleft()
                     yield f.result()
                     progress.update(task, advance=1)
 
@@ -949,13 +956,12 @@ def from_pairs(
     bins: str | Path | pd.DataFrame | None = None,
     pairs: str | Path | None = None,
     contig_genome_map: dict[str, str] | str | Path | None = None,
-    contig_table_format: Literal["contig_genome", "metator", "contigs"] = "contigs",
+    contig_table_format: str = "contigs",
     fasta: str | Path | None = None,
     assembly_name: str | None = None,
     contig_ordering: Literal[
-        "genome-then-length", "genome-then-alpha", "fasta", "alpha", "custom"
+        "genome-then-length", "genome-then-alpha", "fasta", "alpha"
     ] = "genome-then-length",
-    custom_order: list[str] | None = None,
     drop_unassigned: bool = False,
     binsize: int | None = None,
     genomes_table: str | Path | None = None,
@@ -972,14 +978,15 @@ def from_pairs(
             with columns ``chrom, start, end``.  If ``None``, *binsize* must be given
             and bins will be tiled from the fasta.
         pairs: Path to a pairs file (plain text, gzipped, or bgzipped).
-        contig_genome_map: Either a ``dict[contig_name → genome_name]`` or
-            a path to a contig table file.
-        contig_table_format: Format when *contig_genome_map* is a file path.
+        contig_genome_map: Either a ``dict[contig_name → genome_name]`` or a path
+            to a contig table file (see *contig_table_format*).  Format-specific
+            colspec strings are also accepted (see ``io/contigs.py`` for details).
+        contig_table_format: Column spec when *contig_genome_map* is a file path.
+            Built-in values are ``"contigs"``, ``"contig_genome"``, and ``"metator"``,
+            but any valid colspec string is accepted.
         fasta: Assembly fasta (required if *bins* is ``None``).
         assembly_name: Name for this assembly / metagenome.
         contig_ordering: Canonical ordering strategy.
-        custom_order: Explicit contig order when *contig_ordering* is
-            ``"custom"``.
         drop_unassigned: If ``True``, drop contigs not present in the contig
             table instead of assigning them to ``__unbinned__``.
         binsize: Fixed bin size (used only when *bins* is ``None``).
@@ -1003,11 +1010,22 @@ def from_pairs(
         raise ValueError("pairs file path required")
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
-    timer = pd.Timestamp.now()
+    timer = time.perf_counter()
 
     # --- Auto-detect sort_in_memory based on pairs file size ---
     if sort_in_memory is None:
-        pairs_size = Path(pairs).stat().st_size
+        _pairs_path = Path(pairs)
+        if _pairs_path.suffix in (".gz", ".bgz"):
+            # Use ISIZE footer (last 4 bytes) — uncompressed size mod 2^32
+            try:
+                with open(_pairs_path, "rb") as _fh:
+                    _fh.seek(-4, 2)
+                    _isize = int.from_bytes(_fh.read(4), "little")
+                pairs_size = max(_isize, _pairs_path.stat().st_size)
+            except Exception:
+                pairs_size = _pairs_path.stat().st_size
+        else:
+            pairs_size = _pairs_path.stat().st_size
         if pairs_size > _SORT_IN_MEMORY_PAIRS_SIZE_BYTES:
             logger.warning(
                 "Pairs file is %.1f GiB — switching to sort_in_memory=False "
@@ -1059,9 +1077,7 @@ def from_pairs(
         )
 
     # --- Build canonical contig order and genome / contig tables ---
-    contig_order = _build_contig_order(
-        contig_lengths, cg_map, ordering=contig_ordering, custom_order=custom_order
-    )
+    contig_order = _build_contig_order(contig_lengths, cg_map, ordering=contig_ordering)
     logger.debug(f"Contig order: {contig_order[:10]} ... {contig_order[-10:]}")
 
     genomes_df = _build_genomes_table(
@@ -1097,10 +1113,11 @@ def from_pairs(
     chrom_offset, genome_offset = _compute_all_offsets(bins_df, contigs_df, genomes_df)
 
     # --- Stream pairs, bin, sort, and write the cooler file ---
+    logger.info(f"Starting to create cooler file at {uri}...")
     bin_starts: np.ndarray | None = (
         None if binsize is not None else bins_df["start"].values.astype(np.int64)
     )
-    raw_pixels = _stream_binned_pairs(
+    raw_pixels: Iterable[pd.DataFrame] = _stream_binned_pairs(
         pairs,
         contig_name_to_id,
         chrom_offset,
@@ -1109,13 +1126,13 @@ def from_pairs(
         chunksize,
         pairs_kwargs,
     )
-
-    logger.info(f"Starting to create cooler file at {uri}...")
     if sort_in_memory:
-        pixel_source = _sort_and_dedup_pixels(raw_pixels)
+        pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
+            pixel_iter=raw_pixels
+        )
         ordered = True
     else:
-        pixel_source = raw_pixels
+        pixel_source: Iterable[pd.DataFrame] = raw_pixels
         ordered = False
     cooler.create_cooler(
         str(uri),
@@ -1144,8 +1161,8 @@ def from_pairs(
     logger.info("Validating created metacool file")
     validate(uri)
     with h5py.File(uri, "r") as f:
-        nnz = int(f.attrs.get('nnz'))
-        total = int(f.attrs.get('sum', 0))
+        nnz = int(f.attrs.get("nnz"))
+        total = int(f.attrs.get("sum", 0))
     n_bins = len(bins_df)
     n_contigs = len(contigs_df)
     n_genomes = len(genomes_df)
@@ -1160,12 +1177,10 @@ def from_cool(
     cool_uri: str | Path,
     output: str | Path,
     contig_genome_map: str | Path,
-    contig_table_format: Literal[
-        "contigs", "contig_genome", "metator", "I,J"
-    ] = "contigs",
+    contig_table_format: str = "contigs",
     genomes_table: str | Path | None = None,
     contig_ordering: Literal[
-        "genome-then-length", "genome-then-alpha", "cool", "alpha", "custom"
+        "genome-then-length", "genome-then-alpha", "cool", "alpha"
     ] = "genome-then-length",
     assembly_name: str | None = None,
     drop_unassigned: bool = False,
@@ -1180,12 +1195,15 @@ def from_cool(
         output: Destination path for the output metacool file.
         contig_genome_map: Path to contig-to-genome assignment table
             (``str`` or ``Path`` only; dicts are not accepted here).
-        contig_table_format: Format of the contig assignment table.
+        contig_table_format: Column spec for the contig assignment table.
+            Built-in values are ``"contigs"``, ``"contig_genome"``,
+            ``"metator"``, and ``"I,J"``, but any valid colspec string is
+            accepted.
         genomes_table: Optional path to genomes metadata table.
         contig_ordering: Strategy for ordering contigs within the metacool file.
             ``'cool'`` preserves the original contig order from the input cool file.
             Other choices: ``'genome-then-length'``, ``'genome-then-alpha'``,
-            ``'alpha'``, ``'custom'``.
+            ``'alpha'``.
         assembly_name: Name for this assembly / metagenome, stored in file attrs.
         drop_unassigned: If ``True``, drop contigs absent from the contig table
             instead of collecting them under ``__unbinned__``.
@@ -1204,7 +1222,7 @@ def from_cool(
     """
     cool_path = Path(cool_uri)
     output_path = Path(output)
-    timer = pd.Timestamp.now()
+    timer = time.perf_counter()
 
     # --- Validate and load cool file ---
     if not cooler.fileops.is_cooler(str(cool_path)):
@@ -1248,15 +1266,9 @@ def from_cool(
     if contig_ordering == "cool":
         # Preserve the original contig order from the cool file's chroms table,
         # filtered to only contigs present in contig_lengths (after drop_unassigned).
-        cool_order = [
+        contig_order = [
             name for name in contig_id_to_name.values() if name in contig_lengths
         ]
-        contig_order = _build_contig_order(
-            contig_lengths=contig_lengths,
-            contig_genome_map=contig_map,
-            ordering="custom",
-            custom_order=cool_order,
-        )
     else:
         contig_order = _build_contig_order(
             contig_lengths=contig_lengths,
@@ -1288,14 +1300,16 @@ def from_cool(
     logger.info(
         f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
     )
-    raw_pixels = _stream_remapped_pixels(
+    raw_pixels: Iterable[pd.DataFrame] = _stream_remapped_pixels(
         str(cool_path), clr.info["nnz"], old_to_new_bin, nproc
     )
     if sort_in_memory:
-        pixel_source = _sort_and_dedup_pixels(raw_pixels)
+        pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
+            pixel_iter=raw_pixels
+        )
         ordered = True
     else:
-        pixel_source = raw_pixels
+        pixel_source: Iterable[pd.DataFrame] = raw_pixels
         ordered = False
     cooler.create_cooler(
         str(output_path),
@@ -1308,6 +1322,7 @@ def from_cool(
     )
 
     # --- Add metacooler-specific groups and attributes ---
+    logger.info("Post-processing cooler file to add metacool structure")
     _finalize_metacool_file(
         output_path,
         genomes,
@@ -1318,6 +1333,19 @@ def from_cool(
         assembly_name=assembly_name,
     )
 
+    # --- Validate ---
+    logger.info("Validating created metacool file")
+    validate(str(output_path))
+    with h5py.File(output_path, "r") as f:
+        nnz = int(f.attrs.get("nnz"))
+        total = int(f.attrs.get("sum"))
+        n_bins = int(f.attrs.get("nbins"))
+        n_contigs = int(f.attrs.get("nchroms"))
+        n_genomes = int(f.attrs.get("ngenomes"))
+    logger.info(
+        f"Created {n_bins} bins from {n_contigs} contigs in {n_genomes} genomes. "
+        f"NNZ={nnz}, sum={total}.",
+    )
     logger.info(
         f"Created metacool file: {output_path} ({_total_time_str(timer)} elapsed)"
     )

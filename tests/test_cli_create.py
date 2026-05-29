@@ -897,12 +897,12 @@ class TestCreatePairsPixelCorrectness:
 
 
 class TestCreatePairsSortInMemory:
-    """Test --sort-in-memory and --sort-external options for create pairs."""
+    """Test --sort-strategy options for create pairs."""
 
     def test_sort_in_memory_flag(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
     ):
-        """--sort-in-memory forces in-memory sorting."""
+        """--sort-strategy memory forces in-memory sorting."""
         out = tmp_path / "out_inmem.metacool"
         result = runner.invoke(
             cli,
@@ -911,7 +911,7 @@ class TestCreatePairsSortInMemory:
                 tiny_pairs,
                 tiny_bins_bed,
                 tiny_contigs_table,
-                extra=["--sort-in-memory"],
+                extra=["--sort-strategy", "memory"],
             ),
         )
         assert result.exit_code == 0, result.output
@@ -922,7 +922,7 @@ class TestCreatePairsSortInMemory:
     def test_sort_external_flag(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
     ):
-        """--sort-external forces cooler external sort."""
+        """--sort-strategy external forces cooler external sort."""
         out = tmp_path / "out_external.metacool"
         result = runner.invoke(
             cli,
@@ -931,7 +931,7 @@ class TestCreatePairsSortInMemory:
                 tiny_pairs,
                 tiny_bins_bed,
                 tiny_contigs_table,
-                extra=["--sort-external"],
+                extra=["--sort-strategy", "external"],
             ),
         )
         assert result.exit_code == 0, result.output
@@ -955,15 +955,15 @@ class TestCreatePairsSortInMemory:
 
 
 class TestCreateCoolSortInMemory:
-    """Test --sort-in-memory and --sort-external options for create cool."""
+    """Test --sort-strategy options for create cool."""
 
     def test_sort_in_memory_flag(self, runner, tmp_path, tiny_cool, tiny_contigs_table):
-        """--sort-in-memory forces in-memory sorting for create cool."""
+        """--sort-strategy memory forces in-memory sorting for create cool."""
         out = tmp_path / "out_inmem.metacool"
         result = runner.invoke(
             cli,
             _base_cool_args(
-                out, tiny_cool, tiny_contigs_table, extra=["--sort-in-memory"]
+                out, tiny_cool, tiny_contigs_table, extra=["--sort-strategy", "memory"]
             ),
         )
         assert result.exit_code == 0, result.output
@@ -972,12 +972,15 @@ class TestCreateCoolSortInMemory:
             assert "pixels" in f
 
     def test_sort_external_flag(self, runner, tmp_path, tiny_cool, tiny_contigs_table):
-        """--sort-external forces cooler external sort for create cool."""
+        """--sort-strategy external forces cooler external sort for create cool."""
         out = tmp_path / "out_external.metacool"
         result = runner.invoke(
             cli,
             _base_cool_args(
-                out, tiny_cool, tiny_contigs_table, extra=["--sort-external"]
+                out,
+                tiny_cool,
+                tiny_contigs_table,
+                extra=["--sort-strategy", "external"],
             ),
         )
         assert result.exit_code == 0, result.output

@@ -45,87 +45,61 @@ metacooler show output.metacool --level genome --out heatmap.png
      Create a metacool file from pairs and contig assignments.                      
                                                                                     
     ╭─ Options ────────────────────────────────────────────────────────────────────╮
-    │ *  --pairs                               Pairs file (plain text or gzipped). │
-    │                                          [required]                          │
-    │ *  --bins                                BED file of bins (no column names), │
-    │                                          or an integer bin size in bp (e.g.  │
-    │                                          1000). If an integer, contig        │
-    │                                          lengths must be available from the  │
-    │                                          pairs header or --fasta. [required] │
-    │ *  --output                          -o  Output .metacool file path.         │
-    │                                          [required]                          │
-    │ *  --contigs                             Contig-to-genome assignment table.  │
-    │                                          The expected layout depends on      │
-    │                                          --contigs-format. [required]        │
-    │    --contigs-format                      Format of the contig assignment     │
-    │                                          table. Four formats are supported:  │
-    │                                          [default: contigs]                  │
-    │                                          - contigs: TSV with a header row.   │
-    │                                          Column 1 must be named              │
-    │                                          `contig_name` and column 2          │
-    │                                          `genome_name`. Additional columns   │
-    │                                          are stored verbatim.                │
-    │                                          - contig_genome: Two-column TSV     │
-    │                                          (`contig<TAB>genome`) with no       │
-    │                                          header. First value is contig name, │
-    │                                          second is genome assignment.        │
-    │                                          - metator: MetaTOR output table (ie │
-    │                                          `contig_data_final.txt`). Expects a │
-    │                                          header with columns `Name` (contig) │
-    │                                          and `Final_bin` (genome). Other     │
-    │                                          columns ignored.                    │
-    │                                          - I,J(,noheader): Column-index spec │
-    │                                          (1-based). Use column `I` for       │
-    │                                          contigs and `J` for genomes. Header │
-    │                                          expected by default. Append         │
-    │                                          `,noheader` (e.g., `1,5,noheader`)  │
-    │                                          to treat the first row as data.     │
-    │    --genomes                             Optional genomes metadata table     │
-    │                                          with header. First column must be   │
-    │                                          'genome_name'; any further columns  │
-    │                                          are stored in the /genomes table.   │
-    │    --metadata                            Path to a JSON or YAML file         │
-    │                                          containing metadata to ingest into  │
-    │                                          the file.                           │
-    │    --force                           -f  Overwrite output file if it already │
-    │                                          exists.                             │
-    │    --verbose                         -v  Increase verbosity (debug logging). │
-    │    --contig-order                        Strategy for ordering contigs in    │
-    │                                          the output metacool file.           │
-    │                                          - genome-then-length: group by      │
-    │                                          genome, longest-first within each   │
-    │                                          genome.                             │
-    │                                          - genome-then-alpha: group by       │
-    │                                          genome, alphabetical within each    │
-    │                                          genome.                             │
-    │                                          - fasta: preserve order from the    │
-    │                                          input FASTA (or pairs header).      │
-    │                                          - alpha: sort all contigs           │
-    │                                          alphabetically.                     │
-    │                                          - custom: explicit order supplied   │
-    │                                          via the API only. [default:         │
-    │                                          genome-then-length]                 │
-    │    --fasta                               Assembly FASTA. Used to extract     │
-    │                                          contig lengths when --bins is an    │
-    │                                          integer and contig sizes are absent │
-    │                                          from the pairs header.              │
-    │    --assembly-name                       Name for this assembly /            │
-    │                                          metagenome.                         │
-    │    --drop-unassigned                     Drop contigs not assigned to any    │
-    │                                          genome.                             │
-    │    --chunksize                           Number of pairs to process per      │
-    │                                          chunk. [default: 1000000]           │
-    │    --sort-in-memory/--sort-external      Control pixel sorting strategy.     │
-    │                                          --sort-in-memory: collect all       │
-    │                                          pixels in RAM and sort before       │
-    │                                          writing (fast for small files).     │
-    │                                          --sort-external: stream unsorted    │
-    │                                          pixels to cooler's external sort    │
-    │                                          (scalable for large files).         │
-    │                                          Default: auto-detect based on pairs │
-    │                                          file size (threshold: 2 GiB).       │
-    │                                          [default: (auto-detect)]            │
-    │    --help                            -h  Show this message and exit.         │
+    │ *  --pairs                Pairs file (plain text or gzipped). [required]     │
+    │ *  --bins                 BED file of bins (without column names), or an     │
+    │                           integer bin size in bp (e.g. 1000). If an integer, │
+    │                           contig lengths must be available from the pairs    │
+    │                           header or a --fasta should be provided. [required] │
+    │ *  --output           -o  Output .metacool file path. [required]             │
+    │ *  --contigs              Contig-to-genome assignment table. The expected    │
+    │                           layout depends on --contigs-format. [required]     │
+    │    --contigs-format       Format of the contig assignment table. Four        │
+    │                           formats are supported: [default: contigs]          │
+    │                           - contigs: TSV with a header row. Column 1 must be │
+    │                           named `contig_name` and column 2 `genome_name`.    │
+    │                           Additional columns are stored verbatim.            │
+    │                           - contig_genome: Two-column TSV                    │
+    │                           (`contig<TAB>genome`) with no header. First value  │
+    │                           is contig name, second is genome assignment.       │
+    │                           - metator: MetaTOR output table (ie                │
+    │                           `contig_data_final.txt`). Expects a header with    │
+    │                           columns `Name` (contig) and `Final_bin` (genome).  │
+    │                           Other columns ignored.                             │
+    │                           - I,J(,noheader): Column-index spec (1-based). Use │
+    │                           column `I` for contigs and `J` for genomes. Header │
+    │                           expected by default. Append `,noheader` (e.g.,     │
+    │                           `1,5,noheader`) to treat the first row as data.    │
+    │    --genomes              Optional genomes metadata table with header. First │
+    │                           column must be 'genome_name'; any further columns  │
+    │                           are stored in the /genomes table.                  │
+    │    --metadata             Path to a JSON or YAML file containing metadata to │
+    │                           ingest into the file.                              │
+    │    --force            -f  Overwrite output file if it already exists.        │
+    │    --verbose          -v  Increase verbosity (debug logging).                │
+    │    --contig-order         Strategy for ordering contigs in the output        │
+    │                           metacool file.                                     │
+    │                           - genome-then-length: group by genome,             │
+    │                           longest-first within each genome.                  │
+    │                           - genome-then-alpha: group by genome, alphabetical │
+    │                           within each genome.                                │
+    │                           - fasta: preserve order from the input FASTA (or   │
+    │                           pairs header).                                     │
+    │                           - alpha: sort all contigs alphabetically.          │
+    │                           [default: genome-then-length]                      │
+    │    --fasta                Assembly FASTA. Used to extract contig lengths     │
+    │                           when --bins is an integer and contig sizes are     │
+    │                           absent from the pairs header.                      │
+    │    --assembly-name        Name for this assembly / metagenome.               │
+    │    --drop-unassigned      Drop contigs not assigned to any genome.           │
+    │    --chunksize            Number of pairs to process per chunk. [default:    │
+    │                           1000000]                                           │
+    │    --sort-strategy        Pixel sorting strategy. 'auto': detect based on    │
+    │                           pairs file size (threshold: 2 GiB). 'memory':      │
+    │                           collect all pixels in RAM and sort before writing  │
+    │                           (fast for small files). 'external': stream         │
+    │                           unsorted pixels to cooler's external sort          │
+    │                           (scalable for large files). [default: auto]        │
+    │    --help             -h  Show this message and exit.                        │
     ╰──────────────────────────────────────────────────────────────────────────────╯
 
 ## Input files

@@ -102,7 +102,7 @@ def parse_contigs_table(
     if colspec_match:
         contig_col = int(colspec_match.group(1))
         genome_col = int(colspec_match.group(2))
-        noheader = colspec_match.group(3) == "noheader"
+        noheader = colspec_match.group(3) is not None
 
         if contig_col < 1 or genome_col < 1:
             raise ValueError("Column indices in contigs format must be >= 1")

@@ -7,12 +7,18 @@ import rich_click as click
 from metacooler.cli.main import cli
 
 
-@cli.command(name="rm", help="Remove an entry from an mmetacool file.")
+@cli.command(
+    name="rm",
+    help="""Remove an entry from an mmetacool file.
+
+    \b
+    TARGET   Entry URI: file.mmetacool::entries/entry_name
+    """,
+)
 @click.argument(
     "target",
     type=str,
     metavar="TARGET",
-    help="Entry URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
 )
 @click.option(
     "-f",
@@ -27,11 +33,7 @@ from metacooler.cli.main import cli
     help="Increase verbosity (debug logging).",
 )
 def cmd_rm(target: str, force: bool, verbose: bool) -> None:
-    """Remove an entry from an mmetacool file.
-
-    \b
-    TARGET uses URI syntax: file.mmetacool::entries/entry_name
-    """
+    """Remove an entry from an mmetacool file."""
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import list_entries, remove_entry
     from metacooler.uri import parse_uri

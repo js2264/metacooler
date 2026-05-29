@@ -37,32 +37,6 @@ class TestBuildContigOrder:
         order = _build_contig_order(lengths, cg_map, ordering="alpha")
         assert order == ["a", "b", "c"]
 
-    def test_custom_order(self):
-        lengths = {"c": 100, "a": 200, "b": 150}
-        cg_map = {"a": "MAG_1", "b": "MAG_1", "c": "MAG_2"}
-        order = _build_contig_order(
-            lengths, cg_map, ordering="custom", custom_order=["b", "a", "c"]
-        )
-        assert order == ["b", "a", "c"]
-
-    def test_custom_order_missing(self):
-        lengths = {"c": 100, "a": 200, "b": 150}
-        cg_map = {"a": "MAG_1", "b": "MAG_1", "c": "MAG_2"}
-        with pytest.raises(ValueError, match="custom_order missing"):
-            _build_contig_order(
-                lengths, cg_map, ordering="custom", custom_order=["a", "b"]
-            )
-
-    def test_unknown_ordering(self):
-        with pytest.raises(ValueError, match="Unknown ordering"):
-            _build_contig_order({}, {}, ordering="unknown")  # type: ignore
-
-    def test_custom_order_none_raises(self):
-        lengths = {"a": 100, "b": 200}
-        cg_map = {"a": "MAG_1", "b": "MAG_1"}
-        with pytest.raises(ValueError, match="custom_order required"):
-            _build_contig_order(lengths, cg_map, ordering="custom")
-
 
 class TestBuildGenomesTable:
     def test_unbinned_absent_when_all_contigs_assigned(self):

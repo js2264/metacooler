@@ -49,7 +49,7 @@ def _aggregate_sparse(
     else:
         raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
 
-    rows, cols, data = [], [], []
+    rows_list, cols_list, data_list = [], [], []
     n_pix = len(mc._clr.pixels())
     for i in range(0, n_pix, chunksize):
         chunk = mc._clr.pixels()[i : i + chunksize]
@@ -60,10 +60,13 @@ def _aggregate_sparse(
         swap = c1 > c2
         c1[swap], c2[swap] = c2[swap], c1[swap]
 
-        rows.extend(c1.tolist())
-        cols.extend(c2.tolist())
-        data.extend(vals.tolist())
+        rows_list.append(c1)
+        cols_list.append(c2)
+        data_list.append(vals)
 
+    rows = np.concatenate(rows_list) if rows_list else np.array([], dtype=np.int64)
+    cols = np.concatenate(cols_list) if cols_list else np.array([], dtype=np.int64)
+    data = np.concatenate(data_list) if data_list else np.array([], dtype=np.int64)
     agg = sparse.coo_matrix((data, (rows, cols)), shape=(n, n))
     agg = agg.tocsr()
     agg = (
@@ -186,4 +189,6 @@ def aggregate(
         ),
         ordered=False,
         symmetric_upper=True,
+        assembly=mc.info.get("assembly"),
+        metadata=mc.metadata if mc.metadata else None,
     )

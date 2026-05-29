@@ -42,10 +42,7 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
         longest encoded string.  Non-string inputs are returned as-is.
     """
     if arr.dtype.kind in ("O", "U", "S") or str(arr.dtype) == "string":
-        str_arr = [
-            "" if (v is None or (isinstance(v, float) and np.isnan(v))) else str(v)
-            for v in arr
-        ]
+        str_arr = ["" if pd.isna(v) else str(v) for v in arr]
         max_len = max((len(s) for s in str_arr), default=1)
         return np.array([s.encode("utf-8") for s in str_arr], dtype=f"S{max_len}")
     return np.asarray(arr)
@@ -146,7 +143,7 @@ def _finalize_metacool_file(
         f.attrs["generated-by"] = f"metacooler-{__version__}"
         f.attrs["ngenomes"] = len(genomes)
         f.attrs["contig-ordering"] = contig_ordering
-        if assembly_name:
+        if assembly_name is not None:
             f.attrs["assembly-name"] = assembly_name
 
 
@@ -171,21 +168,27 @@ def _filter_by_genomes_and_contigs(
     all_genomes = mc.genomes
     all_contigs = mc.contigs
     selected: set[int] = set()
+    known_genomes = set(all_genomes["name"])
+    known_contigs = set(all_contigs["name"])
 
     if genomes:
         for g in genomes:
-            if g not in all_genomes["name"].values:
+            if g not in known_genomes:
                 available = all_genomes["name"].tolist()
-                raise KeyError(f"Genome {g!r} not found. Available: {available}")
+                raise KeyError(
+                    f"Genome {g!r} not found. Available ({len(available)} total): {available[:20]}..."
+                )
             gid = int(all_genomes.loc[all_genomes["name"] == g].index[0])
             cids = all_contigs.index[all_contigs["genome_id"] == gid].tolist()
             selected.update(cids)
 
     if contigs:
         for c in contigs:
-            if c not in all_contigs["name"].values:
+            if c not in known_contigs:
                 available = all_contigs["name"].tolist()
-                raise KeyError(f"Contig {c!r} not found. Available: {available}")
+                raise KeyError(
+                    f"Contig {c!r} not found. Available ({len(available)} total): {available[:20]}..."
+                )
             cid = int(all_contigs.loc[all_contigs["name"] == c].index[0])
             selected.add(cid)
 

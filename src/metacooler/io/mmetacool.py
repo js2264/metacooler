@@ -205,7 +205,13 @@ def copy_entry_cross_file(
     Raises:
         KeyError: If source entry does not exist or destination exists
             and *overwrite* is False.
+        ValueError: If source and destination resolve to the same file.
     """
+    if Path(src_file).resolve() == Path(dst_file).resolve():
+        raise ValueError(
+            f"Source and destination are the same file: {src_file}. "
+            "Use rename_entry() to rename entries within a file."
+        )
     with h5py.File(src_file, "r") as sf:
         if "entries" not in sf or src_name not in sf["entries"]:
             raise KeyError(f"Source entry {src_name!r} not found in {src_file}")

@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import cooler
+import h5py
 import numpy as np
 import pandas as pd
 
@@ -55,6 +56,12 @@ def extract(
     if split and genomes:
         all_genomes_df = mc.genomes
         all_contigs = mc.contigs
+        if contigs:
+            logger.warning(
+                "--contigs specified together with --split: extra contigs will be "
+                "appended to every genome's output file. "
+                "Consider running without --split or omitting --contigs."
+            )
         for g in genomes:
             gid = int(all_genomes_df.loc[all_genomes_df["name"] == g].index[0])
             genome_contig_map[g] = all_contigs.index[
@@ -76,6 +83,11 @@ def extract(
             _extract_contig_ids(mc, sorted(cids), out_file, assembly=g)
             logger.info("Extracted genome %r → %s", g, out_file)
     else:
+        if split and not genomes and contigs:
+            logger.warning(
+                "--split requires at least one --genomes argument to split by genome. "
+                "Since only --contigs were specified, writing a single merged output file.",
+            )
         # Single output file with all selected contigs
         _extract_contig_ids(
             mc, sorted(selected_contig_ids), Path(output), assembly="multi"
@@ -117,7 +129,7 @@ def _extract_contig_ids(
     chunksize = 1_000_000
 
     # Use bin1_offset index to find pixel range for this genome's bins
-    with __import__("h5py").File(str(mc.store), "r") as _f:
+    with h5py.File(str(mc.store), "r") as _f:
         _root = _f[mc._group_path.lstrip("/")] if mc._group_path != "/" else _f
         bin1_offset = _root["indexes"]["bin1_offset"][:]
     pix_lo = int(bin1_offset[valid_min])

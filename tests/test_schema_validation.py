@@ -125,13 +125,13 @@ class TestValidate:
             idx = f.create_group("indexes")
             idx.create_dataset("chrom_offset", data=np.array([0, 1]))
             idx.create_dataset("bin1_offset", data=np.array([0, 1]))
+            idx.create_dataset("genome_offset", data=np.array([0, 1]))
         with pytest.raises(
             MetaCoolerFormatError, match="genome_id values out of range"
         ):
             validate(path)
 
     def test_empty_pixels_warns(self, tmp_path):
-        """Empty pixels table should log a warning, not raise an error."""
         path = tmp_path / "empty_pix.metacool"
         with h5py.File(path, "w") as f:
             f.attrs["format"] = COOLER_FORMAT
@@ -156,7 +156,7 @@ class TestValidate:
             idx = f.create_group("indexes")
             idx.create_dataset("chrom_offset", data=np.array([0, 0]))
             idx.create_dataset("bin1_offset", data=np.array([0, 0]))
-        # Should not raise — empty pixels is now a warning only
+            idx.create_dataset("genome_offset", data=np.array([0, 0]))
         validate(path)
 
     def test_bin1_offset_wrong_length_raises(self, tmp_path):
@@ -185,11 +185,12 @@ class TestValidate:
             idx.create_dataset("chrom_offset", data=np.array([0, 1]))
             # bin1_offset should have length n_bins+1=2 but has 3
             idx.create_dataset("bin1_offset", data=np.array([0, 1, 2]))
+            idx.create_dataset("genome_offset", data=np.array([0, 1]))
         with pytest.raises(MetaCoolerFormatError, match="bin1_offset length"):
             validate(path)
 
     def test_genome_offset_wrong_length_raises(self, tmp_path):
-        """genome_offset is optional; when present must be n_genomes+1."""
+        """genome_offset is required and must be n_genomes+1."""
         path = tmp_path / "bad_goff.metacool"
         with h5py.File(path, "w") as f:
             f.attrs["format"] = COOLER_FORMAT
@@ -244,6 +245,7 @@ class TestValidate:
             idx = f.create_group("indexes")
             idx.create_dataset("chrom_offset", data=np.array([0, 1]))
             idx.create_dataset("bin1_offset", data=np.array([0, 1]))
+            idx.create_dataset("genome_offset", data=np.array([0, 1]))
         with pytest.raises(MetaCoolerFormatError, match="Missing column in /pixels"):
             validate(path)
 

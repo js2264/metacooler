@@ -115,7 +115,9 @@ def metadata_get(metacool_path: str, key: str, verbose: bool) -> None:
         grp = f[group_path] if group_path != "/" else f
         meta = _read_metadata(grp)
         if key not in meta:
-            raise click.BadParameter(f"Key not found: {key}. Available keys: {list(meta.keys())}")
+            raise click.BadParameter(
+                f"Key not found: {key}. Available keys: {list(meta.keys())}"
+            )
         value = meta[key]
     click.echo(json.dumps(value, indent=2, default=str))
 
@@ -178,7 +180,9 @@ def metadata_remove(metacool_path: str, key: str, verbose: bool) -> None:
         grp = f[group_path] if group_path != "/" else f
         meta = _read_metadata(grp)
         if key not in meta:
-            raise click.BadParameter(f"Key not found: {key}. Available keys: {list(meta.keys())}")
+            raise click.BadParameter(
+                f"Key not found: {key}. Available keys: {list(meta.keys())}"
+            )
         del meta[key]
         grp.attrs["metadata"] = json.dumps(meta)
 
@@ -227,6 +231,12 @@ def metadata_load(input_file: Path, metacool_path: str, verbose: bool) -> None:
 
     if not isinstance(meta, dict):
         raise click.BadParameter("Input file must contain a JSON/YAML object")
+
+    if "commands" in meta:
+        raise click.BadParameter(
+            "Metadata file must not contain a 'commands' key — "
+            "that key is reserved for provenance tracking."
+        )
 
     meta = _stringify_values(meta)
 

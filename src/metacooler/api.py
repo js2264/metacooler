@@ -67,10 +67,11 @@ class MetaCooler:
                 raise ValueError(
                     f"URI group path specified but {self._store} is not an mmetacool file."
                 )
-            # Validate that the group exists
+            # Validate that the group exists and points to a well-formed metacooler
             with h5py.File(self._store, "r") as f:
                 if group_path.lstrip("/") not in f:
                     raise KeyError(f"Group {group_path!r} not found in {self._store}")
+            validate(f"{self._store}::{group_path}")
             # Use cooler URI to open the specific group
             cooler_uri = f"{self._store}::{group_path}"
             self._clr = cooler.Cooler(cooler_uri)
@@ -255,6 +256,8 @@ class MetaCooler:
         base["format-version"] = base.pop("metacooler-format-version", None)
         base["ordering"] = base.pop("contig-ordering", None)
         base["ncontigs"] = base.pop("nchroms", None)
+        # Normalise assembly key (file stores "assembly-name", expose as "assembly")
+        base["assembly"] = base.pop("assembly-name", base.pop("assembly", None))
         # Remove metadata field if present (accessed via .metadata property)
         base.pop("metadata", None)
         # Cast numeric fields to int (cooler may return numpy scalars or strings)
@@ -565,6 +568,8 @@ class MetaCooler:
             pixels=_aggregate_pixel_stream(self, level=level),
             ordered=False,
             symmetric_upper=True,
+            assembly=self.info.get("assembly"),
+            metadata=self.metadata if self.metadata else None,
         )
 
     # ------------------------------------------------------------------
@@ -583,4 +588,7 @@ class MetaCooler:
             the file is closed automatically.
         """
         with h5py.File(self._store, mode) as f:
-            yield f
+            if self._group_path and self._group_path != "/":
+                yield f[self._group_path.lstrip("/")]
+            else:
+                yield f

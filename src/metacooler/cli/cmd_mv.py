@@ -7,18 +7,25 @@ import rich_click as click
 from metacooler.cli.main import cli
 
 
-@cli.command(name="mv", help="Move (rename) an entry within an mmetacool file.")
+@cli.command(
+    name="mv",
+    help="""Move (rename) an entry within an mmetacool file.
+
+    \b
+    SRC   Source URI: file.mmetacool::entries/entry_name
+    DST   Destination URI (same file): file.mmetacool::entries/new_name
+    Both must be in the same file.
+""",
+)
 @click.argument(
     "src",
     type=str,
     metavar="SRC",
-    help="Source URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
 )
 @click.argument(
     "dst",
     type=str,
     metavar="DST",
-    help="Destination URI (same file): [cyan]file.mmetacool::entries/new_name[/cyan].",
 )
 @click.option(
     "-f",
@@ -33,12 +40,7 @@ from metacooler.cli.main import cli
     help="Increase verbosity (debug logging).",
 )
 def cmd_mv(src: str, dst: str, force: bool, verbose: bool) -> None:
-    """Move (rename) an entry within an mmetacool file.
-
-    \b
-    SRC and DST use URI syntax: file.mmetacool::entries/entry_name
-    Both must be in the same file.
-    """
+    """Move (rename) an entry within an mmetacool file."""
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import list_entries, move_entry
     from metacooler.uri import parse_uri

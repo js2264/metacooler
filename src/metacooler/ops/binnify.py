@@ -23,6 +23,10 @@ def binnify(
 ) -> None:
     """Re-bin a metacool file to a new fixed bin size.
 
+    Supports both fixed-width and variable-width (custom) source binnings;
+    the new *binsize* is applied uniformly across contigs or genomes
+    regardless of how the source was originally binned.
+
     Args:
         uri: Path to the source ``.metacool`` file.
         output: Destination path for the output ``.metacool`` file.
@@ -146,7 +150,7 @@ def binnify(
             One ``pd.DataFrame`` with columns ``bin1_id``, ``bin2_id``,
             ``count`` containing all remapped pixels.
         """
-        accumulator: dict[tuple[int, int], int] = {}
+        partial_frames: list[pd.DataFrame] = []
         n_pix = len(mc._clr.pixels())
         for lo in range(0, n_pix, chunksize):
             chunk = mc._clr.pixels()[lo : lo + chunksize]
@@ -165,21 +169,21 @@ def binnify(
             swap = new_b1 > new_b2
             new_b1[swap], new_b2[swap] = new_b2[swap].copy(), new_b1[swap].copy()
 
-            # Accumulate counts — many old pairs can map to the same new pair
-            for i1, i2, c in zip(
-                new_b1.tolist(), new_b2.tolist(), new_counts.tolist(), strict=False
-            ):
-                key = (int(i1), int(i2))
-                accumulator[key] = accumulator.get(key, 0) + int(c)
-
-        if accumulator:
-            keys_sorted = sorted(accumulator)
-            b1_out = np.array([k[0] for k in keys_sorted], dtype=np.int64)
-            b2_out = np.array([k[1] for k in keys_sorted], dtype=np.int64)
-            counts_out = np.array([accumulator[k] for k in keys_sorted], dtype=np.int32)
-            yield pd.DataFrame(
-                {"bin1_id": b1_out, "bin2_id": b2_out, "count": counts_out}
+            chunk_df = pd.DataFrame(
+                {"bin1_id": new_b1, "bin2_id": new_b2, "count": new_counts}
             )
+            partial_frames.append(
+                chunk_df.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)[
+                    "count"
+                ].sum()
+            )
+
+        if partial_frames:
+            combined = pd.concat(partial_frames, ignore_index=True)
+            result = combined.groupby(
+                ["bin1_id", "bin2_id"], sort=True, as_index=False
+            )["count"].sum()
+            yield result
 
     # Build output bins with contig names
     contig_names = contigs["name"].values
@@ -222,6 +226,8 @@ def binnify(
         contigs=contigs,
         binsize=binsize,
         source_uri=uri,
+        assembly_name=mc.info.get("assembly"),
+        contig_ordering=mc.info.get("ordering", "genome-then-alpha"),
     )
 
 
@@ -233,6 +239,8 @@ def _write_rebinned_metacool(
     contigs: pd.DataFrame,
     binsize: int,
     source_uri: str | Path,
+    assembly_name: str | None = None,
+    contig_ordering: str = "genome-then-alpha",
 ) -> None:
     """Write a re-binned metacool file preserving the full metacooler schema.
 
@@ -244,6 +252,8 @@ def _write_rebinned_metacool(
         contigs: Contigs DataFrame.
         binsize: New bin size in base pairs.
         source_uri: Source file URI (used for logging only).
+        assembly_name: Optional assembly name to propagate from source file.
+        contig_ordering: Contig ordering string to propagate from source file.
     """
     import cooler
 
@@ -278,7 +288,8 @@ def _write_rebinned_metacool(
         contigs,
         chrom_offset,
         genome_offset,
-        contig_ordering="rebinned",
+        contig_ordering=contig_ordering,
+        assembly_name=assembly_name,
     )
 
     validate(output)

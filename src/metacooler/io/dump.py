@@ -116,32 +116,47 @@ def dump_table(
         extras = [c for c in df.columns if c not in core]
         df = df[core + extras]
     elif table == "pixels":
-        df = mc.pixels()
+        # Pre-compute filter parameters that are independent of chunk
+        valid_bin_ids: np.ndarray | None = None
         if selected_contig_ids is not None:
             bins = mc.bins()
             bin_chrom_codes = bins["chrom"].cat.codes.values
             valid_bin_ids = np.where(
                 np.isin(bin_chrom_codes, list(selected_contig_ids))
             )[0]
-            mask = np.isin(df["bin1_id"].values, valid_bin_ids) & np.isin(
-                df["bin2_id"].values, valid_bin_ids
-            )
-            df = df[mask]
 
+        range_bounds: tuple[int, int, int, int] | None = None
         if range1 is not None:
             from metacooler.ops.range import parse_metacooler_range
 
             i0, i1 = parse_metacooler_range(mc, range1)
             j0, j1 = parse_metacooler_range(mc, range2) if range2 else (i0, i1)
-            # Keep pixels intersecting the query box (symmetric-upper aware)
-            in_row = df["bin1_id"].between(i0, i1 - 1)
-            in_col = df["bin2_id"].between(j0, j1 - 1)
-            in_row2 = df["bin1_id"].between(j0, j1 - 1)
-            in_col2 = df["bin2_id"].between(i0, i1 - 1)
-            df = df[(in_row & in_col) | (in_row2 & in_col2)]
+            range_bounds = (i0, i1, j0, j1)
 
         if pixels_format == "wide":
-            # Validate weight column
+            # Wide format requires full materialisation for scatter operation
+            n_pix = len(mc._clr.pixels())
+            chunksize = 1_000_000
+            chunks = []
+            for lo in range(0, n_pix, chunksize):
+                chunk = mc._clr.pixels()[lo : lo + chunksize]
+                if valid_bin_ids is not None:
+                    mask = np.isin(chunk["bin1_id"].values, valid_bin_ids) & np.isin(
+                        chunk["bin2_id"].values, valid_bin_ids
+                    )
+                    chunk = chunk[mask]
+                if range_bounds is not None:
+                    i0, i1, j0, j1 = range_bounds
+                    in_row = chunk["bin1_id"].between(i0, i1 - 1)
+                    in_col = chunk["bin2_id"].between(j0, j1 - 1)
+                    in_row2 = chunk["bin1_id"].between(j0, j1 - 1)
+                    in_col2 = chunk["bin2_id"].between(i0, i1 - 1)
+                    chunk = chunk[(in_row & in_col) | (in_row2 & in_col2)]
+                if len(chunk):
+                    chunks.append(chunk)
+            df = (
+                pd.concat(chunks, ignore_index=True) if chunks else mc._clr.pixels()[:0]
+            )
             if weight not in df.columns:
                 raise ValueError(
                     f"Weight column {weight!r} not found. Available: {list(df.columns)}"
@@ -152,14 +167,45 @@ def dump_table(
                     f"Wide format refuses to allocate a {n_bins}\u00d7{n_bins} matrix "
                     f"({n_bins**2 * 8 / 1e9:.1f} GB). Use --pixels-format long."
                 )
-            # Build dense matrix (vectorised scatter)
             mat = np.zeros((n_bins, n_bins), dtype=np.float64)
             b1 = df["bin1_id"].values.astype(int)
             b2 = df["bin2_id"].values.astype(int)
             vals = df[weight].values.astype(np.float64)
             mat[b1, b2] = vals
-            mat[b2, b1] = vals  # symmetrise
+            mat[b2, b1] = vals
             df = pd.DataFrame(mat)
+        else:
+            # Long format: stream pixel chunks to output without full materialisation
+            out_stream = open(out, "w") if out else sys.stdout  # noqa: SIM115
+            try:
+                first_chunk = True
+                n_pix = len(mc._clr.pixels())
+                chunksize = 1_000_000
+                for lo in range(0, n_pix, chunksize):
+                    chunk = mc._clr.pixels()[lo : lo + chunksize]
+                    if valid_bin_ids is not None:
+                        mask = np.isin(
+                            chunk["bin1_id"].values, valid_bin_ids
+                        ) & np.isin(chunk["bin2_id"].values, valid_bin_ids)
+                        chunk = chunk[mask]
+                    if range_bounds is not None:
+                        i0, i1, j0, j1 = range_bounds
+                        in_row = chunk["bin1_id"].between(i0, i1 - 1)
+                        in_col = chunk["bin2_id"].between(j0, j1 - 1)
+                        in_row2 = chunk["bin1_id"].between(j0, j1 - 1)
+                        in_col2 = chunk["bin2_id"].between(i0, i1 - 1)
+                        chunk = chunk[(in_row & in_col) | (in_row2 & in_col2)]
+                    chunk.to_csv(
+                        out_stream,
+                        sep="\t",
+                        index=False,
+                        header=header and first_chunk,
+                    )
+                    first_chunk = False
+            finally:
+                if out:
+                    out_stream.close()
+            return
     elif table == "indexes":
         import h5py
 

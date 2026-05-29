@@ -39,15 +39,28 @@ def parse_metacooler_range(mc: MetaCooler, range_str: str) -> tuple[int, int]:
     """
     label = range_str.split(":")[0]
 
-    if label in mc.genomes["name"].values:
+    genome_names = mc.genomes["name"].tolist()
+    contig_names = mc.contigs["name"].tolist()
+
+    if label in genome_names:
+        if ":" in range_str:
+            raise ValueError(
+                f"Range {range_str!r}: {label!r} is a genome name — coordinate "
+                f"suffixes are not allowed for genome ranges. Use just {label!r}."
+            )
         return mc.genome_extent(label)
 
-    if label in mc.contigs["name"].values:
+    if label in contig_names:
         # Delegate to cooler — handles both "contig" and "contig:start-end"
         return mc._clr.extent(range_str)
 
+    def _truncate(names: list, limit: int = 20) -> str:
+        if len(names) <= limit:
+            return str(names)
+        return str(names[:limit]) + f" ... ({len(names) - limit} more)"
+
     raise ValueError(
         f"Range {range_str!r}: {label!r} is not a known genome or contig.\n"
-        f"  Genomes: {mc.genomes['name'].tolist()}\n"
-        f"  Contigs: {mc.contigs['name'].tolist()}"
+        f"  Genomes: {_truncate(genome_names)}\n"
+        f"  Contigs: {_truncate(contig_names)}"
     )

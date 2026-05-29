@@ -7,18 +7,25 @@ import rich_click as click
 from metacooler.cli.main import cli
 
 
-@cli.command(name="cp", help="Copy an entry within or between mmetacool files.")
+@cli.command(
+    name="cp",
+    help="""Copy an entry within or between mmetacool files.
+
+    \b
+    SRC   Source URI: file.mmetacool::entries/entry_name
+    DST   Destination URI: file.mmetacool::entries/entry_name
+    Cross-file copy is supported.
+    """,
+)
 @click.argument(
     "src",
     type=str,
     metavar="SRC",
-    help="Source URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
 )
 @click.argument(
     "dst",
     type=str,
     metavar="DST",
-    help="Destination URI: [cyan]file.mmetacool::entries/entry_name[/cyan].",
 )
 @click.option(
     "-f",
@@ -33,12 +40,7 @@ from metacooler.cli.main import cli
     help="Increase verbosity (debug logging).",
 )
 def cmd_cp(src: str, dst: str, force: bool, verbose: bool) -> None:
-    """Copy an entry within or between mmetacool files.
-
-    \b
-    SRC and DST use URI syntax: file.mmetacool::entries/entry_name
-    Cross-file copy is supported.
-    """
+    """Copy an entry within or between mmetacool files."""
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import (
         copy_entry,
@@ -60,9 +62,7 @@ def cmd_cp(src: str, dst: str, force: bool, verbose: bool) -> None:
         raise click.ClickException(f"Source file not found: {src_path}")
 
     if src_path == dst_path:
-        # Same-file copy — dst must already exist
-        if not dst_path.exists():
-            raise click.ClickException(f"Destination file not found: {dst_path}")
+        # Same-file copy — src_path was already confirmed to exist above
         entries = list_entries(src_path)
         if src_name not in entries:
             raise click.ClickException(

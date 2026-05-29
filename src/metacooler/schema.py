@@ -75,7 +75,9 @@ def is_metacooler(uri: str | Path) -> bool:
             fmt = f.attrs.get("metacooler-format")
             if fmt != METACOOLER_FORMAT:
                 return False
-            return "genomes" in f
+            return all(
+                g in f for g in ("genomes", "contigs", "bins", "pixels", "indexes")
+            )
     except Exception:
         return False
 
@@ -87,17 +89,22 @@ def validate(uri: str | Path) -> None:
     indexes, and cross-count consistency.
 
     Args:
-        uri: Path to the ``.metacool`` file to validate.
+        uri: Path to the ``.metacool`` file, or a URI of the form
+            ``file.mmetacool::entries/entry`` to validate a sub-group inside
+            an mmetacool file.
 
     Raises:
         MetaCoolerFormatError: If any required group, dataset, or attribute
             is missing or malformed.
     """
-    path = Path(uri)
-    if not path.exists():
-        raise MetaCoolerFormatError(f"File not found: {path}")
+    from metacooler.uri import parse_uri
 
-    with h5py.File(path, "r") as f:
+    file_path, group_path = parse_uri(str(uri))
+    if not file_path.exists():
+        raise MetaCoolerFormatError(f"File not found: {file_path}")
+
+    with h5py.File(file_path, "r") as _froot:
+        f = _froot[group_path.lstrip("/")] if group_path != "/" else _froot
         # --- format attributes ---
         fmt = f.attrs.get("format")
         if fmt != COOLER_FORMAT:
@@ -163,11 +170,29 @@ def validate(uri: str | Path) -> None:
                 f"bin1_offset length ({len(idx['bin1_offset'])}) != n_bins+1 ({n_bins + 1})"
             )
 
-        # genome_offset is optional but if present must be consistent
-        if "genome_offset" in idx and len(idx["genome_offset"]) != n_genomes + 1:
+        # genome_offset is required and must be consistent
+        if "genome_offset" not in idx:
+            raise MetaCoolerFormatError("indexes/genome_offset is missing")
+        if len(idx["genome_offset"]) != n_genomes + 1:
             raise MetaCoolerFormatError(
                 f"genome_offset length ({len(idx['genome_offset'])}) != n_genomes+1 ({n_genomes + 1})"
             )
+
+        # Check pixel ordering on first/last 1000 rows
+        if n_pixels > 1:
+            sample_size = min(1000, n_pixels)
+            for sl in (
+                slice(0, sample_size),
+                slice(max(0, n_pixels - sample_size), n_pixels),
+            ):
+                b1 = np.array(p["bin1_id"][sl])
+                b2 = np.array(p["bin2_id"][sl])
+                if not np.all(
+                    (b1[:-1] < b1[1:]) | ((b1[:-1] == b1[1:]) & (b2[:-1] <= b2[1:]))
+                ):
+                    raise MetaCoolerFormatError(
+                        "pixels are not sorted by (bin1_id, bin2_id)"
+                    )
 
         # contig genome_ids must be in range
         genome_ids = np.array(c["genome_id"])

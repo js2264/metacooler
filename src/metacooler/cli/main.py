@@ -39,9 +39,22 @@ class MetaCoolURI(click.ParamType):
 
         from metacooler.uri import parse_uri
 
-        file_path, _ = parse_uri(value)
+        file_path, group_path = parse_uri(value)
         if not file_path.exists():
             self.fail(f"Path '{file_path}' does not exist.", param, ctx)
+        if group_path != "/":
+            import h5py
+
+            try:
+                with h5py.File(file_path, "r") as f:
+                    if group_path.lstrip("/") not in f:
+                        self.fail(
+                            f"Group '{group_path}' not found in '{file_path}'.",
+                            param,
+                            ctx,
+                        )
+            except OSError as exc:
+                self.fail(f"Cannot open '{file_path}': {exc}", param, ctx)
         return str(value)
 
 

@@ -24,19 +24,16 @@ from metacooler.cli.cmd_metadata import _stringify_values
 @shared_options
 @click.option(
     "--contig-order",
-    type=click.Choice(
-        ["cool", "genome-then-length", "genome-then-alpha", "alpha", "custom"]
-    ),
-    default="cool",
+    type=click.Choice(["genome-then-length", "genome-then-alpha", "cool", "alpha"]),
+    default="genome-then-length",
     show_default=True,
     help=(
         """
         Strategy for ordering contigs in the output metacool file.\n
-        - [yellow]cool[/yellow]: preserve the exact contig order from the input cool file.\n
         - [yellow]genome-then-length[/yellow]: group by genome, longest-first within each genome.\n
         - [yellow]genome-then-alpha[/yellow]: group by genome, alphabetical within each genome.\n
-        - [yellow]alpha[/yellow]: sort all contigs alphabetically.\n
-        - [yellow]custom[/yellow]: explicit order supplied via the API only.
+        - [yellow]cool[/yellow]: preserve the exact contig order from the input cool file.\n
+        - [yellow]alpha[/yellow]: sort all contigs alphabetically.
         """
     ),
 )
@@ -58,16 +55,16 @@ from metacooler.cli.cmd_metadata import _stringify_values
     help="Number of parallel reader threads for pixel remapping.",
 )
 @click.option(
-    "--sort-in-memory/--sort-external",
-    "sort_in_memory",
-    is_flag=True,
-    default=None,
-    show_default="auto-detect",
+    "--sort-strategy",
+    "sort_strategy",
+    type=click.Choice(["auto", "memory", "external"]),
+    default="auto",
+    show_default=True,
     help=(
-        "Control pixel sorting strategy. "
-        "--sort-in-memory: collect all pixels in RAM and sort before writing (fast for small files). "
-        "--sort-external: stream unsorted pixels to cooler's external sort (scalable for large files). "
-        "Default: auto-detect based on pixel count (threshold: 100 M pixels)."
+        "Pixel sorting strategy. "
+        "'auto': detect based on pixel count (threshold: 100 M pixels). "
+        "'memory': collect all pixels in RAM and sort before writing (fast for small files). "
+        "'external': stream unsorted pixels to cooler's external sort (scalable for large files)."
     ),
 )
 def cmd_create_cool(
@@ -80,7 +77,7 @@ def cmd_create_cool(
     assembly_name: str | None,
     drop_unassigned: bool,
     nproc: int,
-    sort_in_memory: bool | None,
+    sort_strategy: str,
     metadata: Path | None,
     force: bool,
     verbose: bool,
@@ -101,6 +98,11 @@ def cmd_create_cool(
         )
     if force and output.exists():
         output.unlink()
+
+    # Map --sort-strategy to sort_in_memory bool
+    sort_in_memory: bool | None = {"auto": None, "memory": True, "external": False}[
+        sort_strategy
+    ]
 
     meta: dict = {"commands": [_reconstruct_command()]}
     if metadata is not None:
@@ -123,9 +125,7 @@ def cmd_create_cool(
         ),
         genomes_table=genomes_table,
         contig_ordering=cast(
-            Literal[
-                "genome-then-length", "genome-then-alpha", "cool", "alpha", "custom"
-            ],
+            Literal["genome-then-length", "genome-then-alpha", "cool", "alpha"],
             contig_order,
         ),
         assembly_name=assembly_name,
