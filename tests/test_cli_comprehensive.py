@@ -1374,8 +1374,8 @@ class TestFlatten:
                 str(a1_rep1_cool),
                 "--output",
                 str(metacool),
-                "--contig-order", 
-                "cool"
+                "--contig-order",
+                "cool",
             ],
         )
         flat = tmp_path / "flat.cool"
@@ -1415,8 +1415,8 @@ class TestFlatten:
                 str(a1_rep1_cool),
                 "--output",
                 str(metacool),
-                "--contig-order", 
-                "cool"
+                "--contig-order",
+                "cool",
             ],
         )
         flat = tmp_path / "flat.cool"

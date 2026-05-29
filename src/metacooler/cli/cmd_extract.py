@@ -21,9 +21,22 @@ def _parse_comma_list(ctx, param, value):
 
 @cli.command(
     name="extract",
-    help="Extract a standard cool file for specific genome(s)/contig(s).",
+    help="""
+    Extract a standard cool file for specific genome(s)/contig(s). Genome
+    and contig selection can be combined: the output will include
+    all contigs from selected genomes plus any directly selected contigs.
+    By default, a single merged cool file is written. With --split, one cool
+    file per genome is created. 
+    """,
 )
 @click.argument("metacool_path", type=MetaCoolURI())
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Output .cool file path.",
+)
 @click.option(
     "--genomes",
     type=str,
@@ -37,13 +50,6 @@ def _parse_comma_list(ctx, param, value):
     multiple=True,
     callback=_parse_comma_list,
     help="Contig name(s) to extract (comma-separated or repeated).",
-)
-@click.option(
-    "-o",
-    "--output",
-    type=click.Path(path_type=Path),
-    required=True,
-    help="Output .cool file path.",
 )
 @click.option(
     "--split",

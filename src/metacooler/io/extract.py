@@ -81,7 +81,6 @@ def extract(
                 cids = list(set(cids) | extra)
             out_file = output_path.parent / f"{output_path.stem}_{g}.cool"
             _extract_contig_ids(mc, sorted(cids), out_file, assembly=g)
-            logger.info("Extracted genome %r → %s", g, out_file)
     else:
         if split and not genomes and contigs:
             logger.warning(
@@ -158,13 +157,49 @@ def _extract_contig_ids(
             ].values
             yield chunk[["bin1_id", "bin2_id", "count"]]
 
-    cooler.create_cooler(
-        str(output),
-        bins=bins_df,
-        pixels=_pixel_stream(),
-        ordered=False,
-        symmetric_upper=True,
-        assembly=assembly,
-        metadata={"source-file": str(mc.store)},
+    pixel_stream = _pixel_stream()
+    try:
+        first_chunk = next(pixel_stream)
+    except StopIteration:
+        # No pixels for the selected contigs: write an empty cool file
+        empty_pixels = pd.DataFrame(
+            {
+                "bin1_id": pd.Series(dtype=np.int64),
+                "bin2_id": pd.Series(dtype=np.int64),
+                "count": pd.Series(dtype=np.int32),
+            }
+        )
+        cooler.create_cooler(
+            str(output),
+            bins=bins_df,
+            pixels=empty_pixels,
+            ordered=True,
+            symmetric_upper=True,
+            assembly=assembly,
+            metadata={"source-file": str(mc.store)},
+        )
+    else:
+
+        def _all_chunks():
+            yield first_chunk
+            yield from pixel_stream
+
+        cooler.create_cooler(
+            str(output),
+            bins=bins_df,
+            pixels=_all_chunks(),
+            ordered=False,
+            symmetric_upper=True,
+            assembly=assembly,
+            metadata={"source-file": str(mc.store)},
+        )
+
+    c = cooler.Cooler(str(output))
+    n_bins = len(genome_bins)
+    n_contigs = len(set(genome_bins["chrom"]))
+    nnz = int(c.info["nnz"])
+    total = int(c.info["sum"])
+    logger.info(
+        f"Created {output}: bins={n_bins}, contigs={n_contigs}. "
+        f"NNZ={nnz}, sum={total}.",
     )
-    logger.info("Written %d bins to %s", len(bins_df), output)

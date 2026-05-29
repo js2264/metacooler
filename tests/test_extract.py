@@ -125,3 +125,34 @@ class TestExtract:
         assert out.exists()
         c = cooler.Cooler(str(out))
         assert set(c.chromnames) == {"contig_A", "contig_B", "contig_C", "contig_D"}
+
+    def test_extract_contig_with_no_pixels(
+        self, tmp_path, tiny_fasta, tiny_contigs_table, tiny_bins_bed
+    ):
+        """Extracting a contig with zero pixels should produce a valid empty cool file."""
+        pairs_path = tmp_path / "only_A.pairs"
+        with open(pairs_path, "w") as f:
+            f.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+            for i in range(10):
+                f.write(f"read_{i}\tcontig_A\t{10 + i}\tcontig_A\t{20 + i}\t+\t+\n")
+
+        metacool_path = tmp_path / "sparse.metacool"
+        from metacooler.io.create import from_pairs
+
+        from_pairs(
+            uri=metacool_path,
+            bins=tiny_bins_bed,
+            pairs=pairs_path,
+            contig_genome_map=tiny_contigs_table,
+            contig_table_format="contigs",
+            fasta=tiny_fasta,
+            assembly_name="sparse_test",
+            chunksize=1000,
+        )
+
+        out = tmp_path / "contig_b.cool"
+        extract(metacool_path, contigs=["contig_B"], output=out)
+        assert out.exists()
+        c = cooler.Cooler(str(out))
+        assert set(c.chromnames) == {"contig_B"}
+        assert len(c.pixels()[:]) == 0

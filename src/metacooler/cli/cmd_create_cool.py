@@ -90,7 +90,7 @@ def cmd_create_cool(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.create import from_cool
 
-    setup_logging(verbose)
+    setup_logging(verbose, command_name="metacooler create cool")
 
     if output.exists() and not force:
         raise click.ClickException(

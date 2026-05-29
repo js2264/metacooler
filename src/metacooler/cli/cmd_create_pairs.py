@@ -104,7 +104,7 @@ def cmd_create_pairs(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.create import from_pairs
 
-    setup_logging(verbose)
+    setup_logging(verbose, command_name="metacooler create pairs")
 
     if output.exists() and not force:
         raise click.ClickException(

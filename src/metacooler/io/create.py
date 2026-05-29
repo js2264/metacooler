@@ -559,14 +559,10 @@ def _bin_pairs_chunk(
         Aggregated pixel DataFrame or ``None`` if the chunk is empty after
         filtering.
     """
-    # Use pd.Categorical for fast contig-name → integer-ID encoding.
-    # This mirrors cooler's _sanitize_records approach: unrecognised contigs
-    # receive code == -1 and are dropped in one vectorised pass.
-    contig_list = list(contig_name_to_id.keys())
-    c1_cat = pd.Categorical(chunk["chrom1"], categories=contig_list, ordered=True)
-    c2_cat = pd.Categorical(chunk["chrom2"], categories=contig_list, ordered=True)
-    c1_codes = c1_cat.codes  # int8/int16 ndarray, -1 for unknown
-    c2_codes = c2_cat.codes
+    # Fast contig-name → integer-ID encoding.  Unrecognised contigs map to
+    # NaN and are coerced to -1 so they can be dropped in one vectorised pass.
+    c1_codes = chunk["chrom1"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
+    c2_codes = chunk["chrom2"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
 
     # Drop pairs referencing unknown contigs in one boolean mask
     valid = (c1_codes >= 0) & (c2_codes >= 0)
