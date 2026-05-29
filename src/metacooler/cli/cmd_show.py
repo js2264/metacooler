@@ -72,7 +72,7 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=float,
     default=None,
     show_default=True,
-    help="Upper colormap bound. Defaults to the 99th percentile of non-zero values.",
+    help="Upper colormap bound. If not specificed, falls back to the 99th percentile of non-zero values.",
 )
 @click.option(
     "--separators/--no-separators",

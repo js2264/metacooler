@@ -26,8 +26,8 @@ _INFO_KEY_ORDER = [
     "ncontigs",
     "ngenomes",
     "nnz",
-    "storage-mode",
     "sum",
+    "storage-mode",
     "ordering",
 ]
 

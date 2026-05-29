@@ -250,9 +250,6 @@ class MetaCooler:
             ``ngenomes``, ``ncontigs``, ``ordering``, and ``assembly``.
         """
         base = dict(self._clr.info)
-        # Promote metacooler-specific attrs over their cooler equivalents.
-        # Use .pop(key, None) so that files written by older metacooler
-        # versions (or partially-written files) don't raise KeyError.
         base["format"] = base.pop("metacooler-format", None)
         base["format-url"] = base.pop("metacooler-format-url", None)
         base["format-version"] = base.pop("metacooler-format-version", None)

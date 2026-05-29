@@ -65,9 +65,11 @@ def _read_contig_lengths(
         ValueError: If none of the three sources can provide contig lengths.
     """
     if fasta is not None:
+        logging.info("Extracting contig lengths from FASTA index")
         fasta_path = Path(fasta)
         if fasta_path.suffix == ".gz":
             # pyfaidx doesn't handle plain gzip; decompress to temp
+            logging.info("Unzipping FASTA to temporary file for pyfaidx indexing")
             import tempfile
 
             with (
@@ -385,8 +387,7 @@ def _build_bins(
 
     Args:
         bins: Path to a tab-separated BED file with columns ``chrom``,
-            ``start``, ``end`` (no header), or an already-loaded DataFrame
-            with those columns.
+            ``start``, ``end`` (without header), or an already-loaded DataFrame.
         contig_order: Ordered list of contig names; used for validation
             only.
         contig_name_to_id: Mapping from contig name to integer ID.
@@ -967,8 +968,8 @@ def from_pairs(
 
     Args:
         uri: Output file path (``.metacool`` extension recommended).
-        bins: Path to a BED file of bins, or a pre-built DataFrame
-            (``chrom, start, end``).  If ``None``, *binsize* must be given
+        bins: Path to a BED file of bins (without header), or a pre-built DataFrame
+            with columns ``chrom, start, end``.  If ``None``, *binsize* must be given
             and bins will be tiled from the fasta.
         pairs: Path to a pairs file (plain text, gzipped, or bgzipped).
         contig_genome_map: Either a ``dict[contig_name → genome_name]`` or
@@ -1143,8 +1144,8 @@ def from_pairs(
     logger.info("Validating created metacool file")
     validate(uri)
     with h5py.File(uri, "r") as f:
-        nnz = len(f["pixels"]["count"])
-        total = int(f["pixels"]["count"][:].sum())
+        nnz = int(f.attrs.get('nnz'))
+        total = int(f.attrs.get('sum', 0))
     n_bins = len(bins_df)
     n_contigs = len(contigs_df)
     n_genomes = len(genomes_df)

@@ -26,8 +26,8 @@ from metacooler.cli.cmd_metadata import _stringify_values
     "--bins",
     type=str,
     required=True,
-    help="BED file of bins (no column names), or an integer bin size in bp (e.g. 1000). "
-    "If an integer, contig lengths must be available from the pairs header or --fasta.",
+    help="BED file of bins (without column names), or an integer bin size in bp (e.g. 1000). "
+    "If an integer, contig lengths must be available from the pairs header or a --fasta should be provided.",
 )
 @shared_options
 @click.option(

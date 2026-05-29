@@ -115,7 +115,7 @@ def metadata_get(metacool_path: str, key: str, verbose: bool) -> None:
         grp = f[group_path] if group_path != "/" else f
         meta = _read_metadata(grp)
         if key not in meta:
-            raise click.BadParameter(f"Key not found: {key}")
+            raise click.BadParameter(f"Key not found: {key}. Available keys: {list(meta.keys())}")
         value = meta[key]
     click.echo(json.dumps(value, indent=2, default=str))
 
@@ -178,7 +178,7 @@ def metadata_remove(metacool_path: str, key: str, verbose: bool) -> None:
         grp = f[group_path] if group_path != "/" else f
         meta = _read_metadata(grp)
         if key not in meta:
-            raise click.BadParameter(f"Key not found: {key}")
+            raise click.BadParameter(f"Key not found: {key}. Available keys: {list(meta.keys())}")
         del meta[key]
         grp.attrs["metadata"] = json.dumps(meta)
 
