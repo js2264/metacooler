@@ -19,7 +19,7 @@ metacooler create pairs --force --contigs ../contigs_table_1.tsv --genomes ../ma
 metacooler create pairs --force --drop-unassigned --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv --pairs ../contacts_1_rep1.pairs.gz --bins 1000 --output assembly_1_rep1_1kb_dropped.metacool
 metacooler dump -t bins assembly_1_rep1_1kb.metacool > dump_bins_before_drop.tsv
 metacooler dump -t bins assembly_1_rep1_1kb_dropped.metacool > dump_bins_after_drop.tsv
-git diff --no-index --compact-summary dump_bins_before_drop.tsv dump_bins_after_drop.tsv || true
+git diff --no-index --compact-summary dump_bins_before_drop.tsv dump_bins_after_drop.tsv || true  ## SHOULD BE DIFFERENT, since the dropped metacooler file should have fewer bins than the original
 md5sum dump_bins_before_drop.tsv dump_bins_after_drop.tsv
 
 metacooler create pairs --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv --pairs ../contacts_1_rep1.pairs.gz --bins 1000 --contig-order fasta --output assembly_1_rep1_1kb_same-order.metacool

@@ -40,6 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 plotly = ["plotly>=5.18"]
 dev = [
+    "biopython>=1.87",
     "ipython>=8.39.0",
     "jupyter>=1.1.1",
     "pre-commit>=4.6.0",
