@@ -59,9 +59,13 @@ metacooler ls sample_multireso.mmetacool
 
 # Inspect a specific resolution
 metacooler info sample_multireso.mmetacool::entries/4000
+```
 
-# Open a specific resolution in Python
+Open a specific resolution in Python:
+
+```python
 import metacooler
+
 mc = metacooler.MetaCooler("sample_multireso.mmetacool::entries/4000")
 ```
 

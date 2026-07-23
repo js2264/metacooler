@@ -5,13 +5,14 @@
 ### Fixed
 - `_write_rebinned_metacool`: wrong `chrom_offset` caused by calling
   `np.searchsorted` on an unsorted `contig_names` array. Replaced with an
-  explicit dict-based mapping.
+  explicit contig-name → index mapping.
 - `_write_rebinned_metacool`: missing `validate()` call after write; corrupt
   files were not caught before being returned to the caller.
 
 ### Changed
-- `ops/aggregate.py` now delegates to `MetaCooler.aggregate_matrix()` instead
-  of duplicating the accumulation logic.
+- `ops/aggregate.py` centralises the accumulation logic in module-level
+  helpers (`_aggregate_sparse` / `_aggregate_pixel_stream`) instead of
+  duplicating it across call sites.
 
 ---
 
@@ -34,8 +35,8 @@ Initial alpha release.
 - CLI commands: `create pairs`, `create cool`, `merge`, `binnify`, `zoomify`,
   `extract`, `flatten`, `dump`, `network`, `aggregate`, `show`, `info`, `tree`,
   `attrs`, `metadata`, `ls`, `stack`, `cp`, `mv`, `rm`.
-- Five contig ordering strategies: `genome-then-length`, `genome-then-alpha`,
-  `fasta`, `alpha`, `custom`.
+- Four contig ordering strategies for `create pairs` — `genome-then-length`,
+  `genome-then-alpha`, `fasta`, `alpha` — plus `cool` for `create cool`.
 - Four contig table input formats: `contigs`, `contig_genome`, `metator`,
   column-index spec.
 - `--drop-unassigned` flag for excluding unassigned contigs.

@@ -178,6 +178,21 @@ By default, contigs absent from the contig table are assigned to a special
 metacooler create pairs ... --drop-unassigned
 ```
 
+## Large files
+
+Creation streams the pairs file in chunks, so memory stays bounded regardless of
+file size. Two options tune this:
+
+- `--chunksize` (default `1000000`) — pairs processed per chunk.
+- `--sort-strategy` (default `auto`) — how pixels are sorted before writing.
+  `auto` picks `memory` (sort in RAM, fastest) for files under 2 GiB and
+  `external` (stream to cooler's on-disk sort) for larger ones. Force either
+  explicitly if you know your machine's limits.
+
+```bash
+metacooler create pairs ... --sort-strategy external --chunksize 5000000
+```
+
 ## Python API
 
 ```python
@@ -194,7 +209,7 @@ metacooler.from_pairs(
     contig_ordering="genome-then-length",
     drop_unassigned=False,
     metadata={"sample": "gut_T0"},  # optional
-    chunksize=10_000_000,
+    chunksize=1_000_000,            # default; raise for very large pairs files
 )
 ```
 

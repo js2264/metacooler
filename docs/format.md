@@ -15,20 +15,25 @@ will open a `.metacool` file without modification.
 ```
 file.metacool  (HDF5)
 ├── @attrs
-│   ├── format              = "HDF5::Cooler"          ← cooler compat
-│   ├── format-url          = "https://github.com/open2c/cooler"
-│   ├── metacooler-format   = "HDF5::MetaCooler"      ← identity marker
-│   ├── metacooler-format-url = "https://github.com/js2264/metacooler"
+│   ├── format                    = "HDF5::Cooler"         ← cooler compat
+│   ├── format-url                = "https://github.com/open2c/cooler"
+│   ├── format-version            = 3                      ← cooler format version
+│   ├── storage-mode              = "symmetric-upper"
+│   ├── metacooler-format         = "HDF5::MetaCooler"     ← identity marker
+│   ├── metacooler-format-url     = "https://github.com/js2264/metacooler"
 │   ├── metacooler-format-version = 1
-│   ├── contig-ordering     = "genome-then-length"    ← ordering strategy
-│   ├── assembly-name       = <str | null>
-│   ├── bin-size            = <int | null>             ← null for variable bins
-│   ├── bin-type            = "fixed" | "variable"
-│   ├── creation-date       = <ISO 8601>
-│   ├── generated-by        = "metacooler-<version>"
-│   ├── nbins               = <int>
-│   ├── nnz                 = <int>
-│   └── metadata            = <JSON string>           ← user metadata blob
+│   ├── contig-ordering           = "genome-then-length"   ← ordering strategy
+│   ├── genome-assembly           = <str>                  ← "unknown" if unset (CLI: --assembly-name)
+│   ├── bin-size                  = <int | null>           ← null for variable bins
+│   ├── bin-type                  = "fixed" | "variable"
+│   ├── creation-date             = <ISO 8601>
+│   ├── generated-by              = "metacooler-<version>"
+│   ├── nchroms                   = <int>                  ← = number of contigs
+│   ├── ngenomes                  = <int>
+│   ├── nbins                     = <int>
+│   ├── nnz                       = <int>                  ← number of non-zero pixels
+│   ├── sum                       = <int>                  ← total contact count
+│   └── metadata                  = <JSON string>          ← user metadata blob
 │
 ├── /genomes    ← MAG / genome table
 ├── /contigs    ← contig table (canonical chromosome reference)
@@ -190,7 +195,7 @@ ordering.
 | `genome-then-alpha` | Group by genome (alphabetical), contigs alphabetical within each genome. |
 | `fasta` | Preserve the order of contigs as they appear in the FASTA or pairs header. |
 | `alpha` | All contigs sorted alphabetically, ignoring genome assignment. |
-| `custom` | Explicit order supplied via the Python API (`custom_order` argument). CLI only. |
+| `cool` | Preserve the exact contig order of the input cooler. `create cool` only. |
 
 ---
 

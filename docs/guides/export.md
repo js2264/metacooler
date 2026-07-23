@@ -109,24 +109,27 @@ cooler but where genome-level information is not needed.
 
 Render a PNG heatmap directly from the command line:
 
+`show` reads its input from `-f/--file` and writes to `-o/--output`; both are
+required (see the [`show` reference](../cli.md#show)).
+
 ```bash
 # Genome-level (default)
-metacooler show sample.metacool --level genome --out genome_heatmap.png
+metacooler show -f sample.metacool --level genome -o genome_heatmap.png
 
 # Contig-level
-metacooler show sample.metacool --level contig --out contig_heatmap.png
+metacooler show -f sample.metacool --level contig -o contig_heatmap.png
 
 # Bin-level: intra-genome view
-metacooler show sample.metacool --level bin --genome MAG_01 --out MAG_01.png
+metacooler show -f sample.metacool --level bin --genome MAG_01 -o MAG_01.png
 
 # Bin-level: inter-genome view
-metacooler show sample.metacool --level bin --genomes MAG_01 MAG_02 --out inter.png
+metacooler show -f sample.metacool --level bin --genomes MAG_01 MAG_02 -o inter.png
 
 # Bin-level: genomic range
-metacooler show sample.metacool --range contig_0_0:0-100000 --out range.png
+metacooler show -f sample.metacool -r contig_0_0:0-100000 -o range.png
 
 # Custom colormap and transform
-metacooler show sample.metacool --cmap Reds --transform none --out raw.png
+metacooler show -f sample.metacool --cmap Reds --transform none -o raw.png
 ```
 
 ## Python API for export
@@ -146,16 +149,18 @@ print(mc.pixels())
 bins_mag1 = mc.bins_for_genome("MAG_01")
 pixels_pair = mc.pixels_for_genome_pair("MAG_01", "MAG_02")
 
-# Sparse contact matrix
-mat_genome = mc.aggregate_matrix(level="genome", sparse=True)
-mat_contig = mc.aggregate_matrix(level="contig", sparse=False)  # dense numpy array
+# Dense bin-level contact matrix (cooler selector syntax)
+mat = mc.matrix(balance=False)[:]
 
-# Export to cooler
-mc.to_cooler("genome_level.cool", level="genome")
-
-# Extent helpers (bin index ranges)
+# One genome's sub-matrix, via its bin-index extent
 start, end = mc.genome_extent("MAG_01")
-mat_slice = mc.matrix(balance=False)[start:end, start:end]
+mat_mag1 = mc.matrix(balance=False)[start:end, start:end]
+
+# Aggregate to genome level → standard cooler, then read it back as a matrix
+import cooler
+
+mc.to_cooler("genome_level.cool", level="genome")
+genome_matrix = cooler.Cooler("genome_level.cool").matrix(balance=False)[:]
 ```
 
 ## Merging replicates (`merge`)

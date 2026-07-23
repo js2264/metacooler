@@ -50,16 +50,19 @@ metacooler info gut_T0.metacool
 {
   "bin-size": 2000,
   "bin-type": "fixed",
+  "creation-date": "2026-05-12T09:41:00+00:00",
   "format": "HDF5::MetaCooler",
+  "format-url": "https://github.com/js2264/metacooler",
   "format-version": 1,
   "generated-by": "metacooler-0.1.0",
-  "genome-assembly": null,
+  "assembly": null,
   "nbins": 48291,
   "ncontigs": 1203,
   "ngenomes": 47,
   "nnz": 2847193,
-  "ordering": "genome-then-length",
-  "sum": 18043712
+  "sum": 18043712,
+  "storage-mode": "symmetric-upper",
+  "ordering": "genome-then-length"
 }
 ```
 
@@ -84,14 +87,14 @@ metacooler dump gut_T0.metacool -t contigs --genomes MAG_01 -H
 ## Step 4 — Visualise the contact map
 
 ```bash
-# Genome-level heatmap (default)
-metacooler show gut_T0.metacool --level genome --out genome_heatmap.png
+# Genome-level heatmap (default level). Note: -f for input, -o for output.
+metacooler show -f gut_T0.metacool --level genome -o genome_heatmap.png
 
 # Intra-genome heatmap at bin resolution
-metacooler show gut_T0.metacool --level bin --genome MAG_01 --out MAG_01_heatmap.png
+metacooler show -f gut_T0.metacool --level bin --genome MAG_01 -o MAG_01_heatmap.png
 
-# Specific genomic range
-metacooler show gut_T0.metacool --level bin --range contig_0_0:0-50000
+# A specific genomic range (implies --level bin)
+metacooler show -f gut_T0.metacool -r contig_0_0:0-50000 -o range.png
 ```
 
 ## Step 5 — Export for downstream tools
@@ -131,8 +134,8 @@ print(mc.info)
 print(mc.genomes)
 print(mc.contigs.head())
 
-# Genome-level sparse contact matrix
-mat = mc.aggregate_matrix(level="genome", sparse=True)
+# Genome-level contact map: write a standard cooler, then read it back
+mc.to_cooler("genome_level.cool", level="genome")
 
 # Bins for a specific MAG
 bins = mc.bins_for_genome("MAG_01")

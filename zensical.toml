@@ -11,22 +11,27 @@ repo_name = "js2264/metacooler"
 
 nav = [
      { "Home" = "index.md" },
-     { "Installation" = "installation.md" },
-     { "Quickstart" = "quickstart.md" },
-     { "Format specification" = "format.md" },
-     { "Tutorials" = [
+     { "Getting started" = [
+         { "Installation" = "installation.md" },
+         { "Quickstart" = "quickstart.md" },
+         { "Concepts" = "concepts.md" }
+     ]},
+     { "Guides" = [
          { "Creating from pairs" = "guides/from-pairs.md" },
          { "Importing from cooler" = "guides/from-cool.md" },
          { "Multi-resolution files" = "guides/multireso.md" },
-         { "Exporting data" = "guides/export.md" },
-         { "CLI usage" = "cli.md" }
+         { "Exporting data" = "guides/export.md" }
      ]},
-     { "API reference" = [
-         { "MetaCooler" = "api/metacooler.md" },
-         { "I/O functions" = "api/io.md" },
-         { "Operations" = "api/ops.md" }
+     { "Reference" = [
+         { "CLI reference" = "cli.md" },
+         { "Format specification" = "format.md" },
+         { "Python API" = [
+             { "MetaCooler class" = "api/metacooler.md" },
+             { "I/O functions" = "api/io.md" },
+             { "Operations" = "api/ops.md" }
+         ]}
      ]},
-     { "Changelog" = ["changelog.md"] }
+     { "Changelog" = "changelog.md" }
 ]
 
 

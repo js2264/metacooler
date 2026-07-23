@@ -36,10 +36,12 @@ original contig order from the cool file:
 --contig-order cool
 ```
 
-!!! warning "Pixel remapping"
-    When the contig order changes, metacooler remaps all bin IDs in the pixel
-    table to match the new order. For large files this step is currently
-    performed in memory. See [known limitations](../index.md) for details.
+!!! note "Pixel remapping"
+    When the output contig order differs from the input cooler's, metacooler
+    remaps every bin ID in the pixel table. This is streamed in chunks with an
+    `auto`/`memory`/`external` sort strategy (`--sort-strategy`) and can use
+    several reader threads (`--nproc`), so large files are remapped without
+    loading all pixels into memory.
 
 ## Python API
 
@@ -64,5 +66,5 @@ metacooler.from_cool(
 |--------|---------------|---------------|
 | Primary input | `.pairs` file | `.cool` file |
 | Binning | Done during creation | Inherited from input |
-| Pixel streaming | Chunked (memory-efficient) | Currently in-memory |
+| Pixel streaming | Chunked (`--chunksize`, `--sort-strategy`) | Chunked, with parallel remapping (`--nproc`, `--sort-strategy`) |
 | Bin size flexibility | Fixed or fragment | Inherited |

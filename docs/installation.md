@@ -41,11 +41,13 @@ pip install "metacooler[plotly]"
 
 ### Documentation
 
-To build the documentation locally:
+The documentation site is built with [Zensical](https://zensical.org) and
+[mkdocstrings](https://mkdocstrings.github.io). To build and preview it locally:
 
 ```bash
-pip install "metacooler[docs]"
-mkdocs serve
+pip install "metacooler[docs]"   # or: uv sync --extra docs
+zensical serve                   # live preview at http://localhost:8000
+zensical build                   # render the static site into ./site
 ```
 
 ## Verifying the install

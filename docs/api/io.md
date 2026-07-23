@@ -1,5 +1,11 @@
 # I/O functions
 
+Functions that read and write metacooler files. The creation entry points
+`from_pairs` and `from_cool`, and the collection helpers (`create_mmetacool`,
+`add_entry`, `remove_entry`, `copy_entry`, `move_entry`, `list_entries`), are
+re-exported at the top level — so `metacooler.from_pairs(...)` and
+`metacooler.io.create.from_pairs(...)` are equivalent.
+
 ::: metacooler.io.create
     options:
       heading: "Create metacool files"

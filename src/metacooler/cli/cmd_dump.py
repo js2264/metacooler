@@ -30,7 +30,7 @@ def _parse_comma_list(ctx, param, value):
     ),
     default="pixels",
     show_default=True,
-    help="Which table to dump. Use 'all' to dump all tables.",
+    help="Which table to dump ('bins', 'contigs', 'genomes', 'pixels', 'indexes'). Use 'all' to dump all tables.",
 )
 @click.option(
     "--genomes",

@@ -1,5 +1,9 @@
 # Operations
 
+Computation on already-open metacooler files: aggregation, re-binning,
+multi-resolution generation, visualisation, and range parsing. These act on
+files produced by the [I/O functions](io.md).
+
 ::: metacooler.ops.aggregate
     options:
       toc_label: "Aggregation"
