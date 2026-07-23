@@ -275,11 +275,16 @@ Prints all attributes of every group in the file. Accepts both `.metacool` and `
 ### `metadata` — Read and edit the metadata field
 
 ```
-metacooler metadata show sample.metacool
-metacooler metadata set  sample.metacool --key experiment --value metaHiC
+metacooler metadata list   sample.metacool
+metacooler metadata get     sample.metacool --key experiment
+metacooler metadata add     sample.metacool --key experiment --value metaHiC
+metacooler metadata remove  sample.metacool --key experiment
+metacooler metadata load    sample.metacool metadata.yaml
 ```
 
-Subcommands to read, add, update, or remove keys in the flexible `metadata` dict stored in file attrs. Accepts `.metacool` files only.
+Subcommands (`list`, `get`, `add`, `remove`, `load`) to read, add, update, or
+remove keys in the flexible `metadata` dict stored in file attrs. Accepts
+`.metacool` files only.
 
 ---
 

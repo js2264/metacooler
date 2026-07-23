@@ -16,8 +16,10 @@ will open a `.metacool` file without modification.
 file.metacool  (HDF5)
 ├── @attrs
 │   ├── format              = "HDF5::Cooler"          ← cooler compat
-│   ├── format-url          = "https://github.com/js2264/metacooler"
-│   ├── metacooler-format   = "MetaCooler::1.0"       ← identity marker
+│   ├── format-url          = "https://github.com/open2c/cooler"
+│   ├── metacooler-format   = "HDF5::MetaCooler"      ← identity marker
+│   ├── metacooler-format-url = "https://github.com/js2264/metacooler"
+│   ├── metacooler-format-version = 1
 │   ├── contig-ordering     = "genome-then-length"    ← ordering strategy
 │   ├── assembly-name       = <str | null>
 │   ├── bin-size            = <int | null>             ← null for variable bins
@@ -45,11 +47,14 @@ One row per genome / MAG.
 | `name` | `S<n>` (fixed bytes) | Genome name. `__unbinned__` is reserved for unassigned contigs. |
 | `length` | `int64` | Total length in bp (sum of assigned contig lengths). |
 | `n_contigs` | `int32` | Number of contigs assigned to this genome. |
+| `n_bins` | `int64` | Number of bins across all contigs of this genome. |
 | *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`). Stored as fixed-length bytes or numeric arrays. |
 
 Row order: `__unbinned__` first (index 0), then remaining genomes sorted
 alphabetically by name. This order defines the `genome_id` integers used in
-`/contigs`.
+`/contigs`. For genome-grouped orderings (`genome-then-length`,
+`genome-then-alpha`) the contigs in `/contigs` are laid out in ascending
+`genome_id` order, so `genome_offset` delimits each genome's contig block.
 
 ### `/contigs` group
 
@@ -105,7 +110,7 @@ work correctly.
 A file is a valid `.metacool` if and only if:
 
 1. It is a valid HDF5 file.
-2. `f.attrs["metacooler-format"] == "MetaCooler::1.0"`.
+2. `f.attrs["metacooler-format"] == "HDF5::MetaCooler"`.
 3. The `/genomes` group exists.
 4. It passes `metacooler.schema.validate()` without raising.
 
