@@ -211,37 +211,23 @@ class TestBinPairsChunk:
 
     def test_fixed_bin_overflow_bug(self):
         """
-        BUG: A 1-based position beyond the contig length overflows into the next
-        contig's bin IDs.
+        REGRESSION: A 1-based position beyond the contig length must be clamped
+        to the contig's last bin, not overflow into the next contig's bin IDs.
 
         Contig A has length=200, binsize=100, so 2 bins (ids 0, 1).
         chrom_offset = [0, 2, ...].
-        A read at 1-based pos=201 -> 0-based 200 -> bin = 0 + 200//100 = 2.
-        But bin 2 belongs to the NEXT contig (B).
-
-        This test documents the existing incorrect behavior.
-        Once the bug is fixed (with a clamp), update the assertion to:
-            assert result.iloc[0]["bin1_id"] == 1  # clamped to last valid bin
+        A read at 1-based pos=201 -> 0-based 200 -> 0 + 200//100 = 2 unclamped,
+        which is contig B's first bin. It must be clamped to bin 1 (A's last).
         """
         contig_to_id = {"A": 0, "B": 1}
         chrom_offset = np.array([0, 2, 4], dtype=np.int64)  # A: bins 0-1, B: bins 2-3
         binsize = 100
 
-        # pos=201 (1-based) for contig A (length=200) -> 0-based 200 -> 200//100 = 2
-        # bin_id = chrom_offset[0] + 2 = 2, which is contig B's first bin
         chunk = self._make_chunk([("A", 1, "A", 201)])
         result = _bin_pairs_chunk(chunk, contig_to_id, chrom_offset, binsize, None)
         assert result is not None
-        # Current (buggy) behavior: bin1_id=0 (correct), bin2_id=2 (WRONG, belongs to B)
-        # Once fixed: bin2_id should be 1 (last bin of A)
-        b2 = result.iloc[0]["bin2_id"]
-        # Flag this as a known bug:
-        if b2 == 2:
-            pytest.xfail(
-                "Known bug: out-of-bounds position overflows into the next contig's bins. "
-                "Fix by clamping bin_id to chrom_offset[c+1]-1."
-            )
-        assert b2 == 1  # correct after fix
+        # Must be clamped to bin 1 (last bin of A), NOT overflow into B (bin 2).
+        assert result.iloc[0]["bin2_id"] == 1
 
     # --- Bug regression: fragment-level underflow ---
     def test_fragment_bin_position_before_first_fragment(self):
@@ -269,14 +255,8 @@ class TestBinPairsChunk:
         result = _bin_pairs_chunk(chunk, contig_to_id, chrom_offset, None, bin_starts)
         assert result is not None
         b1 = result.iloc[0]["bin1_id"]
-        # Current (buggy) behavior: lo=2, searchsorted([50,200], 30, right)=0, lo+0-1 = 1
-        # Global bin 1 belongs to contig B (last fragment) -> WRONG CONTIG assignment
-        if b1 == 1:
-            pytest.xfail(
-                "Known bug: position before first fragment underflows into previous contig's "
-                "last bin. Fix by clamping: result = max(lo, lo + searchsorted(...) - 1)."
-            )
-        # After fix: should be assigned to bin 2 (first bin of A, the nearest valid bin)
+        # Must be clamped to A's first bin (global bin 2), NOT underflow into
+        # contig B's last bin (global bin 1).
         assert b1 >= 2  # must be in A's bin range [2, 3]
 
 
@@ -711,17 +691,11 @@ class TestFromCoolInvariants:
 class TestFromCoolBugRegressions:
     def test_drop_unassigned_crashes(self, tmp_path):
         """
-        BUG: from_cool(..., drop_unassigned=True) raises ValueError when the
+        REGRESSION: from_cool(..., drop_unassigned=True) must succeed when the
         cool file has bins for contigs that are being dropped.
 
-        The root cause: bins_remapped["chrom"].map(new_contig_name_to_id) returns
-        NaN for dropped contigs, which trips the "Bins reference contigs not in
-        contig_order" check on line 1018-1020. The fix is to filter out NaN rows
-        before the check, keeping only bins for retained contigs.
-
-        Additionally, old_to_new_bin is sized by n_bins_after_drop, but pixel
-        bin_ids reference the full original range. Any pixel for a dropped contig
-        would cause an IndexError. The fix must also filter or mask such pixels.
+        Dropped contigs' bins map to a -1 sentinel and their pixels are filtered
+        out (rather than raising ValueError / IndexError).
         """
         chromsizes = {"chrA": 1000, "chrB": 800, "chrC": 600}
         pairs = [("chrA", 100, "chrA", 600)] * 3 + [("chrB", 100, "chrC", 100)] * 2
@@ -733,24 +707,14 @@ class TestFromCoolBugRegressions:
         _write_contigs_table(contigs_path, [("chrA", "G1"), ("chrB", "G2")])
         out = tmp_path / "out.metacool"
 
-        # Currently this raises ValueError; once fixed it should succeed
-        try:
-            from_cool(
-                cool_uri=cool_path,
-                output=out,
-                contig_genome_map=contigs_path,
-                drop_unassigned=True,
-            )
-        except ValueError as e:
-            pytest.xfail(
-                f"Known bug: from_cool(drop_unassigned=True) raises ValueError "
-                f"when cool file has bins for dropped contigs. Error: {e}\n"
-                f"Fix: filter bins_remapped to exclude NaN chrom entries before "
-                f"the ValueError check, and build old_to_new_bin to map dropped "
-                f"bin IDs to -1 (then filter those pixels)."
-            )
+        from_cool(
+            cool_uri=cool_path,
+            output=out,
+            contig_genome_map=contigs_path,
+            drop_unassigned=True,
+        )
 
-        # After fix: validate the result and check that dropped contig is gone
+        # validate the result and check that the dropped contig is gone
         assert is_metacooler(out)
         from metacooler.api import MetaCooler
 

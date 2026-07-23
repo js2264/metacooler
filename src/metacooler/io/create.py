@@ -36,6 +36,9 @@ _UNBINNED_SENTINELS: frozenset[str] = frozenset(
 )
 _SORT_IN_MEMORY_PAIRS_SIZE_BYTES = 2 * 1024**3  # 2 GiB
 _SORT_IN_MEMORY_PIXEL_THRESHOLD = 100_000_000  # 100 M pixels
+# Conservative uncompressed:compressed ratio for pairs text when the true
+# uncompressed size cannot be trusted (bgzip, or a wrapped gzip ISIZE footer).
+_PAIRS_GZIP_EXPANSION = 6
 
 logger = logging.getLogger("metacooler")
 
@@ -110,6 +113,40 @@ def _read_contig_lengths(
     )
 
 
+def _drop_nonpositive_contigs(
+    contig_lengths: dict[str, int],
+    bins_df: pd.DataFrame | None = None,
+) -> tuple[dict[str, int], pd.DataFrame | None]:
+    """Drop contigs with non-positive length (and their bins, if any).
+
+    A contig whose length is ``<= 0`` (e.g. an empty FASTA record or a
+    malformed ``#chromsize:`` header) tiles to zero bins.  Such a contig still
+    occupies a slot in ``chrom_offset`` with an empty range, which makes the
+    out-of-range bin clamp in :func:`_bin_pairs_chunk` fold that contig's
+    contacts into a *neighbouring* contig's bin — silent cross-genome
+    corruption.  Removing these contigs up front avoids the problem entirely.
+
+    Args:
+        contig_lengths: Mapping of contig name to length.
+        bins_df: Optional bins DataFrame (string ``chrom`` names) to filter in
+            lockstep.
+
+    Returns:
+        ``(contig_lengths, bins_df)`` with non-positive-length contigs removed.
+    """
+    bad = [c for c, ln in contig_lengths.items() if ln <= 0]
+    if bad:
+        logger.warning(
+            "Dropping %d contig(s) with non-positive length: %s",
+            len(bad),
+            bad[:10],
+        )
+        contig_lengths = {c: ln for c, ln in contig_lengths.items() if ln > 0}
+        if bins_df is not None:
+            bins_df = bins_df[bins_df["chrom"].isin(contig_lengths)].copy()
+    return contig_lengths, bins_df
+
+
 def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     """Parse ``#chromsize:`` lines from the header of a pairs file.
 
@@ -124,7 +161,7 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
         ``None`` if no ``#chromsize:`` lines were found.
     """
     path = Path(pairs_path)
-    opener = gzip.open if path.suffix == ".gz" else open
+    opener = gzip.open if path.suffix in (".gz", ".bgz") else open
     lengths = {}
     with opener(path, "rt") as f:
         for line in f:
@@ -133,8 +170,36 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
             if line.startswith("#chromsize:"):
                 parts = line.strip().split()
                 if len(parts) >= 3:
-                    lengths[parts[1]] = int(parts[2])
+                    try:
+                        lengths[parts[1]] = int(parts[2])
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Malformed #chromsize line in {path}: {line.strip()!r} "
+                            f"(length {parts[2]!r} is not an integer)"
+                        ) from exc
     return lengths if lengths else None
+
+
+def _genome_id_order(genome_names: Iterable[str]) -> list[str]:
+    """Return genome names in canonical ``genome_id`` order.
+
+    The order is ``__unbinned__`` first (index 0, when present), then remaining
+    names alphabetically.  This MUST match the row order produced by
+    :func:`_build_genomes_table` so that, for genome-grouped contig orderings,
+    the physical contig layout is grouped by genome in ascending ``genome_id``
+    order — the precondition for ``genome_offset`` to be a valid offset array.
+
+    Args:
+        genome_names: Iterable of genome names.
+
+    Returns:
+        List of the unique names in canonical ``genome_id`` order.
+    """
+    names = set(genome_names)
+    ordered = sorted(names - {"__unbinned__"})
+    if "__unbinned__" in names:
+        ordered = ["__unbinned__"] + ordered
+    return ordered
 
 
 def _build_contig_order(
@@ -177,28 +242,31 @@ def _build_contig_order(
         return sorted(all_contigs)
 
     if ordering == "genome-then-alpha":
-        # Group by genome, then alphabetical order within each genome
+        # Group by genome, then alphabetical order within each genome.
+        # Genomes are visited in genome_id order (see _genome_id_order) so the
+        # physical contig layout matches the genomes-table ordering.
         genome_groups: dict[str, list[str]] = {}
         for contig in all_contigs:
             genome = contig_genome_map.get(contig, "__unbinned__")
             genome_groups.setdefault(genome, []).append(contig)
 
         ordered = []
-        for genome in sorted(genome_groups.keys()):
+        for genome in _genome_id_order(genome_groups.keys()):
             contigs = genome_groups[genome]
             contigs.sort()
             ordered.extend(contigs)
         return ordered
 
     if ordering == "genome-then-length":
-        # Group by genome, then longest contig first within each genome
+        # Group by genome (in genome_id order), then longest contig first
+        # within each genome.
         genome_groups2: dict[str, list[str]] = {}
         for contig in all_contigs:
             genome = contig_genome_map.get(contig, "__unbinned__")
             genome_groups2.setdefault(genome, []).append(contig)
 
         ordered2 = []
-        for genome in sorted(genome_groups2.keys()):
+        for genome in _genome_id_order(genome_groups2.keys()):
             contigs = genome_groups2[genome]
             contigs.sort(key=lambda c: (-contig_lengths[c], c))
             ordered2.extend(contigs)
@@ -249,10 +317,8 @@ def _build_genomes_table(
     # the loop above already adds "__unbinned__" to genome_names when any contig
     # lacks an assignment, so no extra injection is needed here.
 
-    # Sort: __unbinned__ first (if present), then alphabetical
-    sorted_names = sorted(genome_names - {"__unbinned__"})
-    if "__unbinned__" in genome_names:
-        sorted_names = ["__unbinned__"] + sorted_names
+    # Canonical genome_id order: __unbinned__ first (if present), then alphabetical.
+    sorted_names = _genome_id_order(genome_names)
 
     # Compute lengths and n_contigs
     genome_lengths = {g: 0 for g in sorted_names}
@@ -276,6 +342,9 @@ def _build_genomes_table(
         extra = extra_genomes_df.rename(columns={"genome_id": "name"})[
             ["name"] + extra_cols
         ].copy()
+        # De-duplicate on the merge key so a repeated genome name cannot explode
+        # the genomes table into duplicate rows (last row wins).
+        extra = extra.drop_duplicates(subset="name", keep="last")
         for col in extra_cols:
             if (
                 pd.api.types.is_string_dtype(extra[col].dtype)
@@ -346,6 +415,11 @@ def _build_contigs_table(
         if extra_cols:
             rename_map = {"contig_name": "name"}
             extra = contig_df.rename(columns=rename_map)[["name"] + extra_cols].copy()
+            # De-duplicate on the merge key so a repeated contig name cannot
+            # explode the contigs table into phantom rows (which would also
+            # desync attrs['nchroms'] from len(/contigs)).  Last row wins,
+            # matching the last-wins semantics of the contig→genome mapping.
+            extra = extra.drop_duplicates(subset="name", keep="last")
             # Convert types for extra columns
             for col in extra_cols:
                 if (
@@ -362,6 +436,41 @@ def _build_contigs_table(
     extra_cols = [c for c in df.columns if c not in core_cols]
     df = df[core_cols + extra_cols]
     return df.astype({k: v for k, v in CONTIGS_DTYPE.items() if k in df.columns})
+
+
+def _validate_bin_coords(df: pd.DataFrame) -> None:
+    """Sanity-check bin ``start``/``end`` coordinates before writing.
+
+    Catches malformed hand-made BED files that would otherwise be written
+    verbatim (and, for out-of-range values, silently wrap when cast to the
+    int32 storage dtype).
+
+    Args:
+        df: Bins DataFrame with integer ``start`` and ``end`` columns.
+
+    Raises:
+        ValueError: If any coordinate is negative, exceeds the int32 range,
+            or if any bin has ``end < start``.
+    """
+    start = np.asarray(df["start"], dtype=np.int64)
+    end = np.asarray(df["end"], dtype=np.int64)
+    i32 = np.iinfo(np.int32)
+    if (start < 0).any() or (end < 0).any():
+        raise ValueError("Bin coordinates must be non-negative.")
+    if (start > i32.max).any() or (end > i32.max).any():
+        raise ValueError(
+            "Bin coordinates exceed the int32 storage range "
+            f"({i32.max} bp); contigs larger than ~2.1 Gbp are not supported."
+        )
+    inverted = end < start
+    if inverted.any():
+        example = df.loc[inverted].head(3).to_dict("records")
+        raise ValueError(
+            f"{int(inverted.sum())} bin(s) have end < start, e.g. {example}."
+        )
+    zero_width = end == start
+    if zero_width.any():
+        logger.warning("%d zero-width bin(s) (end == start).", int(zero_width.sum()))
 
 
 def _build_bins(
@@ -384,7 +493,7 @@ def _build_bins(
 
     Raises:
         ValueError: If any contig name in the bins file is not found in
-            *contig_name_to_id*.
+            *contig_name_to_id*, or if bin coordinates are malformed.
     """
     if isinstance(bins, str | Path):
         df = pd.read_csv(
@@ -392,17 +501,20 @@ def _build_bins(
             sep="\t",
             header=None,
             names=["chrom", "start", "end"],
-            dtype={"chrom": str, "start": np.int32, "end": np.int32},
+            dtype={"chrom": str, "start": np.int64, "end": np.int64},
         )
     else:
         df = bins.copy()
+    _validate_bin_coords(df)
     # Map chrom name -> contig id
     mapped = df["chrom"].map(contig_name_to_id)
     if mapped.isna().any():
         missing = df["chrom"][mapped.isna()].unique()
         raise ValueError(f"Bins reference unknown contigs: {missing}")
     df["chrom"] = mapped
-    return df[["chrom", "start", "end"]]
+    return df[["chrom", "start", "end"]].astype(
+        {"chrom": np.int32, "start": np.int32, "end": np.int32}
+    )
 
 
 def _tile_bins(
@@ -521,12 +633,21 @@ def _stream_pairs(
 
     # pa.input_stream auto-decompresses .gz/.bgz via native C++ gzip
     src = pa.input_stream(str(path))
-    reader = pa_csv.open_csv(
-        src,
-        read_options=read_opts,
-        parse_options=parse_opts,
-        convert_options=convert_opts,
-    )
+    try:
+        reader = pa_csv.open_csv(
+            src,
+            read_options=read_opts,
+            parse_options=parse_opts,
+            convert_options=convert_opts,
+        )
+    except pa.lib.ArrowInvalid as exc:
+        # A header-only pairs file (no data rows) is a legitimate input — a
+        # sample with no surviving contacts. pyarrow cannot infer a schema from
+        # an empty body; treat it as zero pixels rather than crashing.
+        if "empty" in str(exc).lower():
+            logger.warning("Pairs file %s has no data rows; writing empty map.", path)
+            return
+        raise
     for batch in reader:
         df = batch.to_pandas()
         df.columns = final_col_names
@@ -771,6 +892,30 @@ def _sort_and_dedup_pixels(
         yield all_pixels.iloc[lo : lo + write_chunk]
 
 
+def _ensure_nonempty_pixel_stream(
+    pixel_iter: Iterable[pd.DataFrame],
+) -> Iterable[pd.DataFrame]:
+    """Yield from *pixel_iter*, emitting one empty frame if it is empty.
+
+    ``cooler.create_cooler`` writes a malformed pixel table (a dense block of
+    phantom rows with ``nnz=0``) when handed a generator that yields *nothing*,
+    but handles an empty DataFrame correctly. This guard turns a zero-pixel
+    input (e.g. a header-only pairs file) into a valid empty ``.metacool``.
+    """
+    yielded = False
+    for df in pixel_iter:
+        yielded = True
+        yield df
+    if not yielded:
+        yield pd.DataFrame(
+            {
+                "bin1_id": np.array([], dtype=np.int64),
+                "bin2_id": np.array([], dtype=np.int64),
+                "count": np.array([], dtype=np.int32),
+            }
+        )
+
+
 def _stream_binned_pairs(
     pairs: str | Path,
     contig_name_to_id: dict[str, int],
@@ -852,11 +997,17 @@ def _stream_remapped_pixels(
     )
 
     thread_local = threading.local()
+    # libhdf5 is not guaranteed to be built thread-safe, so concurrent reads
+    # through independent handles to the same file can corrupt data or crash.
+    # Serialise the actual file reads with a lock; the numpy remapping below
+    # still overlaps across worker threads.
+    read_lock = threading.Lock()
 
     def _remap_chunk(lo: int, hi: int) -> pd.DataFrame:
         if not hasattr(thread_local, "clr"):
             thread_local.clr = cooler.Cooler(cool_path_str)
-        chunk = thread_local.clr.pixels()[lo:hi].copy()
+        with read_lock:
+            chunk = thread_local.clr.pixels()[lo:hi].copy()
         chunk["bin1_id"] = old_to_new_bin[chunk["bin1_id"].values.astype(np.int64)]
         chunk["bin2_id"] = old_to_new_bin[chunk["bin2_id"].values.astype(np.int64)]
         # Drop pixels that touch a dropped contig (sentinel -1).
@@ -1011,17 +1162,28 @@ def from_pairs(
     # --- Auto-detect sort_in_memory based on pairs file size ---
     if sort_in_memory is None:
         _pairs_path = Path(pairs)
-        if _pairs_path.suffix in (".gz", ".bgz"):
-            # Use ISIZE footer (last 4 bytes) — uncompressed size mod 2^32
+        _compressed = _pairs_path.stat().st_size
+        if _pairs_path.suffix == ".bgz":
+            # bgzip: the gzip ISIZE trailer describes only the final BGZF block
+            # (<= 64 KiB), so it drastically under-reports the true size. Estimate
+            # conservatively from the compressed size (pairs text expands ~6x).
+            pairs_size = _compressed * _PAIRS_GZIP_EXPANSION
+        elif _pairs_path.suffix == ".gz":
+            # Single-member gzip: ISIZE is the uncompressed size mod 2^32. If it
+            # is smaller than the compressed size it has wrapped (uncompressed
+            # > 4 GiB) or the file is multi-member; fall back to a conservative
+            # compressed-size estimate so a large file never picks in-memory sort.
             try:
                 with open(_pairs_path, "rb") as _fh:
                     _fh.seek(-4, 2)
                     _isize = int.from_bytes(_fh.read(4), "little")
-                pairs_size = max(_isize, _pairs_path.stat().st_size)
             except Exception:
-                pairs_size = _pairs_path.stat().st_size
+                _isize = 0
+            pairs_size = (
+                _isize if _isize >= _compressed else _compressed * _PAIRS_GZIP_EXPANSION
+            )
         else:
-            pairs_size = _pairs_path.stat().st_size
+            pairs_size = _compressed
         if pairs_size > _SORT_IN_MEMORY_PAIRS_SIZE_BYTES:
             logger.warning(
                 "Pairs file is %.1f GiB — switching to sort_in_memory=False "
@@ -1043,7 +1205,7 @@ def from_pairs(
             sep="\t",
             header=None,
             names=["chrom", "start", "end"],
-            dtype={"chrom": str, "start": np.int32, "end": np.int32},
+            dtype={"chrom": str, "start": np.int64, "end": np.int64},
         )
         contig_lengths = bins_df.groupby("chrom")["end"].max().to_dict()
     elif isinstance(bins, pd.DataFrame):
@@ -1055,6 +1217,7 @@ def from_pairs(
         bins_df = None
     else:
         raise TypeError("bins must be a path, DataFrame, or None")
+    contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
     logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
 
     # --- Filter unassigned contigs ---
@@ -1130,32 +1293,39 @@ def from_pairs(
     else:
         pixel_source: Iterable[pd.DataFrame] = raw_pixels
         ordered = False
-    cooler.create_cooler(
-        str(uri),
-        bins=bins_df,
-        pixels=pixel_source,
-        ordered=ordered,
-        symmetric_upper=True,
-        assembly=assembly_name,
-        metadata=metadata or {},
-        dupcheck=False,
-    )
+    pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
+    try:
+        cooler.create_cooler(
+            str(uri),
+            bins=bins_df,
+            pixels=pixel_source,
+            ordered=ordered,
+            symmetric_upper=True,
+            assembly=assembly_name,
+            metadata=metadata or {},
+            dupcheck=False,
+        )
 
-    # --- Post-process: add metacooler-specific groups and attrs ---
-    logger.info("Post-processing cooler file to add metacool structure")
-    _finalize_metacool_file(
-        uri,
-        genomes_df,
-        contigs_df,
-        chrom_offset,
-        genome_offset,
-        contig_ordering=contig_ordering,
-        assembly_name=assembly_name,
-    )
+        # --- Post-process: add metacooler-specific groups and attrs ---
+        logger.info("Post-processing cooler file to add metacool structure")
+        _finalize_metacool_file(
+            uri,
+            genomes_df,
+            contigs_df,
+            chrom_offset,
+            genome_offset,
+            contig_ordering=contig_ordering,
+            assembly_name=assembly_name,
+        )
 
-    # --- Validate ---
-    logger.info("Validating created metacool file")
-    validate(uri)
+        # --- Validate ---
+        logger.info("Validating created metacool file")
+        validate(uri)
+    except BaseException:
+        # Never leave a half-written file on disk that could be mistaken for a
+        # valid output.
+        Path(uri).unlink(missing_ok=True)
+        raise
     with h5py.File(uri, "r") as f:
         nnz = int(f.attrs.get("nnz"))
         total = int(f.attrs.get("sum", 0))
@@ -1246,6 +1416,7 @@ def from_cool(
     contig_lengths: dict[str, int] = {
         str(chrom): int(group["end"].max()) for chrom, group in bins.groupby("chrom")
     }
+    contig_lengths, _ = _drop_nonpositive_contigs(contig_lengths)
 
     # --- Parse contig assignments ---
     contig_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
@@ -1307,31 +1478,36 @@ def from_cool(
     else:
         pixel_source: Iterable[pd.DataFrame] = raw_pixels
         ordered = False
-    cooler.create_cooler(
-        str(output_path),
-        bins=bins_remapped,
-        pixels=pixel_source,
-        ordered=ordered,
-        symmetric_upper=True,
-        assembly=assembly_name or "imported",
-        metadata=metadata or {},
-    )
+    pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
+    try:
+        cooler.create_cooler(
+            str(output_path),
+            bins=bins_remapped,
+            pixels=pixel_source,
+            ordered=ordered,
+            symmetric_upper=True,
+            assembly=assembly_name or "imported",
+            metadata=metadata or {},
+        )
 
-    # --- Add metacooler-specific groups and attributes ---
-    logger.info("Post-processing cooler file to add metacool structure")
-    _finalize_metacool_file(
-        output_path,
-        genomes,
-        contigs,
-        chrom_offset,
-        genome_offset,
-        contig_ordering=contig_ordering,
-        assembly_name=assembly_name,
-    )
+        # --- Add metacooler-specific groups and attributes ---
+        logger.info("Post-processing cooler file to add metacool structure")
+        _finalize_metacool_file(
+            output_path,
+            genomes,
+            contigs,
+            chrom_offset,
+            genome_offset,
+            contig_ordering=contig_ordering,
+            assembly_name=assembly_name,
+        )
 
-    # --- Validate ---
-    logger.info("Validating created metacool file")
-    validate(str(output_path))
+        # --- Validate ---
+        logger.info("Validating created metacool file")
+        validate(str(output_path))
+    except BaseException:
+        Path(output_path).unlink(missing_ok=True)
+        raise
     with h5py.File(output_path, "r") as f:
         nnz = int(f.attrs.get("nnz"))
         total = int(f.attrs.get("sum"))
