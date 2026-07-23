@@ -66,20 +66,23 @@ class TestExtract:
         assert set(c1.chromnames) == {"contig_A", "contig_B"}
         assert set(c2.chromnames) == {"contig_C"}
 
-    def test_extract_split_with_extra_contigs(self, tiny_metacooler, tmp_path):
+    def test_extract_split_with_contigs_raises(self, tiny_metacooler, tmp_path):
         out = tmp_path / "split"
-        extract(
-            tiny_metacooler,
-            genomes=["MAG_1"],
-            contigs=["contig_C"],
-            output=out,
-            split=True,
-        )
-        mag1 = tmp_path / "split_MAG_1.cool"
-        assert mag1.exists()
-        c = cooler.Cooler(str(mag1))
-        # split mode includes extra contigs in every genome file
-        assert set(c.chromnames) == {"contig_A", "contig_B", "contig_C"}
+        # --split is genome-only: combining it with --contigs is an error.
+        with pytest.raises(ValueError, match="cannot be combined with --split"):
+            extract(
+                tiny_metacooler,
+                genomes=["MAG_1"],
+                contigs=["contig_C"],
+                output=out,
+                split=True,
+            )
+
+    def test_extract_split_contigs_only_raises(self, tiny_metacooler, tmp_path):
+        out = tmp_path / "split"
+        # --split with only --contigs is rejected (split is genome-only).
+        with pytest.raises(ValueError, match="cannot be combined with --split"):
+            extract(tiny_metacooler, contigs=["contig_C"], output=out, split=True)
 
     def test_extract_unknown_genome_raises(self, tiny_metacooler, tmp_path):
         out = tmp_path / "nope.cool"

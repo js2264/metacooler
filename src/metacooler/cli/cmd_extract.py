@@ -60,7 +60,7 @@ def _parse_comma_list(ctx, param, value):
     "-f",
     "--force",
     is_flag=True,
-    help="Overwrite output file if it already exists (ignored when --split is set).",
+    help="Overwrite existing output file(s), including per-genome files with --split.",
 )
 @click.option(
     "-v",
@@ -98,6 +98,10 @@ def cmd_extract(
     genome_list = list(genomes)
     if not genome_list and not contigs:
         raise click.UsageError("At least one of --genomes or --contigs is required.")
+    if split and contigs:
+        raise click.UsageError(
+            "--contigs cannot be combined with --split (split is genome-only)."
+        )
 
     extract(
         uri=metacool_path,
@@ -105,4 +109,5 @@ def cmd_extract(
         contigs=list(contigs) or None,
         output=output,
         split=split,
+        force=force,
     )

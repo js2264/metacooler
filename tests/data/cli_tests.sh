@@ -157,7 +157,8 @@ metacooler extract --force --output MAG_05-06.cool --genomes MAG_05,MAG_06 assem
 metacooler extract --force --output MAGs --split --genomes MAG_05,MAG_06 assembly_1_rep1_1kb.metacool
 metacooler extract --force --output contig_1_000.cool --contigs contig_1_000 assembly_1_rep1_1kb.metacool
 metacooler extract --force --output contig_1_000-1_001.cool --contigs contig_1_000,contig_1_001 assembly_1_rep1_1kb.metacool
-metacooler extract --force --output contigs.cool --split --contigs contig_1_000,contig_1_001 assembly_1_rep1_1kb.metacool
+## --split is genome-only: combining it with --contigs is rejected (expected error).
+metacooler extract --force --output contigs.cool --split --contigs contig_1_000,contig_1_001 assembly_1_rep1_1kb.metacool || echo "  (expected: --contigs cannot be combined with --split)"
 
 metacooler attrs assembly_1_DpnII.mmetacool
 
@@ -210,10 +211,18 @@ metacooler info assembly_1kb_5kb_3.metacool
 ## zoomify
 # ================================================================================
 
-metacooler zoomify --binsize 1000,2000,5000 --output assembly_1kb_5kb.metacool assembly_1_rep1_1kb.metacool
-metacooler info assembly_1_rep1_1kb.mmetacool
-metacooler info assembly_1kb_5kb.mmetacool
+## zoomify a fixed-bin metacool into a multi-resolution .mmetacool.
+## --levels N doubles the bin size per level (1000 -> 2000 -> 4000); entries are
+## addressed as file.mmetacool::entries/<binsize>.
+metacooler zoomify --levels 3 --output assembly_1_rep1_zoom.mmetacool assembly_1_rep1_1kb.metacool
+metacooler ls assembly_1_rep1_zoom.mmetacool
+metacooler info assembly_1_rep1_zoom.mmetacool::entries/1000
+metacooler info assembly_1_rep1_zoom.mmetacool::entries/2000
 
-metacooler zoomify --binsize 5000 --output assembly_1kb_5kb_2.metacool assembly_1_rep1_DpnII.metacool
-metacooler info assembly_1_rep1_DpnII.metacool
-metacooler info assembly_1kb_5kb_2.metacool
+## cooler-style explicit resolutions (--resolutions takes precedence over --levels).
+metacooler zoomify --resolutions 1000,2000,5000 --output assembly_1_rep1_zoom_r.mmetacool assembly_1_rep1_1kb.metacool
+metacooler ls assembly_1_rep1_zoom_r.mmetacool
+
+## genome-level binnify ligates each MAG's contigs, then tiles (output contigs = MAGs).
+metacooler binnify --binsize 5000 --level genome --output assembly_1_rep1_genome5kb.metacool assembly_1_rep1_1kb.metacool
+metacooler dump -t contigs -H assembly_1_rep1_genome5kb.metacool | head -5

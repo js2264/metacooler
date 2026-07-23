@@ -1671,8 +1671,8 @@ class TestExtract:
         c = cooler.Cooler(str(out))
         assert c.info["nchroms"] == 2
 
-    def test_extract_contig_split(self, runner, tmp_path, a1_rep1_1kb):
-        """--split with --contigs (no --genomes) writes to a single output file."""
+    def test_extract_contig_split_rejected(self, runner, tmp_path, a1_rep1_1kb):
+        """--split with --contigs is rejected (split is genome-only)."""
         out = tmp_path / "contigs.cool"
         result = runner.invoke(
             cli,
@@ -1686,11 +1686,10 @@ class TestExtract:
                 str(a1_rep1_1kb),
             ],
         )
-        assert result.exit_code == 0, result.output
-        # split without --genomes falls back to single file
-        assert out.exists()
-        c = cooler.Cooler(str(out))
-        assert c.info["nchroms"] == 2
+        assert result.exit_code != 0
+        # rich-click may wrap/format the message, so match loosely.
+        assert "combined with" in result.output.replace("\n", " ")
+        assert not out.exists()
 
     def test_extract_unknown_genome_fails(self, runner, tmp_path, a1_rep1_1kb):
         out = tmp_path / "bad.cool"

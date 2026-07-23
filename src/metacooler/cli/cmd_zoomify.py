@@ -23,7 +23,18 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=int,
     default=5,
     show_default=True,
-    help="Maximum number of resolution levels.",
+    help="Number of successive bin-size doublings (used when --resolutions is not set).",
+)
+@click.option(
+    "-r",
+    "--resolutions",
+    type=str,
+    default=None,
+    help=(
+        "cooler-style resolution list, e.g. '1000,2000,5000', '1000N' (nice "
+        "1-2-5 progression), '1000B' (binary x2 progression), or '4DN'. "
+        "Takes precedence over --levels."
+    ),
 )
 @click.option(
     "-f",
@@ -41,13 +52,15 @@ def cmd_zoomify(
     metacool_path: str,
     output: Path,
     levels: int,
+    resolutions: str | None,
     force: bool,
     verbose: bool,
 ) -> None:
     """Create a multi-resolution mmetacool file.
 
     \b
-    Input must be a fixed-bin metacooler. Each level doubles the bin size.
+    Input must be a fixed-bin metacooler. By default each level doubles the bin
+    size; pass --resolutions for an explicit cooler-style resolution list.
     """
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.zoomify import zoomify
@@ -61,5 +74,5 @@ def cmd_zoomify(
     if force and output.exists():
         output.unlink()
 
-    zoomify(uri=metacool_path, output=output, levels=levels)
+    zoomify(uri=metacool_path, output=output, levels=levels, resolutions=resolutions)
     click.echo(f"Zoomified {metacool_path} → {output}")

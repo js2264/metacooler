@@ -31,8 +31,12 @@ def binnify(
         uri: Path to the source ``.metacool`` file.
         output: Destination path for the output ``.metacool`` file.
         binsize: New bin size in base pairs.
-        level: Tiling level — ``contig`` (tile per contig) or
-            ``genome`` (tile per genome, contigs concatenated).
+        level: Tiling level. ``contig`` (default) tiles each contig
+            independently, preserving the contig hierarchy. ``genome``
+            artificially ligates each genome's contigs (ordered by decreasing
+            length) into one sequence and tiles that uniformly; the output's
+            contigs become the ligated genomes (one per genome), so bins may
+            span the original contig boundaries.
 
     Raises:
         ValueError: If the input has a fixed binsize that is >= *binsize*
@@ -57,7 +61,7 @@ def binnify(
     bin_chrom_codes = old_bins["chrom"].cat.codes.values
 
     if level == "contig":
-        # Tile per contig
+        # Tile each contig independently.
         new_bins_rows = []
         for cid in range(len(contigs)):
             contig_length = int(contigs.iloc[cid]["length"])
@@ -65,78 +69,27 @@ def binnify(
                 end = min(start + binsize, contig_length)
                 new_bins_rows.append({"chrom": cid, "start": start, "end": end})
         new_bins = pd.DataFrame(new_bins_rows)
+        if new_bins.empty:
+            raise ValueError("No bins generated. Check input data.")
+        # Canonical (contig-id, start) order so bin rows match the /contigs table.
+        new_bins = new_bins.sort_values(["chrom", "start"], kind="stable").reset_index(
+            drop=True
+        )
+        old_to_new = _map_old_bins_per_contig(
+            old_bins, bin_chrom_codes, len(contigs), new_bins
+        )
     elif level == "genome":
-        # Tile per genome (contigs concatenated within each genome).
-        # Bins that span contig boundaries are split into one sub-bin per contig.
-        new_bins_rows = []
-        for gid in range(len(genomes)):
-            genome_contigs = contigs[contigs["genome_id"] == gid]
-            offset = 0
-            contig_offsets = {}
-            for cid in genome_contigs.index:
-                contig_offsets[cid] = offset
-                offset += int(contigs.iloc[cid]["length"])
-            genome_length = offset
-            for start in range(0, genome_length, binsize):
-                end = min(start + binsize, genome_length)
-                # Walk through all contigs this [start, end) range touches
-                # and emit one sub-bin per contig segment.
-                for cid in genome_contigs.index:
-                    clen = int(contigs.iloc[cid]["length"])
-                    contig_start = contig_offsets[cid]
-                    contig_end = contig_start + clen
-                    if end <= contig_start or start >= contig_end:
-                        continue  # this contig not touched by [start, end)
-                    local_start = max(start, contig_start) - contig_start
-                    local_end = min(end, contig_end) - contig_start
-                    new_bins_rows.append(
-                        {"chrom": cid, "start": local_start, "end": local_end}
-                    )
-        new_bins = pd.DataFrame(new_bins_rows)
+        # Ligate each genome's contigs (ordered by decreasing length) into a
+        # single artificial sequence, then tile that sequence uniformly. The
+        # output's "contigs" ARE the ligated genomes (one contig per genome), so
+        # bins genuinely span contig boundaries within a genome.
+        new_bins, old_to_new, contigs, genomes = _tile_per_genome_ligated(
+            contigs, genomes, old_bins, bin_chrom_codes, binsize
+        )
+        if new_bins.empty:
+            raise ValueError("No bins generated. Check input data.")
     else:
         raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
-
-    if new_bins.empty:
-        raise ValueError("No bins generated. Check input data.")
-
-    # Sort bins into canonical (contig-id, start) order so the bin row order
-    # matches the /contigs table order. ``chrom`` here is the integer contig id
-    # (row index into /contigs). Without this, at level="genome" the bins are
-    # emitted in genome-iteration order; cooler then factorises bins/chrom by
-    # first-appearance into that order, which mismatches the /contigs table
-    # written by _finalize_metacool_file, scrambling every bin's contig label.
-    new_bins = new_bins.sort_values(["chrom", "start"], kind="stable").reset_index(
-        drop=True
-    )
-
-    # Build mapping: old bin → new bin (using midpoint assignment)
-    old_midpoints = (old_bins["start"].values + old_bins["end"].values) / 2
-    old_chroms = bin_chrom_codes
-
-    # Build new bin lookup: for each contig, sorted start positions and indices
-    new_bin_lookup: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    for cid, grp in new_bins.groupby("chrom", sort=False):
-        new_bin_lookup[int(cid)] = (  # ty:ignore[invalid-argument-type]
-            grp["start"].values.astype(np.int64),
-            grp.index.values.astype(np.int64),
-        )
-
-    # Map old bins to new bins (vectorised per-contig searchsorted)
-    old_to_new = np.full(len(old_bins), -1, dtype=np.int64)
-    for cid in range(len(contigs)):
-        old_mask = old_chroms == cid
-        if not old_mask.any():
-            continue
-        new_starts, new_indices = new_bin_lookup.get(
-            cid, (np.array([], dtype=np.int64), np.array([], dtype=np.int64))
-        )
-        if len(new_starts) == 0:
-            continue
-        mids = old_midpoints[old_mask]
-        idx = np.searchsorted(new_starts, mids, side="right") - 1
-        valid = idx >= 0
-        positions = np.where(old_mask)[0]
-        old_to_new[positions[valid]] = new_indices[idx[valid]]
 
     # Filter out unmapped bins
     valid_mask = old_to_new >= 0
@@ -166,7 +119,8 @@ def binnify(
             chunk = mc._clr.pixels()[lo : lo + chunksize]
             b1 = chunk["bin1_id"].values
             b2 = chunk["bin2_id"].values
-            counts = chunk["count"].values
+            # int64 so the per-chunk and cross-chunk count sums cannot overflow int32
+            counts = chunk["count"].values.astype(np.int64)
 
             pixel_mask = valid_mask[b1] & valid_mask[b2]
             if not pixel_mask.any():
@@ -241,6 +195,108 @@ def binnify(
     )
 
 
+def _map_old_bins_per_contig(
+    old_bins: pd.DataFrame,
+    bin_chrom_codes: np.ndarray,
+    n_contigs: int,
+    new_bins: pd.DataFrame,
+) -> np.ndarray:
+    """Map each old bin to a new bin within the SAME contig (midpoint rule)."""
+    old_midpoints = (old_bins["start"].values + old_bins["end"].values) / 2
+    new_bin_lookup: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for cid, grp in new_bins.groupby("chrom", sort=False):
+        new_bin_lookup[int(cid)] = (  # ty:ignore[invalid-argument-type]
+            grp["start"].values.astype(np.int64),
+            grp.index.values.astype(np.int64),
+        )
+
+    old_to_new = np.full(len(old_bins), -1, dtype=np.int64)
+    for cid in range(n_contigs):
+        old_mask = bin_chrom_codes == cid
+        if not old_mask.any():
+            continue
+        new_starts, new_indices = new_bin_lookup.get(
+            cid, (np.array([], dtype=np.int64), np.array([], dtype=np.int64))
+        )
+        if len(new_starts) == 0:
+            continue
+        mids = old_midpoints[old_mask]
+        idx = np.searchsorted(new_starts, mids, side="right") - 1
+        valid = idx >= 0
+        positions = np.where(old_mask)[0]
+        old_to_new[positions[valid]] = new_indices[idx[valid]]
+    return old_to_new
+
+
+def _tile_per_genome_ligated(
+    contigs: pd.DataFrame,
+    genomes: pd.DataFrame,
+    old_bins: pd.DataFrame,
+    bin_chrom_codes: np.ndarray,
+    binsize: int,
+) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, pd.DataFrame]:
+    """Ligate contigs per genome (decreasing length) and tile at genome level.
+
+    Returns ``(new_bins, old_to_new, out_contigs, out_genomes)`` where the
+    output contigs are the ligated genomes (one per genome, named after the
+    genome) so that a re-binned bin can span the original contig boundaries.
+    """
+    n_genomes = len(genomes)
+    contig_len = contigs["length"].values.astype(np.int64)
+    contig_gid = contigs["genome_id"].values.astype(np.int64)
+
+    # Ligated offset of each original contig within its genome. Contigs are
+    # laid out by DECREASING length (ties broken by contig id for determinism).
+    contig_offset = np.zeros(len(contigs), dtype=np.int64)
+    genome_length = np.zeros(n_genomes, dtype=np.int64)
+    for gid in range(n_genomes):
+        cids = np.where(contig_gid == gid)[0]
+        order = sorted(cids.tolist(), key=lambda c: (-int(contig_len[c]), int(c)))
+        off = 0
+        for c in order:
+            contig_offset[c] = off
+            off += int(contig_len[c])
+        genome_length[gid] = off
+
+    # Uniform tiling of each ligated genome (already in (gid, start) order).
+    rows = []
+    genome_bin_start = np.zeros(n_genomes + 1, dtype=np.int64)
+    for gid in range(n_genomes):
+        glen = int(genome_length[gid])
+        n_new = 0
+        for start in range(0, glen, binsize):
+            end = min(start + binsize, glen)
+            rows.append({"chrom": gid, "start": start, "end": end})
+            n_new += 1
+        genome_bin_start[gid + 1] = genome_bin_start[gid] + n_new
+    new_bins = pd.DataFrame(rows)
+    if new_bins.empty:
+        return new_bins, np.array([], dtype=np.int64), contigs, genomes
+
+    # Map each old bin to the ligated-genome bin containing its midpoint.
+    old_chrom = bin_chrom_codes.astype(np.int64)
+    old_mid = (
+        old_bins["start"].values.astype(np.int64)
+        + old_bins["end"].values.astype(np.int64)
+    ) // 2
+    ligated_pos = contig_offset[old_chrom] + old_mid
+    gid_of_old = contig_gid[old_chrom]
+    old_to_new = genome_bin_start[gid_of_old] + (ligated_pos // binsize)
+
+    # Output "contigs" are the ligated genomes (one contig per genome).
+    out_contigs = pd.DataFrame(
+        {
+            "name": genomes["name"].values,
+            "length": genome_length,
+            "genome_id": np.arange(n_genomes, dtype=np.int32),
+        }
+    )
+    out_genomes = genomes.copy()
+    out_genomes["length"] = genome_length
+    out_genomes["n_contigs"] = 1
+    return new_bins, old_to_new, out_contigs, out_genomes
+
+
 def _write_rebinned_metacool(
     output: Path,
     bins: pd.DataFrame,
@@ -287,11 +343,14 @@ def _write_rebinned_metacool(
     )
     genome_offset = np.concatenate([[0], np.cumsum(genome_counts)]).astype(np.int64)
 
-    # Create the cooler first; the generator yields one pre-sorted, aggregated DataFrame
+    # Create the cooler first; the generator yields one pre-sorted, aggregated DataFrame.
+    # int64 count so a coarse bin-pair summing >2**31 source contacts is not
+    # saturated by cooler's default int32.
     cooler.create_cooler(
         str(output),
         bins=bins,
         pixels=pixels,
+        dtypes={"count": np.int64},
         ordered=True,
         symmetric_upper=True,
     )

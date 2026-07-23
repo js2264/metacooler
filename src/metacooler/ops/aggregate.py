@@ -55,7 +55,9 @@ def _aggregate_sparse(
         chunk = mc._clr.pixels()[i : i + chunksize]
         c1 = mapping[chunk["bin1_id"].values]
         c2 = mapping[chunk["bin2_id"].values]
-        vals = chunk["count"].values
+        # int64 so scipy's duplicate-summing in .tocsr() cannot overflow int32
+        # (a genome pair can exceed 2**31 contacts on real metagenomic data).
+        vals = chunk["count"].values.astype(np.int64)
 
         swap = c1 > c2
         c1[swap], c2[swap] = c2[swap], c1[swap]
@@ -123,6 +125,11 @@ def _aggregate_pixel_stream(
         c1 = mapping[chunk["bin1_id"].values].copy()
         c2 = mapping[chunk["bin2_id"].values].copy()
         vals = chunk[count_col].values
+        # Promote integer counts to int64 (a genome pair can exceed 2**31
+        # contacts on real data); preserve float weights (e.g. balanced
+        # values) instead of truncating them to zero.
+        if np.issubdtype(vals.dtype, np.integer):
+            vals = vals.astype(np.int64)
 
         # Enforce upper triangle
         swap = c1 > c2
@@ -132,7 +139,7 @@ def _aggregate_pixel_stream(
             {
                 "bin1_id": c1.astype(np.int64),
                 "bin2_id": c2.astype(np.int64),
-                "count": vals.astype(np.int32),
+                "count": vals,
             }
         )
         # Aggregate within-chunk duplicates to reduce cooler's external sort load
@@ -181,12 +188,18 @@ def aggregate(
         }
     )
 
+    # Store an int64 count (integer contacts) or float64 (weighted columns) so
+    # cooler's default int32 cannot silently saturate large genome-pair totals.
+    src_dtype = mc._clr.pixels()[:0][count_col].dtype
+    count_dtype = np.int64 if np.issubdtype(src_dtype, np.integer) else np.float64
+
     cooler.create_cooler(
         str(output),
         bins=bins_out,
         pixels=_aggregate_pixel_stream(
             mc, level=level, chunksize=chunksize, count_col=count_col
         ),
+        dtypes={"count": count_dtype},
         ordered=False,
         symmetric_upper=True,
         assembly=mc.info.get("assembly"),

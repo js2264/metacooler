@@ -134,29 +134,38 @@ metacooler binnify METACOOL_PATH --binsize N -o OUT.metacool [OPTIONS]
 |--------|---------|-------------|
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--binsize` | *required* | New bin size in bp. |
-| `--level` | `contig` | Tiling strategy: `contig` (tile each contig independently) or `genome` (concatenate a genome's contigs, then tile). |
+| `--level` | `contig` | Tiling strategy: `contig` (tile each contig independently) or `genome` (ligate a genome's contigs by decreasing length, then tile — the output's contigs become the ligated genomes). |
 
 ```bash
 metacooler binnify gut_T0.metacool --binsize 5000 -o gut_T0_5kb.metacool
+
+# genome-level: ligate each MAG's contigs, then tile at 10 kb
+metacooler binnify gut_T0.metacool --binsize 10000 --level genome -o gut_T0_genome10kb.metacool
 ```
 
 ### `zoomify` { #zoomify }
 
 Build a multi-resolution `.mmetacool` collection from a fixed-bin metacool file.
-Each successive level doubles the bin size. **API:**
-`metacooler.ops.zoomify.zoomify`.
+By default each level doubles the bin size; `--resolutions` gives cooler-style
+control. **API:** `metacooler.ops.zoomify.zoomify`.
 
 ```console
-metacooler zoomify METACOOL_PATH -o OUT.mmetacool [--levels N]
+metacooler zoomify METACOOL_PATH -o OUT.mmetacool [--levels N | --resolutions R]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-o, --output` | *required* | Output `.mmetacool` path. |
-| `--levels` | `5` | Maximum number of resolution levels to generate. |
+| `--levels` | `5` | Number of bin-size doublings (used when `--resolutions` is not set). |
+| `-r, --resolutions` | — | cooler-style list: `1000,2000,5000`, `1000N` (nice 1-2-5), `1000B` (binary ×2), or `4DN`. Takes precedence over `--levels`. |
+
+Entries are addressed as `file.mmetacool::entries/<binsize>`.
 
 ```bash
 metacooler zoomify gut_T0.metacool --levels 6 -o gut_T0_multireso.mmetacool
+
+# explicit cooler-style resolutions
+metacooler zoomify gut_T0.metacool --resolutions 1000,2000,5000,10000 -o gut_T0_multireso.mmetacool
 ```
 
 ---
@@ -166,8 +175,8 @@ metacooler zoomify gut_T0.metacool --levels 6 -o gut_T0_multireso.mmetacool
 ### `extract` { #extract }
 
 Write a standard `.cool` file containing only the selected genomes and/or
-contigs, at the original bin resolution. Genome and contig selections combine.
-**API:** `metacooler.io.extract.extract`.
+contigs, at the original bin resolution. In single-file mode, genome and contig
+selections combine. **API:** `metacooler.io.extract.extract`.
 
 ```console
 metacooler extract METACOOL_PATH --genomes G -o OUT.cool [OPTIONS]
@@ -177,8 +186,9 @@ metacooler extract METACOOL_PATH --genomes G -o OUT.cool [OPTIONS]
 |--------|---------|-------------|
 | `-o, --output` | *required* | Output `.cool` path (or filename prefix with `--split`). |
 | `--genomes` | — | Genome name(s) to extract. |
-| `--contigs` | — | Contig name(s) to extract. |
-| `--split` | off | Write one `.cool` per genome; `--output` becomes a prefix. |
+| `--contigs` | — | Contig name(s) to extract (single-file mode only). |
+| `--split` | off | Write one `.cool` per genome (genome-only); `--output` becomes a prefix. Cannot be combined with `--contigs`. |
+| `-f, --force` | off | Overwrite existing output(s), including per-genome files with `--split`. |
 
 ```bash
 # Single MAG

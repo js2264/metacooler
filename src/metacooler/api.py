@@ -605,6 +605,9 @@ class MetaCooler:
             str(path),
             bins=bins,
             pixels=_aggregate_pixel_stream(self, level=level),
+            # int64 so large genome-pair totals cannot saturate cooler's
+            # default int32 count (see ops.aggregate.aggregate).
+            dtypes={"count": np.int64},
             ordered=False,
             symmetric_upper=True,
             assembly=self.info.get("assembly"),

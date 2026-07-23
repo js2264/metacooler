@@ -103,13 +103,13 @@ Key options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--binsize` | required | New bin size in base pairs. |
-| `--level` | `contigs` | Tiling level: `contigs` (each contig tiled independently) or `genomes` (contigs concatenated per genome before tiling). |
+| `--level` | `contig` | Tiling level: `contig` (each contig tiled independently) or `genome` (contigs ligated per genome, then tiled). |
 
 Notes:
-- Input must be a variable-width bin metacool (e.g., generated from restriction fragments).
-- At `--level contigs`, each contig is tiled independently; the last bin of each contig may be shorter.
-- At `--level genomes`, each genome is tiled as one continuous sequence; the last bin of each genome may be shorter.
-- Pixels are re-assigned and aggregated according to the new bin layout.
+- Accepts fixed- or variable-width source binnings; the new bin size is applied uniformly.
+- At `--level contig`, each contig is tiled independently; the last bin of each contig may be shorter. The contig hierarchy is preserved.
+- At `--level genome`, each genome's contigs are artificially **ligated** (ordered by decreasing length) into one sequence, which is tiled uniformly. The output's contigs become the ligated genomes (one per genome, named after the genome), so a bin may span the original contig boundaries.
+- Pixels are re-assigned and aggregated according to the new bin layout (int64 counts, no overflow).
 
 ---
 
@@ -125,12 +125,14 @@ Key options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--levels` | `5` | Maximum number of resolution levels to generate. |
+| `--levels` | `5` | Number of successive bin-size doublings (used when `--resolutions` is not set). |
+| `-r/--resolutions` | — | cooler-style resolution list. Takes precedence over `--levels`. |
 
 Notes:
-- Input must be a fixed-bin metacool.
-- Each level doubles the bin size (e.g. 1 kb → 2 kb → 4 kb → …).
-- Output is a `.mmetacool` collection containing one entry per resolution.
+- Input must be a fixed-bin metacool (standalone file; mmetacool entry URIs are rejected).
+- By default each level doubles the bin size (e.g. 1 kb → 2 kb → 4 kb → …).
+- `--resolutions` accepts cooler syntax: an explicit list (`1000,2000,5000`), a "nice" 1-2-5 progression (`1000N`), a binary ×2 progression (`1000B`), or `4DN`. The base resolution is always included; requested resolutions finer than the base are ignored.
+- Output is a `.mmetacool` collection with one entry per resolution, addressed as `file.mmetacool::entries/<binsize>`.
 
 ---
 
@@ -150,12 +152,13 @@ Key options:
 |--------|---------|-------------|
 | `--genomes` | — | Genome name(s) to extract (comma-separated or repeated). |
 | `--contigs` | — | Contig name(s) to extract (comma-separated or repeated). |
-| `--split` | off | Write one `.cool` per genome; `--output` is used as a filename prefix. |
+| `--split` | off | Write one `.cool` per genome (genome-only); `--output` is used as a filename prefix. |
 | `-o/--output` | required | Output `.cool` file path (or prefix when `--split` is set). |
-| `-f/--force` | off | Overwrite output if it already exists. |
+| `-f/--force` | off | Overwrite existing output file(s), including per-genome files with `--split`. |
 
 Notes:
-- `--genomes` and `--contigs` can be combined; the result includes all contigs belonging to the named genomes plus any individually named contigs.
+- In single-file mode, `--genomes` and `--contigs` can be combined; the result includes all contigs belonging to the named genomes plus any individually named contigs.
+- `--split` is genome-only: combining it with `--contigs` is an error (each per-genome file gets exactly that genome's contigs).
 - Output is a standard cooler file compatible with cooltools, HiGlass, etc.
 
 ---
