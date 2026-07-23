@@ -43,8 +43,13 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
     """
     if arr.dtype.kind in ("O", "U", "S") or str(arr.dtype) == "string":
         str_arr = ["" if pd.isna(v) else str(v) for v in arr]
-        max_len = max((len(s) for s in str_arr), default=1)
-        return np.array([s.encode("utf-8") for s in str_arr], dtype=f"S{max_len}")
+        encoded = [s.encode("utf-8") for s in str_arr]
+        # Size the fixed-length dtype by ENCODED BYTE length, not character
+        # count: a multi-byte character (e.g. "é") is longer as UTF-8 than as a
+        # Python str, so sizing by len(str) would silently truncate the bytes
+        # (and could collide two distinct names).
+        max_len = max((len(b) for b in encoded), default=1)
+        return np.array(encoded, dtype=f"S{max_len}")
     return np.asarray(arr)
 
 
