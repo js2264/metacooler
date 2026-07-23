@@ -160,7 +160,52 @@ def validate(uri: str | Path) -> None:
         n_pixels = len(p["bin1_id"])
         if n_pixels == 0:
             logger.warning("Empty pixels table")
+        if n_contigs == 0:
+            raise MetaCoolerFormatError("/contigs table is empty")
+        if n_genomes == 0:
+            raise MetaCoolerFormatError("/genomes table is empty")
 
+        # --- /chroms must be a soft link to /contigs (cooler compatibility) ---
+        link = f.get("chroms", getlink=True)
+        if not isinstance(link, h5py.SoftLink):
+            raise MetaCoolerFormatError(
+                "/chroms must be a soft link to /contigs for cooler compatibility"
+            )
+        if link.path.lstrip("/").rsplit("/", 1)[-1] != "contigs":
+            raise MetaCoolerFormatError(
+                f"/chroms soft link must target 'contigs', got {link.path!r}"
+            )
+
+        # --- name uniqueness ---
+        contig_names = np.array(c["name"])
+        genome_names = np.array(g["name"])
+        if len(np.unique(contig_names)) != n_contigs:
+            raise MetaCoolerFormatError("contig names are not unique")
+        if len(np.unique(genome_names)) != n_genomes:
+            raise MetaCoolerFormatError("genome names are not unique")
+
+        # --- attribute consistency ---
+        nchroms_attr = f.attrs.get("nchroms")
+        if nchroms_attr is not None and int(nchroms_attr) != n_contigs:
+            raise MetaCoolerFormatError(
+                f"attrs['nchroms'] ({int(nchroms_attr)}) != len(/contigs) ({n_contigs})"
+            )
+
+        # --- contig lengths must be positive ---
+        if (np.array(c["length"]) <= 0).any():
+            raise MetaCoolerFormatError("contig lengths must be positive (> 0)")
+
+        # --- bins/chrom range and ordering ---
+        bins_chrom = np.array(b["chrom"]).astype(np.int64)
+        if n_bins > 0:
+            if bins_chrom.min() < 0 or bins_chrom.max() >= n_contigs:
+                raise MetaCoolerFormatError(
+                    f"bins/chrom values out of range [0, {n_contigs})"
+                )
+            if np.any(np.diff(bins_chrom) < 0):
+                raise MetaCoolerFormatError("bins are not sorted by contig (chrom)")
+
+        # --- index dataset lengths ---
         if len(idx["chrom_offset"]) != n_contigs + 1:
             raise MetaCoolerFormatError(
                 f"chrom_offset length ({len(idx['chrom_offset'])}) != n_contigs+1 ({n_contigs + 1})"
@@ -169,8 +214,6 @@ def validate(uri: str | Path) -> None:
             raise MetaCoolerFormatError(
                 f"bin1_offset length ({len(idx['bin1_offset'])}) != n_bins+1 ({n_bins + 1})"
             )
-
-        # genome_offset is required and must be consistent
         if "genome_offset" not in idx:
             raise MetaCoolerFormatError("indexes/genome_offset is missing")
         if len(idx["genome_offset"]) != n_genomes + 1:
@@ -178,8 +221,72 @@ def validate(uri: str | Path) -> None:
                 f"genome_offset length ({len(idx['genome_offset'])}) != n_genomes+1 ({n_genomes + 1})"
             )
 
-        # Check pixel ordering on first/last 1000 rows
-        if n_pixels > 1:
+        # --- chrom_offset must be the bin-count CSR over the (sorted) bins ---
+        chrom_offset = np.array(idx["chrom_offset"]).astype(np.int64)
+        expected_chrom = np.zeros(n_contigs + 1, dtype=np.int64)
+        if n_bins > 0:
+            expected_chrom[1:] = np.cumsum(np.bincount(bins_chrom, minlength=n_contigs))
+        if not np.array_equal(chrom_offset, expected_chrom):
+            raise MetaCoolerFormatError(
+                "chrom_offset is inconsistent with the bins table"
+            )
+
+        # --- bin1_offset endpoints must bracket the pixel table ---
+        bin1_offset = np.array(idx["bin1_offset"]).astype(np.int64)
+        if int(bin1_offset[0]) != 0 or int(bin1_offset[-1]) != n_pixels:
+            raise MetaCoolerFormatError(
+                f"bin1_offset endpoints ({int(bin1_offset[0])}, {int(bin1_offset[-1])}) "
+                f"do not bracket the pixel table (0, {n_pixels})"
+            )
+
+        # --- contig genome_ids must be in range ---
+        genome_ids = np.array(c["genome_id"]).astype(np.int64)
+        if genome_ids.min() < 0 or genome_ids.max() >= n_genomes:
+            raise MetaCoolerFormatError(
+                f"genome_id values out of range [0, {n_genomes})"
+            )
+
+        # --- genome_offset must be the contig-count CSR over genomes ---
+        genome_offset = np.array(idx["genome_offset"]).astype(np.int64)
+        genome_contig_counts = np.bincount(genome_ids, minlength=n_genomes)
+        expected_genome = np.zeros(n_genomes + 1, dtype=np.int64)
+        expected_genome[1:] = np.cumsum(genome_contig_counts)
+        if not np.array_equal(genome_offset, expected_genome):
+            raise MetaCoolerFormatError(
+                f"genome_offset {genome_offset.tolist()} is inconsistent with the "
+                f"contig genome_id counts; expected {expected_genome.tolist()}"
+            )
+        # For genome-grouped orderings, contigs must be physically laid out in
+        # ascending genome_id order (otherwise genome_offset — though numerically
+        # consistent with the counts — would not delimit each genome's contigs).
+        ordering = f.attrs.get("contig-ordering")
+        if ordering in ("genome-then-length", "genome-then-alpha") and np.any(
+            np.diff(genome_ids) < 0
+        ):
+            raise MetaCoolerFormatError(
+                f"contig-ordering={ordering!r} requires contigs grouped by ascending "
+                "genome_id, but the genome_id sequence is not non-decreasing, so "
+                "genome_offset does not match the physical contig layout"
+            )
+
+        # --- genomes/n_contigs and n_bins must match reality ---
+        if not np.array_equal(
+            np.array(g["n_contigs"]).astype(np.int64), genome_contig_counts
+        ):
+            raise MetaCoolerFormatError(
+                "genomes/n_contigs does not match the contigs table"
+            )
+        if n_bins > 0:
+            genome_bin_counts = np.bincount(genome_ids[bins_chrom], minlength=n_genomes)
+        else:
+            genome_bin_counts = np.zeros(n_genomes, dtype=np.int64)
+        if not np.array_equal(
+            np.array(g["n_bins"]).astype(np.int64), genome_bin_counts
+        ):
+            raise MetaCoolerFormatError("genomes/n_bins does not match the bins table")
+
+        # --- pixel ordering, range, and upper-triangle (sampled first/last rows) ---
+        if n_pixels > 0:
             sample_size = min(1000, n_pixels)
             for sl in (
                 slice(0, sample_size),
@@ -187,19 +294,20 @@ def validate(uri: str | Path) -> None:
             ):
                 b1 = np.array(p["bin1_id"][sl])
                 b2 = np.array(p["bin2_id"][sl])
-                if not np.all(
+                if b1.min() < 0 or b2.max() >= n_bins:
+                    raise MetaCoolerFormatError(
+                        f"pixel bin ids out of range [0, {n_bins})"
+                    )
+                if np.any(b1 > b2):
+                    raise MetaCoolerFormatError(
+                        "pixels are not upper-triangular (bin1_id <= bin2_id)"
+                    )
+                if len(b1) > 1 and not np.all(
                     (b1[:-1] < b1[1:]) | ((b1[:-1] == b1[1:]) & (b2[:-1] <= b2[1:]))
                 ):
                     raise MetaCoolerFormatError(
                         "pixels are not sorted by (bin1_id, bin2_id)"
                     )
-
-        # contig genome_ids must be in range
-        genome_ids = np.array(c["genome_id"])
-        if genome_ids.min() < 0 or genome_ids.max() >= n_genomes:
-            raise MetaCoolerFormatError(
-                f"genome_id values out of range [0, {n_genomes})"
-            )
 
 
 # ------------------------------------------------------------------
@@ -320,9 +428,13 @@ def read_table(uri: str | Path, group: str) -> pd.DataFrame:
         for key in g:
             ds = g[key]
             data = ds[:]
-            # Decode fixed-length byte strings to str (like cooler)
+            # Decode fixed-length byte strings to str (like cooler). Use an
+            # explicit UTF-8 decode: ``astype("U")`` decodes as ASCII and raises
+            # UnicodeDecodeError on any non-ASCII byte (e.g. a "é" in a name),
+            # which would break every read of a file that metacooler itself
+            # wrote.
             if data.dtype.kind == "S":
-                data = data.astype("U")
+                data = np.char.decode(data, "utf-8")
             elif data.dtype == object and len(data) > 0 and isinstance(data[0], bytes):
                 data = np.array([x.decode("utf-8") for x in data])
             columns[key] = data
