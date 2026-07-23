@@ -407,23 +407,6 @@ class MetaCooler:
                     f"Genome {g!r} not found. Available: {genomes['name'].tolist()}"
                 )
 
-        s1, e1 = self.genome_extent(g1)
-        s2, e2 = self.genome_extent(g2)
-
-        # Determine the pixel range to scan (contiguous region in the upper triangle)
-        lo = min(s1, s2)
-        hi = max(e1, e2)
-
-        chunks = []
-        chunksize = 1_000_000
-        n_pix = self.info["nnz"]
-        # Use bin1_offset index to find the pixel range for bins [lo, hi)
-        with h5py.File(self._store, "r") as f:
-            root = f[self._group_path.lstrip("/")] if self._group_path != "/" else f
-            bin1_offset = root["indexes"]["bin1_offset"][:]
-        pix_lo = int(bin1_offset[lo])
-        pix_hi = int(bin1_offset[hi]) if hi < len(bin1_offset) else n_pix
-
         bins = self._bins_cache
         bin_to_contig = bins["chrom"].cat.codes.values
 
@@ -437,6 +420,25 @@ class MetaCooler:
         valid2 = np.where(np.isin(bin_to_contig, list(cids2)))[0]
         set1 = set(valid1.tolist())
         set2 = set(valid2.tolist())
+
+        # Bounding bin range over both genomes. Computed from bin membership
+        # (not genome_extent) so it works even when a genome's bins are not
+        # contiguous under the file's ordering.
+        all_valid = np.concatenate([valid1, valid2])
+        if all_valid.size == 0:
+            return pd.DataFrame(columns=["bin1_id", "bin2_id", "count"])
+        lo = int(all_valid.min())
+        hi = int(all_valid.max()) + 1
+
+        chunks = []
+        chunksize = 1_000_000
+        n_pix = self.info["nnz"]
+        # Use bin1_offset index to find the pixel range for bins [lo, hi)
+        with h5py.File(self._store, "r") as f:
+            root = f[self._group_path.lstrip("/")] if self._group_path != "/" else f
+            bin1_offset = root["indexes"]["bin1_offset"][:]
+        pix_lo = int(bin1_offset[lo])
+        pix_hi = int(bin1_offset[hi]) if hi < len(bin1_offset) else n_pix
 
         for i in range(pix_lo, pix_hi, chunksize):
             chunk = self._clr.pixels()[i : i + chunksize]
@@ -453,17 +455,17 @@ class MetaCooler:
     # ------------------------------------------------------------------
     # Extent helpers
     # ------------------------------------------------------------------
-    def genome_extent(self, genome: str) -> tuple[int, int]:
-        """Return the half-open bin-index range for all bins in *genome*.
+    def genome_bin_ids(self, genome: str) -> np.ndarray:
+        """Return the sorted array of bin indices belonging to *genome*.
+
+        Selection is by contig membership, so it is correct regardless of the
+        file's contig ordering (the bins need not be contiguous).
 
         Args:
-            genome: Name of the genome as it appears in the ``/genomes``
-                table.
+            genome: Name of the genome as it appears in the ``/genomes`` table.
 
         Returns:
-            ``(lo, hi)`` — half-open integer interval such that bins
-            ``[lo, hi)`` all belong to *genome*.  Returns ``(0, 0)`` if
-            *genome* has no bins.
+            1-D ``int64`` array of bin indices (possibly empty).
 
         Raises:
             KeyError: If *genome* is not present in this file.
@@ -477,10 +479,47 @@ class MetaCooler:
         gid = genomes.loc[genomes["name"] == genome].index[0]
         cids = contigs.index[contigs["genome_id"] == gid].tolist()
         bins = self.bins()
-        sel = bins[bins["chrom"].cat.codes.isin(cids)]
-        if sel.empty:
+        return bins.index[bins["chrom"].cat.codes.isin(cids)].to_numpy(dtype=np.int64)
+
+    def genome_extent(self, genome: str) -> tuple[int, int]:
+        """Return the half-open bin-index range for all bins in *genome*.
+
+        This is only well-defined when the genome's bins form one contiguous
+        block — i.e. the file uses a genome-grouped contig ordering
+        (``genome-then-length`` / ``genome-then-alpha``, the default).  For
+        non-grouped orderings (``fasta``, ``alpha``, ``cool``) a genome's
+        contigs may be interleaved with others', so a single bin interval would
+        silently include foreign bins; in that case this method raises rather
+        than return a misleading range.
+
+        Args:
+            genome: Name of the genome as it appears in the ``/genomes``
+                table.
+
+        Returns:
+            ``(lo, hi)`` — half-open integer interval such that bins
+            ``[lo, hi)`` all belong to *genome*.  Returns ``(0, 0)`` if
+            *genome* has no bins.
+
+        Raises:
+            KeyError: If *genome* is not present in this file.
+            ValueError: If the genome's bins are not contiguous under the
+                file's contig ordering.
+        """
+        ids = self.genome_bin_ids(genome)
+        if ids.size == 0:
             return (0, 0)
-        return (int(sel.index[0]), int(sel.index[-1]) + 1)
+        lo, hi = int(ids[0]), int(ids[-1]) + 1
+        if hi - lo != ids.size:
+            ordering = self.info.get("ordering")
+            raise ValueError(
+                f"Genome {genome!r} is not contiguous in bin space under "
+                f"contig-ordering {ordering!r}; a single bin range cannot "
+                f"represent it. Re-create the file with a genome-grouped "
+                f"ordering (genome-then-length/genome-then-alpha), or select by "
+                f"contig membership (e.g. 'dump --genomes' / 'extract --genomes')."
+            )
+        return (lo, hi)
 
     def contig_extent(self, contig: str) -> tuple[int, int]:
         """Return the half-open bin-index range for all bins in *contig*.
