@@ -42,6 +42,7 @@ def dump_table(
     prefix: str | None = None,
     pixels_format: Literal["long", "wide"] = "long",
     weight: str = "count",
+    join: bool = False,
 ) -> None:
     """Dump a metacooler table to TSV.
 
@@ -59,6 +60,11 @@ def dump_table(
         prefix: Required when ``table="all"``. File prefix for output files.
         pixels_format: ``"long"`` (default) or ``"wide"`` (2D matrix).
         weight: Column name for wide format values (default: ``"count"``).
+        join: Annotate pixel output with contig names and coordinates.  For
+            ``pixels_format="long"`` this replaces ``bin1_id``/``bin2_id`` with
+            ``contig1/start1/end1``/``contig2/start2/end2`` (cooler ``--join``
+            semantics); for ``"wide"`` it labels the matrix rows/columns with
+            ``contig:start-end``.  Applied only when ``table="pixels"``.
     """
     # Merge single/multi genome/contig filters
     genome_list = list(genomes) if genomes else []
@@ -68,7 +74,9 @@ def dump_table(
     if table == "all":
         if not prefix:
             raise ValueError("--prefix is required when --table all is specified.")
-        for tbl in ("genomes", "contigs", "bins", "pixels"):
+        # ``chroms`` is intentionally omitted: it is the cooler soft-link alias
+        # of ``contigs[["name", "length"]]`` and would duplicate the contigs file.
+        for tbl in ("genomes", "contigs", "bins", "pixels", "indexes"):
             out_path = Path(f"{prefix}.{tbl}.tsv")
             dump_table(
                 uri=uri,
@@ -81,6 +89,7 @@ def dump_table(
                 out=out_path,
                 pixels_format=pixels_format,
                 weight=weight,
+                join=join,
             )
         return
 
@@ -93,6 +102,7 @@ def dump_table(
             contigs=contig_list or None,
         )
 
+    write_index = False
     if table == "bins":
         df = mc.bins()
         if selected_contig_ids is not None:
@@ -103,15 +113,22 @@ def dump_table(
         df["chrom"] = _decode_chrom(df["chrom"])
     elif table == "chroms":
         df = mc.contigs[["name", "length"]]
-    elif table == "contigs":
-        df = mc.contigs
         if selected_contig_ids is not None:
             df = df.loc[df.index.isin(selected_contig_ids)]
-        core = ["name", "length", "genome_id"]
+    elif table == "contigs":
+        df = mc.contigs.copy()
+        if selected_contig_ids is not None:
+            df = df.loc[df.index.isin(selected_contig_ids)]
+        # Surface the genome/MAG name alongside the internal integer genome_id.
+        df["genome"] = df["genome_id"].map(mc.genomes["name"])
+        core = ["name", "length", "genome", "genome_id"]
         extras = [c for c in df.columns if c not in core]
         df = df[core + extras]
     elif table == "genomes":
         df = mc.genomes
+        if selected_contig_ids is not None:
+            sel_genome_ids = set(mc.contigs.loc[list(selected_contig_ids), "genome_id"])
+            df = df.loc[df.index.isin(sel_genome_ids)]
         core = ["name", "length", "n_contigs"]
         extras = [c for c in df.columns if c not in core]
         df = df[core + extras]
@@ -173,9 +190,45 @@ def dump_table(
             vals = df[weight].values.astype(np.float64)
             mat[b1, b2] = vals
             mat[b2, b1] = vals
-            df = pd.DataFrame(mat)
+            if join:
+                bdf = mc.bins()
+                chrom = _decode_chrom(bdf["chrom"]).astype(str).to_numpy()
+                labels = [
+                    f"{c}:{s}-{e}"
+                    for c, s, e in zip(
+                        chrom,
+                        bdf["start"].to_numpy(),
+                        bdf["end"].to_numpy(),
+                        strict=False,
+                    )
+                ]
+                df = pd.DataFrame(mat, index=labels, columns=labels)
+                write_index = True
+            else:
+                df = pd.DataFrame(mat)
         else:
             # Long format: stream pixel chunks to output without full materialisation
+            ann: pd.DataFrame | None = None
+            joined_empty_cols: list[str] | None = None
+            if join:
+                import cooler
+
+                ann = mc.bins()[["chrom", "start", "end"]].copy()
+                ann["chrom"] = _decode_chrom(ann["chrom"])
+                pixel_cols = [
+                    c
+                    for c in mc._clr.pixels()[:0].columns
+                    if c not in ("bin1_id", "bin2_id")
+                ]
+                joined_empty_cols = [
+                    "contig1",
+                    "start1",
+                    "end1",
+                    "contig2",
+                    "start2",
+                    "end2",
+                    *pixel_cols,
+                ]
             out_stream = open(out, "w") if out else sys.stdout  # noqa: SIM115
             try:
                 first_chunk = True
@@ -195,6 +248,15 @@ def dump_table(
                         in_row2 = chunk["bin1_id"].between(j0, j1 - 1)
                         in_col2 = chunk["bin2_id"].between(i0, i1 - 1)
                         chunk = chunk[(in_row & in_col) | (in_row2 & in_col2)]
+                    if join:
+                        assert ann is not None
+                        if len(chunk):
+                            assert isinstance(chunk, pd.DataFrame)
+                            chunk = cooler.api.annotate(
+                                chunk, ann, replace=True
+                            ).rename(columns={"chrom1": "contig1", "chrom2": "contig2"})
+                        else:
+                            chunk = pd.DataFrame(columns=joined_empty_cols)
                     chunk.to_csv(
                         out_stream,
                         sep="\t",
@@ -207,10 +269,8 @@ def dump_table(
                     out_stream.close()
             return
     elif table == "indexes":
-        import h5py
-
         rows = []
-        with h5py.File(mc._store, "r") as f:
+        with mc.open() as f:
             idx = f["indexes"]
             for key in idx:
                 arr = idx[key][:]
@@ -222,6 +282,8 @@ def dump_table(
 
     if out:
         with open(out, "w") as out_stream:
-            df.to_csv(out_stream, sep="\t", index=False, header=header)
+            df.to_csv(
+                out_stream, sep="\t", index=write_index, header=header or write_index
+            )
     else:
-        df.to_csv(sys.stdout, sep="\t", index=False, header=header)
+        df.to_csv(sys.stdout, sep="\t", index=write_index, header=header or write_index)

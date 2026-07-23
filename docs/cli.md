@@ -216,20 +216,28 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 | `--prefix` | — | Filename prefix; **required** with `-t all`. |
 | `--pixels-format` | `long` | `long` (row per pixel) or `wide` (2-D matrix). |
 | `--weight` | `count` | Value column for `wide` format. |
+| `--join` | off | Annotate pixels with contig names + coordinates (pixels only). |
 | `-r, --range` | — | Row range (pixels only): genome name, contig name, or `contig:start-end`. |
 | `-r2, --range2` | — | Column range (pixels only); defaults to `--range`. |
+
+`-t contigs` adds a `genome` column next to the internal
+`genome_id`, and `-t genomes`/`-t chroms` respect `--genomes`/`--contigs`.
 
 ```bash
 # Genomes table with header
 metacooler dump gut_T0.metacool -t genomes -H
 
-# Contigs of one MAG
+# Contigs of one MAG (the `genome` column holds the MAG name)
 metacooler dump gut_T0.metacool -t contigs --genomes MAG_01 -H
 
 # Pixels within a genomic range
 metacooler dump gut_T0.metacool -t pixels --range contig_0_0:0-50000
 
-# Every table at once → gut_T0.{genomes,contigs,bins,pixels}.tsv
+# Pixels annotated with contig names + coordinates (cooler --join style)
+# → contig1  start1  end1  contig2  start2  end2  count
+metacooler dump gut_T0.metacool -t pixels --join -H
+
+# Every table at once → gut_T0.{genomes,contigs,bins,pixels,indexes}.tsv
 metacooler dump gut_T0.metacool -t all --prefix gut_T0
 ```
 

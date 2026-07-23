@@ -30,7 +30,10 @@ def _parse_comma_list(ctx, param, value):
     ),
     default="pixels",
     show_default=True,
-    help="Which table to dump ('bins', 'contigs', 'genomes', 'pixels', 'indexes'). Use 'all' to dump all tables.",
+    help=(
+        "Which table to dump ('chroms', 'bins', 'contigs', 'genomes', 'pixels', "
+        "'indexes'). Use 'all' to dump every table."
+    ),
 )
 @click.option(
     "--genomes",
@@ -79,6 +82,17 @@ def _parse_comma_list(ctx, param, value):
     help="Column name for wide format values.",
 )
 @click.option(
+    "--join",
+    is_flag=True,
+    default=False,
+    help=(
+        "Annotate pixels with contig names and coordinates. Long format replaces "
+        "bin1_id/bin2_id with contig1/start1/end1 and contig2/start2/end2; wide "
+        "format labels the matrix rows/columns with contig:start-end. "
+        "Applied only when --table pixels."
+    ),
+)
+@click.option(
     "-r",
     "--range",
     "range1",
@@ -115,6 +129,7 @@ def dump(
     prefix: str | None,
     pixels_format: str,
     weight: str,
+    join: bool,
     range1: str | None,
     range2: str | None,
     verbose: bool,
@@ -143,4 +158,5 @@ def dump(
         prefix=prefix,
         pixels_format=cast(Literal["long", "wide"], pixels_format),
         weight=weight,
+        join=join,
     )

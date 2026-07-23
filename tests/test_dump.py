@@ -22,7 +22,10 @@ class TestDumpTable:
         dump_table(tiny_metacooler, "contigs", header=True, out=out)
         result = out.read_text()
         assert "contig_A" in result
+        # The genome name is surfaced alongside the internal integer genome_id.
+        assert "genome" in result
         assert "genome_id" in result
+        assert "MAG_1" in result
 
     def test_dump_bins(self, tiny_metacooler, tmp_path):
         out = tmp_path / "out.tsv"
@@ -46,8 +49,10 @@ class TestDumpTable:
         out = tmp_path / "out.tsv"
         dump_table(tiny_metacooler, "genomes", genomes=["MAG_1"], header=True, out=out)
         result = out.read_text()
-        # genomes table doesn't have per-genome filtering, just returns all
-        assert "name" in result
+        # --genomes restricts the genomes table to the requested MAG(s) only.
+        assert "MAG_1" in result
+        assert "MAG_2" not in result
+        assert "__unbinned__" not in result
 
     def test_dump_no_header(self, tiny_metacooler, tmp_path):
         out = tmp_path / "out.tsv"
@@ -168,7 +173,7 @@ class TestDumpTable:
     def test_dump_all_creates_files(self, tiny_metacooler, tmp_path):
         prefix = str(tmp_path / "dump_all")
         dump_table(tiny_metacooler, "all", prefix=prefix)
-        for tbl in ("genomes", "contigs", "bins", "pixels"):
+        for tbl in ("genomes", "contigs", "bins", "pixels", "indexes"):
             f = Path(f"{prefix}.{tbl}.tsv")
             assert f.exists(), f"Missing: {f}"
 
@@ -193,14 +198,15 @@ class TestDumpTable:
         assert "__unbinned__" in captured.out
 
     def test_dump_contigs_core_columns_first(self, tiny_metacooler, tmp_path):
-        """Core columns (name, length, genome_id) appear before extra columns."""
+        """Core columns (name, length, genome, genome_id) precede extra columns."""
         out = tmp_path / "contigs.tsv"
         dump_table(tiny_metacooler, "contigs", header=True, out=out)
         lines = out.read_text().strip().split("\n")
         header = lines[0].split("\t")
         assert header[0] == "name"
         assert header[1] == "length"
-        assert header[2] == "genome_id"
+        assert header[2] == "genome"
+        assert header[3] == "genome_id"
 
     def test_dump_genomes_core_columns_first(self, tiny_metacooler, tmp_path):
         """Core columns (name, length, n_contigs) appear before extra columns."""
@@ -238,3 +244,60 @@ class TestDumpTable:
             pytest.raises(ValueError, match="Wide format refuses"),
         ):
             dump_table(tiny_metacooler, "pixels", pixels_format="wide", out=out)
+
+    def test_dump_contigs_shows_genome_name_and_id(self, tiny_metacooler, tmp_path):
+        """The genome NAME is surfaced alongside the internal integer genome_id."""
+        import pandas as pd
+
+        out = tmp_path / "contigs.tsv"
+        dump_table(tiny_metacooler, "contigs", header=True, out=out)
+        df = pd.read_csv(out, sep="\t")
+        assert "genome" in df.columns
+        assert "genome_id" in df.columns
+        # The genome column holds names, not indices.
+        assert set(df["genome"]) <= {"MAG_1", "MAG_2", "__unbinned__"}
+        assert pd.api.types.is_integer_dtype(df["genome_id"])
+        # contig_D is unassigned -> __unbinned__ (a name, not an id).
+        row = df.loc[df["name"] == "contig_D"].iloc[0]
+        assert row["genome"] == "__unbinned__"
+
+    def test_dump_indexes_mmetacool_entry(self, tiny_mmetacool):
+        """dump -t indexes must honor the URI group path (mmetacool entry)."""
+        uri = f"{tiny_mmetacool}::entries/entry1"
+        # Regression: previously opened the file root and raised KeyError.
+        dump_table(uri, "indexes", header=True)
+
+    def test_dump_chroms_filtered_by_contig(self, tiny_metacooler, tmp_path):
+        out = tmp_path / "chroms.tsv"
+        dump_table(tiny_metacooler, "chroms", contigs=["contig_A"], out=out)
+        lines = [ln for ln in out.read_text().strip().split("\n") if ln]
+        assert len(lines) == 1
+        assert "contig_A" in lines[0]
+
+    def test_dump_pixels_join_long(self, tiny_metacooler, tmp_path):
+        import pandas as pd
+
+        out = tmp_path / "pix_join.tsv"
+        dump_table(tiny_metacooler, "pixels", join=True, header=True, out=out)
+        df = pd.read_csv(out, sep="\t")
+        assert list(df.columns) == [
+            "contig1",
+            "start1",
+            "end1",
+            "contig2",
+            "start2",
+            "end2",
+            "count",
+        ]
+        assert "bin1_id" not in df.columns
+        known = {"contig_A", "contig_B", "contig_C", "contig_D"}
+        assert set(df["contig1"]) <= known
+        assert set(df["contig2"]) <= known
+
+    def test_dump_pixels_join_wide_labels(self, tiny_metacooler, tmp_path):
+        out = tmp_path / "pix_join_wide.tsv"
+        dump_table(tiny_metacooler, "pixels", pixels_format="wide", join=True, out=out)
+        result = out.read_text()
+        # Rows and columns are labeled with contig:start-end, not bare integers.
+        assert "contig_A:0-100" in result
+        assert "contig_D:" in result

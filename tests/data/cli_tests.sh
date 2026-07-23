@@ -103,7 +103,7 @@ metacooler ls assembly_1_DpnII.mmetacool
 # different, but the order of rows in each table HAS to be identical when using
 # `--contig-order cool`
 
-metacooler create cool --force --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv --output assembly_1_rep1_1kb_from_cool.metacool --cool ../assembly_1_rep1_1kb.cool
+metacooler create cool --force --contig-order cool --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv --output assembly_1_rep1_1kb_from_cool.metacool --cool ../assembly_1_rep1_1kb.cool
 metacooler flatten --force assembly_1_rep1_1kb_from_cool.metacool -o assembly_1_rep1_1kb_from_cool_flat.cool
 cooler info ../assembly_1_rep1_1kb.cool
 cooler info assembly_1_rep1_1kb_from_cool_flat.cool
@@ -119,21 +119,33 @@ metacooler dump -t contigs assembly_1_rep1_1kb_from_cool.metacool > dump_contigs
 metacooler dump -t indexes assembly_1_rep1_1kb_from_cool.metacool > dump_indexes_metacool
 metacooler dump -t all assembly_1_rep1_1kb_from_cool.metacool --prefix dump_all_
 
+## --table contigs resolves the genome reference to the MAG NAME (not an integer id):
+## the third column should read MAG names / __unbinned__, never 0,1,2,...
+metacooler dump -t contigs -H assembly_1_rep1_1kb_from_cool.metacool | head -n 5
+
+## --join annotates pixel dumps with contig names + coordinates (cooler --join style).
+## Long: header is `contig1 start1 end1 contig2 start2 end2 count`.
+metacooler dump -t pixels --join -H assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_join_metacool
+head -n 5 dump_pixels_join_metacool
+## For reference, cooler's own --join on the source cool (columns chrom1/2 == contig1/2).
+cooler dump -t pixels --join -H ../assembly_1_rep1_1kb.cool > dump_pixels_join_cool
+head -n 5 dump_pixels_join_cool
+
 md5sum dump_*
 
-cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_0_0:5000-15000 > dump_pixels_range_cool_original
-metacooler dump -t pixels -r contig_0_0:5000-15000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range_metacool
-cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_0_0:5000-15000 > dump_pixels_range_cool_round_trip
+cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_1_000:5000-15000 > dump_pixels_range_cool_original
+metacooler dump -t pixels -r contig_1_000:5000-15000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range_metacool
+cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_1_000:5000-15000 > dump_pixels_range_cool_round_trip
 md5sum dump_pixels_range_*
 
-cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_0_0:5000-15000  -r2 contig_0_1:0-10000 > dump_pixels_range2_cool_original
-metacooler dump -t pixels -r contig_0_0:5000-15000  -r2 contig_0_1:0-10000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range2_metacool
-cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_0_0:5000-15000  -r2 contig_0_1:0-10000 > dump_pixels_range2_cool_round_trip
+cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_1_000:5000-15000  -r2 contig_1_001:0-10000 > dump_pixels_range2_cool_original
+metacooler dump -t pixels -r contig_1_000:5000-15000  -r2 contig_1_001:0-10000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range2_metacool
+cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_1_000:5000-15000  -r2 contig_1_001:0-10000 > dump_pixels_range2_cool_round_trip
 md5sum dump_pixels_range2_*
 
-cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_0_0 > dump_pixels_range0_cool_original
-metacooler dump -t pixels -r contig_0_0 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range0_metacool
-cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_0_0 > dump_pixels_range0_cool_round_trip
+cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_1_000 > dump_pixels_range0_cool_original
+metacooler dump -t pixels -r contig_1_000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range0_metacool
+cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_1_000 > dump_pixels_range0_cool_round_trip
 md5sum dump_pixels_range0_*
 
 # ================================================================================
@@ -143,9 +155,9 @@ md5sum dump_pixels_range0_*
 metacooler extract --force --output MAG_05.cool --genomes MAG_05 assembly_1_rep1_1kb.metacool
 metacooler extract --force --output MAG_05-06.cool --genomes MAG_05,MAG_06 assembly_1_rep1_1kb.metacool
 metacooler extract --force --output MAGs --split --genomes MAG_05,MAG_06 assembly_1_rep1_1kb.metacool
-metacooler extract --force --output contig_0_0.cool --contigs contig_0_0 assembly_1_rep1_1kb.metacool
-metacooler extract --force --output contig_0_0-1_0.cool --contigs contig_0_0,contig_1_0 assembly_1_rep1_1kb.metacool
-metacooler extract --force --output contigs.cool --split --contigs contig_0_0,contig_1_0 assembly_1_rep1_1kb.metacool
+metacooler extract --force --output contig_1_000.cool --contigs contig_1_000 assembly_1_rep1_1kb.metacool
+metacooler extract --force --output contig_1_000-1_001.cool --contigs contig_1_000,contig_1_001 assembly_1_rep1_1kb.metacool
+metacooler extract --force --output contigs.cool --split --contigs contig_1_000,contig_1_001 assembly_1_rep1_1kb.metacool
 
 metacooler attrs assembly_1_DpnII.mmetacool
 
@@ -191,7 +203,7 @@ metacooler binnify --binsize 5000 --output assembly_1kb_5kb_2.metacool assembly_
 metacooler info assembly_1_rep1_DpnII.metacool
 metacooler info assembly_1kb_5kb_2.metacool
 
-metacooler binnify --binsize 5000 --level genomes --output assembly_1kb_5kb_3.metacool assembly_1_rep1_DpnII.metacool
+metacooler binnify --binsize 5000 --level genome --output assembly_1kb_5kb_3.metacool assembly_1_rep1_DpnII.metacool
 metacooler info assembly_1kb_5kb_3.metacool
 
 # ================================================================================

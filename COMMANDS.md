@@ -193,9 +193,18 @@ Key options:
 | `--prefix` | — | Filename prefix (required when `--table all`; `--output` is ignored). |
 | `--pixels-format` | `long` | Pixel format: `long` (row-per-pixel) or `wide` (2-D matrix). |
 | `--weight` | `count` | Column to use as matrix values when `--pixels-format wide`. |
+| `--join` | off | Annotate pixel output with contig names + coordinates (only with `-t pixels`). |
 
 Notes:
-- `--table all` writes `.genomes.tsv`, `.contigs.tsv`, `.bins.tsv`, and `.pixels.tsv` under `--prefix`; the `indexes` group is not dumped.
+- `-t contigs` adds a `genome` column with the **MAG name** next to the internal
+  integer `genome_id`, so the dump is self-describing while keeping the id for joins.
+- `-t genomes` / `-t chroms` honour `--genomes`/`--contigs` and restrict their output
+  to the matching rows.
+- `--join` (long) replaces `bin1_id`/`bin2_id` with `contig1/start1/end1` and
+  `contig2/start2/end2` (cooler `--join` semantics; columns renamed `chrom→contig`);
+  `--join` (wide) labels the matrix rows/columns with `contig:start-end`.
+- `--table all` writes `.genomes.tsv`, `.contigs.tsv`, `.bins.tsv`, `.pixels.tsv`, and
+  `.indexes.tsv` under `--prefix`; `chroms` is omitted (it duplicates `contigs`).
 - `--weight` is only meaningful with `--pixels-format wide`.
 
 ---

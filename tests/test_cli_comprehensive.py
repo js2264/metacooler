@@ -71,30 +71,31 @@ EXPECTED_GENOMES_ROWS: list[tuple] = [
     ("MAG_10", "25000", "3", "25", "Proteobacteria", "0.99", "0.42", "medium"),
 ]
 
-# First 20 contig rows (name, length, genome_id, gc_content, coverage).
-# Contigs are laid out grouped by genome_id: __unbinned__ (genome_id 0) first,
-# then MAG_01, MAG_02, … — longest contig first within each genome.
+# First 20 contig rows (name, length, genome, genome_id, gc_content, coverage).
+# Contigs are laid out grouped by genome: __unbinned__ (genome_id 0) first, then
+# MAG_01 (1), MAG_02 (2), … — longest contig first within each genome.  The
+# genome column holds the MAG name; genome_id keeps the internal integer index.
 EXPECTED_CONTIGS_ROWS_20: list[tuple] = [
-    ("contig_1_010", "12000", "0", "0.5", "91.35"),
-    ("contig_1_035", "9000", "0", "0.54", "63.57"),
-    ("contig_1_032", "8000", "0", "0.41", "87.76"),
-    ("contig_1_015", "7000", "0", "0.47", "72.0"),
-    ("contig_1_003", "6000", "0", "0.52", "8.28"),
-    ("contig_1_023", "25000", "1", "0.42", "66.93"),
-    ("contig_1_036", "22000", "1", "0.56", "37.79"),
-    ("contig_1_012", "13000", "1", "0.49", "45.37"),
-    ("contig_1_005", "50000", "2", "0.56", "63.69"),
-    ("contig_1_034", "50000", "2", "0.41", "28.51"),
-    ("contig_1_001", "12000", "2", "0.59", "75.43"),
-    ("contig_1_020", "12000", "2", "0.57", "35.01"),
-    ("contig_1_029", "27000", "3", "0.54", "11.43"),
-    ("contig_1_019", "23000", "3", "0.51", "10.62"),
-    ("contig_1_027", "10000", "3", "0.44", "74.74"),
-    ("contig_1_030", "10000", "3", "0.58", "67.79"),
-    ("contig_1_033", "10000", "3", "0.58", "59.19"),
-    ("contig_1_000", "18000", "4", "0.51", "99.4"),
-    ("contig_1_002", "3000", "4", "0.45", "8.81"),
-    ("contig_1_037", "3000", "4", "0.6", "93.22"),
+    ("contig_1_010", "12000", "__unbinned__", "0", "0.5", "91.35"),
+    ("contig_1_035", "9000", "__unbinned__", "0", "0.54", "63.57"),
+    ("contig_1_032", "8000", "__unbinned__", "0", "0.41", "87.76"),
+    ("contig_1_015", "7000", "__unbinned__", "0", "0.47", "72.0"),
+    ("contig_1_003", "6000", "__unbinned__", "0", "0.52", "8.28"),
+    ("contig_1_023", "25000", "MAG_01", "1", "0.42", "66.93"),
+    ("contig_1_036", "22000", "MAG_01", "1", "0.56", "37.79"),
+    ("contig_1_012", "13000", "MAG_01", "1", "0.49", "45.37"),
+    ("contig_1_005", "50000", "MAG_02", "2", "0.56", "63.69"),
+    ("contig_1_034", "50000", "MAG_02", "2", "0.41", "28.51"),
+    ("contig_1_001", "12000", "MAG_02", "2", "0.59", "75.43"),
+    ("contig_1_020", "12000", "MAG_02", "2", "0.57", "35.01"),
+    ("contig_1_029", "27000", "MAG_03", "3", "0.54", "11.43"),
+    ("contig_1_019", "23000", "MAG_03", "3", "0.51", "10.62"),
+    ("contig_1_027", "10000", "MAG_03", "3", "0.44", "74.74"),
+    ("contig_1_030", "10000", "MAG_03", "3", "0.58", "67.79"),
+    ("contig_1_033", "10000", "MAG_03", "3", "0.58", "59.19"),
+    ("contig_1_000", "18000", "MAG_04", "4", "0.51", "99.4"),
+    ("contig_1_002", "3000", "MAG_04", "4", "0.45", "8.81"),
+    ("contig_1_037", "3000", "MAG_04", "4", "0.6", "93.22"),
 ]
 
 # First 20 chrom rows (name, length) – same order as contigs
@@ -823,9 +824,10 @@ class TestDump:
         header = tuple(result.output.strip().split("\n")[0].split("\t"))
         assert header[0] == "name"
         assert header[1] == "length"
-        assert header[2] == "genome_id"
-        assert header[3] == "gc_content"
-        assert header[4] == "coverage"
+        assert header[2] == "genome"
+        assert header[3] == "genome_id"
+        assert header[4] == "gc_content"
+        assert header[5] == "coverage"
 
     def test_dump_chroms_exact_first_20_rows(self, runner, a1_rep1_1kb):
         """First 20 chroms rows match contigs ordering (name, length)."""
