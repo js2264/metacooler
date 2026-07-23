@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from pathlib import Path
@@ -52,8 +53,11 @@ def network(
     n_pix = len(mc._clr.pixels())
 
     if level == "bin":
-        # Raw pixel edge list — stream chunks directly to output file
-        with open(out, "w") if out else sys.stdout as fout:
+        # Raw pixel edge list — stream chunks directly to output file.
+        # Wrap stdout in nullcontext so the ``with`` block does not close it
+        # (closing sys.stdout would break any later output in the process).
+        cm = open(out, "w") if out else contextlib.nullcontext(sys.stdout)  # noqa: SIM115
+        with cm as fout:
             if header:
                 fout.write("node1\tnode2\tvalue\n")
             for lo in range(0, n_pix, chunksize):
