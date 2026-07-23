@@ -99,6 +99,16 @@ def binnify(
     if new_bins.empty:
         raise ValueError("No bins generated. Check input data.")
 
+    # Sort bins into canonical (contig-id, start) order so the bin row order
+    # matches the /contigs table order. ``chrom`` here is the integer contig id
+    # (row index into /contigs). Without this, at level="genome" the bins are
+    # emitted in genome-iteration order; cooler then factorises bins/chrom by
+    # first-appearance into that order, which mismatches the /contigs table
+    # written by _finalize_metacool_file, scrambling every bin's contig label.
+    new_bins = new_bins.sort_values(["chrom", "start"], kind="stable").reset_index(
+        drop=True
+    )
+
     # Build mapping: old bin → new bin (using midpoint assignment)
     old_midpoints = (old_bins["start"].values + old_bins["end"].values) / 2
     old_chroms = bin_chrom_codes
@@ -268,9 +278,13 @@ def _write_rebinned_metacool(
     chrom_counts = np.bincount(bin_chrom_codes, minlength=len(contig_names))
     chrom_offset = np.concatenate([[0], np.cumsum(chrom_counts)]).astype(np.int64)
 
+    # genome_offset indexes the /contigs table (CSR over contigs), so it must
+    # count CONTIGS per genome — not bins. Counting bins would produce offsets
+    # running up to n_bins, i.e. out-of-range indices into the contigs table.
     contig_genome_ids = contigs["genome_id"].values
-    bin_genome_ids = contig_genome_ids[bin_chrom_codes]
-    genome_counts = np.bincount(bin_genome_ids.astype(np.int64), minlength=len(genomes))
+    genome_counts = np.bincount(
+        contig_genome_ids.astype(np.int64), minlength=len(genomes)
+    )
     genome_offset = np.concatenate([[0], np.cumsum(genome_counts)]).astype(np.int64)
 
     # Create the cooler first; the generator yields one pre-sorted, aggregated DataFrame
