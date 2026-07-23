@@ -183,12 +183,12 @@ class TestParseContigsTableEdgeCases:
         assert mapping == {}
         assert len(df) == 0
 
-    def test_contig_genome_empty_returns_empty_mapping(self, tmp_path):
-        """contig_genome file with no rows gives empty mapping."""
+    def test_contig_genome_empty_raises(self, tmp_path):
+        """An empty (0-byte) contig table raises a clear, branded error."""
         path = tmp_path / "empty.tsv"
         path.write_text("")
-        mapping, df = parse_contigs_table(path, fmt="contig_genome")
-        assert mapping == {}
+        with pytest.raises(ValueError, match="Contig table is empty"):
+            parse_contigs_table(path, fmt="contig_genome")
 
     def test_metator_preserves_extra_columns(self, tmp_path):
         """metator format keeps columns beyond Name and Final_bin."""

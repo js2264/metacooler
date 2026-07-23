@@ -5,9 +5,12 @@ metadata file that describes which genomes are present in a metagenomic
 Hi-C dataset.
 """
 
+import logging
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger("metacooler")
 
 
 def parse_genomes_table(path: str | Path) -> pd.DataFrame:
@@ -32,6 +35,8 @@ def parse_genomes_table(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Genomes table not found: {path}")
+    if path.stat().st_size == 0:
+        raise ValueError(f"Genomes table is empty: {path}")
     df = pd.read_csv(
         path,
         sep="\t",
@@ -49,4 +54,12 @@ def parse_genomes_table(path: str | Path) -> pd.DataFrame:
             f"got '{df.columns[0]}'."
         )
     df = df.rename(columns={"genome_name": "genome_id"})
+    dup = df["genome_id"].duplicated()
+    if dup.any():
+        names = df.loc[dup, "genome_id"].unique().tolist()
+        logger.warning(
+            "Genomes table contains %d duplicate genome name(s): %s (last row wins).",
+            len(names),
+            names[:10],
+        )
     return df

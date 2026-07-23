@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Literal
 
 import pandas as pd
+
+logger = logging.getLogger("metacooler")
+
+
+def _check_not_empty(path: Path, kind: str) -> None:
+    """Raise a clear error if *path* is empty (0 bytes).
+
+    Args:
+        path: File to check.
+        kind: Human-readable table name used in the error message.
+
+    Raises:
+        ValueError: If the file is empty.
+    """
+    if path.stat().st_size == 0:
+        raise ValueError(f"{kind} is empty: {path}")
+
+
+def _warn_duplicate_contigs(df: pd.DataFrame) -> None:
+    """Log a warning if the ``contig_name`` column contains duplicates.
+
+    Duplicate contig names are tolerated (last assignment wins, matching the
+    ``dict(zip)`` mapping), but they usually indicate a malformed table, so a
+    warning is emitted. Downstream table builders de-duplicate before merging
+    to avoid phantom contig rows.
+    """
+    dup = df["contig_name"].duplicated()
+    if dup.any():
+        names = df.loc[dup, "contig_name"].unique().tolist()
+        logger.warning(
+            "Contig table contains %d duplicate contig name(s): %s "
+            "(last assignment wins).",
+            len(names),
+            names[:10],
+        )
 
 
 def parse_contigs_table(
@@ -45,6 +81,7 @@ def parse_contigs_table(
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Contig table not found: {path}")
+    _check_not_empty(path, "Contig table")
 
     if fmt == "contigs":
         df = pd.read_csv(
@@ -70,18 +107,30 @@ def parse_contigs_table(
                 f"got '{df.columns[1]}'."
             )
         df = df.rename(columns={"genome_name": "genome_id"})
+        _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
 
     if fmt == "contig_genome":
+        # Read WITHOUT a short ``names=`` list: passing fewer names than data
+        # columns makes pandas silently promote the first column to the index,
+        # shifting every field left by one and destroying the mapping.  Read all
+        # columns, require at least two, and keep the first two.
         df = pd.read_csv(
             path,
             sep="\t",
             header=None,
-            names=["contig_name", "genome_id"],
             dtype=str,
             keep_default_na=False,
         )
+        if df.shape[1] < 2:
+            raise ValueError(
+                "contig_genome format requires at least 2 tab-separated columns "
+                f"(contig_name, genome_name); got {df.shape[1]}."
+            )
+        df = df.iloc[:, :2]
+        df.columns = ["contig_name", "genome_id"]
+        _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
 
@@ -95,6 +144,7 @@ def parse_contigs_table(
         if "Name" not in df.columns or "Final_bin" not in df.columns:
             raise ValueError("metator format requires 'Name' and 'Final_bin' columns")
         df = df.rename(columns={"Name": "contig_name", "Final_bin": "genome_id"})
+        _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
 
@@ -126,6 +176,7 @@ def parse_contigs_table(
         contig_key = df.columns[contig_col - 1]
         genome_key = df.columns[genome_col - 1]
         df = df.rename(columns={contig_key: "contig_name", genome_key: "genome_id"})
+        _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
 
