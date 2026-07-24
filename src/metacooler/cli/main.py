@@ -58,6 +58,43 @@ class MetaCoolURI(click.ParamType):
         return str(value)
 
 
+# Domain exceptions the io/ops layer raises for bad user input. These are turned
+# into clean ``Error: <message>`` output instead of a Python traceback. Anything
+# NOT listed here (e.g. RuntimeError, AttributeError) still surfaces as a
+# traceback, since those indicate bugs rather than user mistakes.
+_USER_ERRORS = (
+    ValueError,
+    KeyError,
+    FileNotFoundError,
+    FileExistsError,
+    IsADirectoryError,
+    PermissionError,
+    NotImplementedError,
+    TypeError,
+)
+
+
+class MetaCoolerGroup(click.RichGroup):
+    """Root group that reports expected domain errors as clean CLI messages.
+
+    Every subcommand (including nested ``create`` subcommands) is invoked
+    through this group, so wrapping :meth:`invoke` gives uniform error output
+    without a ``try/except`` in each ``cmd_*`` module.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except (click.ClickException, click.Abort):
+            raise  # already a clean CLI error / user abort
+        except _USER_ERRORS as exc:
+            # KeyError stringifies with surrounding quotes; use its message.
+            message = (
+                str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+            )
+            raise click.ClickException(message) from exc
+
+
 click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.OPTIONS_TABLE_COLUMN_TYPES = [
     "required",
@@ -88,6 +125,7 @@ click.rich_click.COMMAND_GROUPS = {
 
 
 @click.group(
+    cls=MetaCoolerGroup,
     context_settings={"help_option_names": ["-h", "--help"]},
     help="""
 [b]MetaCooler[/b]: Hi-C contact maps for metagenomes.

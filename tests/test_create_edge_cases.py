@@ -11,13 +11,17 @@ import pandas as pd
 import pytest
 
 from metacooler.io.create import (
+    _build_bins,
     _build_contig_order,
     _build_contigs_table,
     _build_genomes_table,
+    _drop_nonpositive_contigs,
     _parse_pairs_header,
     _read_contig_lengths,
     _stream_pairs,
     _tile_bins,
+    _total_time_str,
+    _validate_bin_coords,
     from_cool,
     from_pairs,
 )
@@ -36,6 +40,10 @@ class TestBuildContigOrder:
         cg_map = {"a": "MAG_1", "b": "MAG_1", "c": "MAG_2"}
         order = _build_contig_order(lengths, cg_map, ordering="alpha")
         assert order == ["a", "b", "c"]
+
+    def test_unknown_ordering_raises(self):
+        with pytest.raises(ValueError, match="Unknown ordering"):
+            _build_contig_order({"a": 100}, {"a": "MAG_1"}, ordering="bogus")  # ty:ignore[invalid-argument-type]
 
 
 class TestBuildGenomesTable:
@@ -488,3 +496,156 @@ class TestFromCoolExtras:
         assigned_contigs = set(contigs_table.iloc[:, 0].astype(str))
         output_chroms = set(clr.chroms()[:]["name"].astype(str))
         assert output_chroms <= assigned_contigs
+
+
+class TestValidateBinCoords:
+    def test_negative_coords_raise(self):
+        df = pd.DataFrame({"chrom": ["c"], "start": [-1], "end": [100]})
+        with pytest.raises(ValueError, match="non-negative"):
+            _validate_bin_coords(df)
+
+    def test_inverted_coords_raise(self):
+        df = pd.DataFrame({"chrom": ["c"], "start": [100], "end": [50]})
+        with pytest.raises(ValueError, match="end < start"):
+            _validate_bin_coords(df)
+
+    def test_zero_width_warns_but_ok(self, caplog):
+        df = pd.DataFrame({"chrom": ["c"], "start": [100], "end": [100]})
+        with caplog.at_level("WARNING"):
+            _validate_bin_coords(df)  # must not raise
+        assert any("zero-width" in r.message for r in caplog.records)
+
+    def test_valid_coords_pass(self):
+        df = pd.DataFrame({"chrom": ["c", "c"], "start": [0, 100], "end": [100, 200]})
+        _validate_bin_coords(df)  # no raise
+
+
+class TestBuildBinsErrors:
+    def test_unknown_contig_raises(self):
+        bins = pd.DataFrame({"chrom": ["ghost"], "start": [0], "end": [100]})
+        with pytest.raises(ValueError, match="unknown contig"):
+            _build_bins(bins, ["c"], {"c": 0})
+
+
+class TestParsePairsHeaderErrors:
+    def test_malformed_chromsize_raises(self, tmp_path: Path):
+        p = tmp_path / "bad.pairs"
+        p.write_text(
+            "#chromsize: contigA notanumber\nread1\tcontigA\t1\tcontigA\t2\t+\t+\n"
+        )
+        with pytest.raises(ValueError, match="Malformed #chromsize"):
+            _parse_pairs_header(p)
+
+    def test_no_chromsize_returns_none(self, tmp_path: Path):
+        p = tmp_path / "plain.pairs"
+        p.write_text("read1\tcontigA\t1\tcontigA\t2\t+\t+\n")
+        assert _parse_pairs_header(p) is None
+
+
+class TestTotalTimeStr:
+    def test_seconds(self):
+        import time
+
+        assert _total_time_str(time.perf_counter()).endswith("s")
+
+    def test_minutes(self):
+        import time
+
+        s = _total_time_str(time.perf_counter() - 90)
+        assert "m:" in s and "h:" not in s
+
+    def test_hours(self):
+        import time
+
+        assert "h:" in _total_time_str(time.perf_counter() - 3700)
+
+
+class TestCreateCleanupOnFailure:
+    def test_from_pairs_removes_partial_file_on_validate_error(
+        self,
+        tmp_path: Path,
+        tiny_fasta: Path,
+        tiny_contigs_table: Path,
+        tiny_bins_bed: Path,
+        tiny_pairs: Path,
+        monkeypatch,
+    ):
+        # A validation failure mid-creation must not leave a half-written file.
+        import metacooler.io.create as create_mod
+
+        def _boom(*args, **kwargs):
+            raise ValueError("simulated validation failure")
+
+        monkeypatch.setattr(create_mod, "validate", _boom)
+        out = tmp_path / "should_be_removed.metacool"
+        with pytest.raises(ValueError, match="simulated validation failure"):
+            from_pairs(
+                uri=out,
+                bins=tiny_bins_bed,
+                pairs=tiny_pairs,
+                contig_genome_map=tiny_contigs_table,
+                contig_table_format="contigs",
+                fasta=tiny_fasta,
+                chunksize=1000,
+            )
+        assert not out.exists()
+
+
+class TestDropNonpositiveContigs:
+    def test_drops_zero_and_negative_length(self, caplog):
+        lengths = {"good": 100, "empty": 0, "neg": -5}
+        with caplog.at_level("WARNING"):
+            out_lengths, _ = _drop_nonpositive_contigs(lengths)
+        assert out_lengths == {"good": 100}
+        assert any("non-positive length" in r.message for r in caplog.records)
+
+    def test_filters_bins_in_lockstep(self):
+        lengths = {"good": 100, "empty": 0}
+        bins = pd.DataFrame(
+            {
+                "chrom": ["good", "good", "empty"],
+                "start": [0, 50, 0],
+                "end": [50, 100, 0],
+            }
+        )
+        out_lengths, out_bins = _drop_nonpositive_contigs(lengths, bins)
+        assert out_lengths == {"good": 100}
+        assert out_bins is not None
+        assert set(out_bins["chrom"]) == {"good"}
+
+    def test_no_change_when_all_positive(self):
+        lengths = {"a": 100, "b": 200}
+        out_lengths, out_bins = _drop_nonpositive_contigs(lengths, None)
+        assert out_lengths == lengths
+        assert out_bins is None
+
+
+class TestFromPairsGzip:
+    def test_gzipped_pairs_roundtrip(
+        self,
+        tmp_path: Path,
+        tiny_fasta: Path,
+        tiny_contigs_table: Path,
+        tiny_bins_bed: Path,
+        tiny_pairs: Path,
+    ):
+        # A .pairs.gz input exercises the gzip reader and the size-based
+        # sort_in_memory auto-detection (ISIZE trailer branch).
+        gz = tmp_path / "pairs.pairs.gz"
+        with open(tiny_pairs, "rb") as src, gzip.open(gz, "wb") as dst:
+            dst.write(src.read())
+
+        out = tmp_path / "from_gz.metacool"
+        from_pairs(
+            uri=out,
+            bins=tiny_bins_bed,
+            pairs=gz,
+            contig_genome_map=tiny_contigs_table,
+            contig_table_format="contigs",
+            fasta=tiny_fasta,
+            chunksize=1000,
+        )
+        assert out.exists()
+        from metacooler.api import MetaCooler
+
+        assert MetaCooler(out).shape[0] > 0

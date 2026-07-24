@@ -575,44 +575,11 @@ class MetaCooler:
                 ``"genome"`` sums all contacts between genome pairs,
                 producing one chromosome per genome.
         """
-        import cooler as clr
+        # Delegate to the shared writer in ops/ so aggregation logic (bin→level
+        # mapping, int-overflow handling, create_cooler call) lives in one place.
+        from metacooler.ops.aggregate import _write_aggregated_cool
 
-        from metacooler.ops.aggregate import _aggregate_pixel_stream
-
-        path = Path(path)
-
-        if level == "contig":
-            chroms = self.contigs[["name", "length"]].rename(
-                columns={"name": "chrom", "length": "length"}
-            )
-        elif level == "genome":
-            chroms = self.genomes[["name", "length"]].rename(
-                columns={"name": "chrom", "length": "length"}
-            )
-        else:
-            raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
-
-        # One bin per chromosome at this level
-        bins = pd.DataFrame(
-            {
-                "chrom": chroms["chrom"].values,
-                "start": 0,
-                "end": chroms["length"].values,
-            }
-        )
-
-        clr.create_cooler(
-            str(path),
-            bins=bins,
-            pixels=_aggregate_pixel_stream(self, level=level),
-            # int64 so large genome-pair totals cannot saturate cooler's
-            # default int32 count (see ops.aggregate.aggregate).
-            dtypes={"count": np.int64},
-            ordered=False,
-            symmetric_upper=True,
-            assembly=self.info.get("assembly"),
-            metadata=self.metadata if self.metadata else None,
-        )
+        _write_aggregated_cool(self, Path(path), level=level)
 
     # ------------------------------------------------------------------
     # HDF5 access

@@ -1,4 +1,14 @@
-"""Aggregation operations for metacool files."""
+"""Aggregation operations for metacool files.
+
+All aggregation shares two primitives:
+
+- :func:`_bin_to_level_mapping` maps each bin id to a contig or genome id;
+- :func:`_write_aggregated_cool` streams the aggregated pixels into a ``.cool``.
+
+``_aggregate_sparse`` (dense/sparse, used by ``show``) and the streaming
+``aggregate`` / :meth:`MetaCooler.to_cooler` all build on these so the
+int-overflow handling and the bin→level mapping live in exactly one place.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +27,31 @@ if TYPE_CHECKING:
     from typing import Literal
 
 
+def _bin_to_level_mapping(
+    mc: MetaCooler, level: Literal["contig", "genome"]
+) -> np.ndarray:
+    """Map each bin id to a contig id (``contig``) or genome id (``genome``).
+
+    Returns a fresh ``int`` array of length ``n_bins`` (safe for callers to
+    mutate).  Raises ``ValueError`` for an unknown *level*.
+    """
+    codes = mc.bins()[["chrom"]]["chrom"].cat.codes.values
+    if level == "contig":
+        return codes.copy()
+    if level == "genome":
+        return mc.contigs["genome_id"].values[codes].copy()
+    raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+
+
+def _level_chroms(mc: MetaCooler, level: Literal["contig", "genome"]) -> pd.DataFrame:
+    """Return the output "chromosomes" (``name``, ``length``) for *level*."""
+    if level == "contig":
+        return mc.contigs[["name", "length"]]
+    if level == "genome":
+        return mc.genomes[["name", "length"]]
+    raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+
+
 def _aggregate_sparse(
     mc: MetaCooler,
     level: Literal["contig", "genome"] = "contig",
@@ -33,21 +68,8 @@ def _aggregate_sparse(
         Symmetrised sparse CSR matrix of shape ``(n, n)`` where ``n`` is
         the number of contigs or genomes at the requested level.
     """
-    n_contigs = len(mc.contigs)
-    n_genomes = len(mc.genomes)
-
-    if level == "contig":
-        n = n_contigs
-        bins = mc.bins()[["chrom"]]
-        mapping = bins["chrom"].cat.codes.values
-    elif level == "genome":
-        n = n_genomes
-        contigs = mc.contigs
-        bins = mc.bins()[["chrom"]]
-        bin_to_contig = bins["chrom"].cat.codes.values
-        mapping = contigs["genome_id"].values[bin_to_contig]
-    else:
-        raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+    mapping = _bin_to_level_mapping(mc, level)  # also validates *level*
+    n = len(mc.contigs) if level == "contig" else len(mc.genomes)
 
     rows_list, cols_list, data_list = [], [], []
     n_pix = len(mc._clr.pixels())
@@ -103,21 +125,7 @@ def _aggregate_pixel_stream(
         DataFrames with columns ``bin1_id``, ``bin2_id``, ``count``
         (upper-triangle only, aggregated within each chunk).
     """
-    n_contigs = len(mc.contigs)
-    n_genomes = len(mc.genomes)
-
-    if level == "contig":
-        bins = mc.bins()[["chrom"]]
-        mapping = bins["chrom"].cat.codes.values.copy()
-    elif level == "genome":
-        contigs = mc.contigs
-        bins = mc.bins()[["chrom"]]
-        bin_to_contig = bins["chrom"].cat.codes.values
-        mapping = contigs["genome_id"].values[bin_to_contig].copy()
-    else:
-        raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
-
-    del n_contigs, n_genomes  # not needed here
+    mapping = _bin_to_level_mapping(mc, level)  # also validates *level*
 
     n_pix = len(mc._clr.pixels())
     for i in range(0, n_pix, chunksize):
@@ -147,42 +155,23 @@ def _aggregate_pixel_stream(
         yield df[["bin1_id", "bin2_id", "count"]]
 
 
-def aggregate(
-    uri: str | Path,
+def _write_aggregated_cool(
+    mc: MetaCooler,
     output: str | Path,
     level: Literal["contig", "genome"] = "contig",
     count_col: str = "count",
     chunksize: int = 1_000_000,
 ) -> None:
-    """Aggregate a metacool file to contig or genome level.
+    """Stream an aggregated ``.cool`` for an already-open MetaCooler.
 
-    The output is a standard ``.cool`` file where the "chromosomes" are
-    either contigs or genomes.  Pixels are streamed chunk-by-chunk; the
-    full contact matrix is never materialised in memory.
-
-    Args:
-        uri: Path to the source ``.metacool`` file.
-        output: Destination path for the output ``.cool`` file.
-        level: Aggregation level — ``"contig"`` or ``"genome"``.
-        count_col: Pixel column to use as contact count (default: ``"count"``).
-        chunksize: Number of pixels to process per chunk.
+    Shared by :func:`aggregate` (opens a URI) and
+    :meth:`metacooler.api.MetaCooler.to_cooler` (already holds ``mc``) so the
+    bins construction, int-dtype handling and ``create_cooler`` call live once.
     """
-    mc = MetaCooler(uri)
-
-    if level == "contig":
-        chroms = mc.contigs[["name", "length"]].rename(
-            columns={"name": "chrom", "length": "length"}
-        )
-    elif level == "genome":
-        chroms = mc.genomes[["name", "length"]].rename(
-            columns={"name": "chrom", "length": "length"}
-        )
-    else:
-        raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
-
+    chroms = _level_chroms(mc, level)  # also validates *level*
     bins_out = pd.DataFrame(
         {
-            "chrom": chroms["chrom"].values,
+            "chrom": chroms["name"].values,
             "start": 0,
             "end": chroms["length"].values,
         }
@@ -204,4 +193,33 @@ def aggregate(
         symmetric_upper=True,
         assembly=mc.info.get("assembly"),
         metadata=mc.metadata if mc.metadata else None,
+    )
+
+
+def aggregate(
+    uri: str | Path,
+    output: str | Path,
+    level: Literal["contig", "genome"] = "contig",
+    count_col: str = "count",
+    chunksize: int = 1_000_000,
+) -> None:
+    """Aggregate a metacool file to contig or genome level.
+
+    The output is a standard ``.cool`` file where the "chromosomes" are
+    either contigs or genomes.  Pixels are streamed chunk-by-chunk; the
+    full contact matrix is never materialised in memory.
+
+    Args:
+        uri: Path to the source ``.metacool`` file.
+        output: Destination path for the output ``.cool`` file.
+        level: Aggregation level — ``"contig"`` or ``"genome"``.
+        count_col: Pixel column to use as contact count (default: ``"count"``).
+        chunksize: Number of pixels to process per chunk.
+    """
+    _write_aggregated_cool(
+        MetaCooler(uri),
+        output,
+        level=level,
+        count_col=count_col,
+        chunksize=chunksize,
     )
