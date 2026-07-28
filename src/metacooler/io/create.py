@@ -34,11 +34,9 @@ if TYPE_CHECKING:
 _UNBINNED_SENTINELS: frozenset[str] = frozenset(
     {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", ""}
 )
-_SORT_IN_MEMORY_PAIRS_SIZE_BYTES = 2 * 1024**3  # 2 GiB
+# Row budget for the in-memory pixel sort, shared by ``from_pairs`` and
+# ``from_cool``. Beyond it, pixels go through cooler's external sort instead.
 _SORT_IN_MEMORY_PIXEL_THRESHOLD = 100_000_000  # 100 M pixels
-# Conservative uncompressed:compressed ratio for pairs text when the true
-# uncompressed size cannot be trusted (bgzip, or a wrapped gzip ISIZE footer).
-_PAIRS_GZIP_EXPANSION = 6
 
 logger = logging.getLogger("metacooler")
 
@@ -892,6 +890,51 @@ def _sort_and_dedup_pixels(
         yield all_pixels.iloc[lo : lo + write_chunk]
 
 
+def _buffer_pixels(
+    pixel_iter: Iterable[pd.DataFrame],
+    max_rows: int,
+) -> tuple[list[pd.DataFrame], Iterable[pd.DataFrame] | None]:
+    """Buffer pixel frames in RAM, stopping as soon as *max_rows* is exceeded.
+
+    Lets a caller pick a sort strategy from the pixel volume it actually sees
+    rather than from a proxy such as the input file size.  This matters because
+    the external-sort path calls ``cooler.create`` once per chunk, and each such
+    call carries a fixed cost proportional to the number of contigs — several
+    seconds for a metagenome — regardless of how many pixels the chunk holds.
+
+    Args:
+        pixel_iter: Iterable of unsorted pixel DataFrames.
+        max_rows: Row budget; buffering stops once the total exceeds it.
+
+    Returns:
+        ``(frames, rest)``.  *rest* is ``None`` when the whole stream fit within
+        the budget; otherwise it is the unconsumed remainder of *pixel_iter*.
+    """
+    frames: list[pd.DataFrame] = []
+    n_rows = 0
+    for df in pixel_iter:
+        frames.append(df)
+        n_rows += len(df)
+        if n_rows > max_rows:
+            return frames, pixel_iter
+    return frames, None
+
+
+def _chain_pixel_frames(
+    frames: list[pd.DataFrame],
+    rest: Iterable[pd.DataFrame],
+) -> Iterable[pd.DataFrame]:
+    """Yield the buffered *frames*, dropping each reference, then *rest*.
+
+    Popping as it goes lets the consumed frames be freed while the rest of the
+    stream is still being written, so the buffer does not stay resident for the
+    whole external sort.
+    """
+    while frames:
+        yield frames.pop(0)
+    yield from rest
+
+
 def _ensure_nonempty_pixel_stream(
     pixel_iter: Iterable[pd.DataFrame],
 ) -> Iterable[pd.DataFrame]:
@@ -1114,7 +1157,7 @@ def from_pairs(
     genomes_table: str | Path | None = None,
     pairs_kwargs: dict | None = None,
     metadata: dict | None = None,
-    chunksize: int = 1_000_000,
+    chunksize: int = 15_000_000,
     sort_in_memory: bool | None = None,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
@@ -1143,12 +1186,15 @@ def from_pairs(
         pairs_kwargs: Extra kwargs passed to the pairs reader (column
             indices, etc.).
         metadata: Additional metadata dict stored in file attrs.
-        chunksize: Number of pairs to process per chunk.
+        chunksize: Number of pairs to process per chunk.  Matches cooler's own
+            default; under ``sort_in_memory=False`` every chunk costs one
+            ``cooler.create`` call, so small chunks are expensive.
         sort_in_memory: If ``True``, collect all pixels in RAM and sort before
             writing (fast for small files).  If ``False``, pass the unsorted
             stream to cooler's external sort (scalable for large files).  If
-            ``None`` (default), auto-detect based on pairs file size: files
-            larger than 2 GiB use ``False`` with a logged warning.
+            ``None`` (default), buffer the binned pixels and use ``True`` unless
+            they exceed 100 M rows, in which case fall back to ``False`` with a
+            logged warning.
     """
     uri = Path(uri)
     if pairs_kwargs is None:
@@ -1158,41 +1204,6 @@ def from_pairs(
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
     timer = time.perf_counter()
-
-    # --- Auto-detect sort_in_memory based on pairs file size ---
-    if sort_in_memory is None:
-        _pairs_path = Path(pairs)
-        _compressed = _pairs_path.stat().st_size
-        if _pairs_path.suffix == ".bgz":
-            # bgzip: the gzip ISIZE trailer describes only the final BGZF block
-            # (<= 64 KiB), so it drastically under-reports the true size. Estimate
-            # conservatively from the compressed size (pairs text expands ~6x).
-            pairs_size = _compressed * _PAIRS_GZIP_EXPANSION
-        elif _pairs_path.suffix == ".gz":
-            # Single-member gzip: ISIZE is the uncompressed size mod 2^32. If it
-            # is smaller than the compressed size it has wrapped (uncompressed
-            # > 4 GiB) or the file is multi-member; fall back to a conservative
-            # compressed-size estimate so a large file never picks in-memory sort.
-            try:
-                with open(_pairs_path, "rb") as _fh:
-                    _fh.seek(-4, 2)
-                    _isize = int.from_bytes(_fh.read(4), "little")
-            except Exception:
-                _isize = 0
-            pairs_size = (
-                _isize if _isize >= _compressed else _compressed * _PAIRS_GZIP_EXPANSION
-            )
-        else:
-            pairs_size = _compressed
-        if pairs_size > _SORT_IN_MEMORY_PAIRS_SIZE_BYTES:
-            logger.warning(
-                "Pairs file is %.1f GiB — switching to sort_in_memory=False "
-                "(cooler external sort). Pass sort_in_memory=True to override.",
-                pairs_size / 1024**3,
-            )
-            sort_in_memory = False
-        else:
-            sort_in_memory = True
 
     # --- Parse contig map and optional genomes metadata table ---
     cg_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
@@ -1285,13 +1296,30 @@ def from_pairs(
         chunksize,
         pairs_kwargs,
     )
-    if sort_in_memory:
-        pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
-            pixel_iter=raw_pixels
-        )
+    pixel_source: Iterable[pd.DataFrame]
+    if sort_in_memory is None:
+        # Decide from the pixel volume actually produced, not from a proxy such
+        # as the pairs file size: binning aggregates duplicates away, so even a
+        # multi-GiB pairs file usually yields few enough pixels to sort in RAM —
+        # which writes the cooler in a single pass instead of one temporary
+        # cooler per chunk.
+        frames, rest = _buffer_pixels(raw_pixels, _SORT_IN_MEMORY_PIXEL_THRESHOLD)
+        if rest is None:
+            pixel_source = _sort_and_dedup_pixels(pixel_iter=frames)
+            ordered = True
+        else:
+            logger.warning(
+                "Pixel stream exceeded %d rows — switching to sort_in_memory=False "
+                "(cooler external sort). Pass sort_in_memory=True to override.",
+                _SORT_IN_MEMORY_PIXEL_THRESHOLD,
+            )
+            pixel_source = _chain_pixel_frames(frames, rest)
+            ordered = False
+    elif sort_in_memory:
+        pixel_source = _sort_and_dedup_pixels(pixel_iter=raw_pixels)
         ordered = True
     else:
-        pixel_source: Iterable[pd.DataFrame] = raw_pixels
+        pixel_source = raw_pixels
         ordered = False
     pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
     try:

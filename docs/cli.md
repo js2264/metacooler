@@ -54,8 +54,8 @@ metacooler create pairs --pairs P --bins B --contigs C -o OUT.metacool [OPTIONS]
 | `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs header has no `#chromsize:` lines. |
 | `--assembly-name` | — | Name for this assembly / metagenome, stored in file attrs. |
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
-| `--chunksize` | `1000000` | Pairs processed per chunk. |
-| `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (choose by pairs-file size, 2 GiB threshold), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
+| `--chunksize` | `15000000` | Pairs processed per chunk. Under `external` sorting each chunk becomes a temporary cooler, so smaller chunks cost more. |
+| `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (`memory` unless the binned pixels exceed 100 M rows), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
 
 ```bash
 # Fragment-level bins from MetaTOR output

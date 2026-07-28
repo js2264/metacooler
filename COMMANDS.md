@@ -32,7 +32,7 @@ Key options:
 | `--fasta` | — | Assembly FASTA. Required when `--bins` is an integer and the pairs header has no `#chromsize:` lines. |
 | `--assembly-name` | — | Assembly/metagenome name stored in file attrs. |
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
-| `--chunksize` | `10000000` | Pairs processed per chunk. |
+| `--chunksize` | `15000000` | Pairs processed per chunk. Under `external` sorting each chunk becomes a temporary cooler, so smaller chunks cost more. |
 | `-o/--output` | required | Output `.metacool` file path. |
 | `--metadata` | — | JSON or YAML file with additional metadata to embed. |
 | `-f/--force` | off | Overwrite output if it already exists. |

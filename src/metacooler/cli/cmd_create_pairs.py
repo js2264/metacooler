@@ -64,9 +64,10 @@ from metacooler.cli.cmd_metadata import _stringify_values
 @click.option(
     "--chunksize",
     type=int,
-    default=1_000_000,
+    default=15_000_000,
     show_default=True,
-    help="Number of pairs to process per chunk.",
+    help="Number of pairs to process per chunk. Under 'external' sorting each "
+    "chunk is written as a temporary cooler, so smaller chunks cost more.",
 )
 @click.option(
     "--sort-strategy",
@@ -76,7 +77,7 @@ from metacooler.cli.cmd_metadata import _stringify_values
     show_default=True,
     help=(
         "Pixel sorting strategy. "
-        "'auto': detect based on pairs file size (threshold: 2 GiB). "
+        "'auto': use 'memory' unless the binned pixels exceed 100 M rows. "
         "'memory': collect all pixels in RAM and sort before writing (fast for small files). "
         "'external': stream unsorted pixels to cooler's external sort (scalable for large files)."
     ),

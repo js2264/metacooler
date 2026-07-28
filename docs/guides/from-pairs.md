@@ -183,10 +183,14 @@ metacooler create pairs ... --drop-unassigned
 Creation streams the pairs file in chunks, so memory stays bounded regardless of
 file size. Two options tune this:
 
-- `--chunksize` (default `1000000`) — pairs processed per chunk.
+- `--chunksize` (default `15000000`) — pairs processed per chunk. Under
+  `external` sorting each chunk is written as a temporary cooler, and that write
+  carries a fixed cost proportional to the contig count, so small chunks are
+  expensive on metagenomic assemblies.
 - `--sort-strategy` (default `auto`) — how pixels are sorted before writing.
-  `auto` picks `memory` (sort in RAM, fastest) for files under 2 GiB and
-  `external` (stream to cooler's on-disk sort) for larger ones. Force either
+  `auto` buffers the binned pixels and picks `memory` (sort in RAM, fastest —
+  the cooler is written in a single pass) unless they exceed 100 M rows, at
+  which point it falls back to `external` (cooler's on-disk sort). Force either
   explicitly if you know your machine's limits.
 
 ```bash
@@ -209,7 +213,7 @@ metacooler.from_pairs(
     contig_ordering="genome-then-length",
     drop_unassigned=False,
     metadata={"sample": "gut_T0"},  # optional
-    chunksize=1_000_000,            # default; raise for very large pairs files
+    chunksize=15_000_000,           # default; lower it to cap peak memory
 )
 ```
 
