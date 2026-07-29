@@ -672,19 +672,39 @@ def _validate_bin_coords(df: pd.DataFrame) -> None:
 def _read_bins_bed(path: str | Path) -> pd.DataFrame:
     """Read a headerless BED file of bins into a ``chrom``/``start``/``end`` frame.
 
+    Columns beyond the first three (BED4/BED6 name, score, strand, …) are read
+    and discarded.  Reading with a three-name ``names=`` list instead — the same
+    trap documented in :func:`metacooler.io.contigs.parse_contigs_table` — makes
+    pandas promote the surplus leading column into the index, so ``chrom`` picks
+    up the *start* coordinate, ``start`` the end and ``end`` the fourth column.
+    Nothing downstream can tell: contig lengths are derived from this very frame,
+    so the shifted table is self-consistent and creation proceeds with contigs
+    named after coordinates.
+
     Args:
         path: Path to a tab-separated BED file without a header row.
 
     Returns:
         DataFrame with a string ``chrom`` column and int64 ``start``/``end``.
+
+    Raises:
+        ValueError: If the file has fewer than three tab-separated columns.
     """
-    return pd.read_csv(
-        path,
-        sep="\t",
-        header=None,
-        names=["chrom", "start", "end"],
-        dtype={"chrom": str, "start": np.int64, "end": np.int64},
-    )
+    df = pd.read_csv(path, sep="\t", header=None, dtype=str, keep_default_na=False)
+    if df.shape[1] < 3:
+        raise ValueError(
+            "Bins BED file requires at least 3 tab-separated columns "
+            f"(chrom, start, end); got {df.shape[1]} in {path}."
+        )
+    if df.shape[1] > 3:
+        logger.debug(
+            "Bins BED file has %d columns; using the first three as "
+            "chrom/start/end.",
+            df.shape[1],
+        )
+    df = df.iloc[:, :3].copy()
+    df.columns = ["chrom", "start", "end"]
+    return df.astype({"chrom": str, "start": np.int64, "end": np.int64})
 
 
 def _build_bins(
