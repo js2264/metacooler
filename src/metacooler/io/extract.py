@@ -171,10 +171,10 @@ def _extract_contig_ids(
             str(output),
             bins=bins_df,
             pixels=empty_pixels,
-            dtypes={"count": count_dtype},
             ordered=True,
             symmetric_upper=True,
             assembly=assembly,
+            dtypes={"count": count_dtype},
             metadata={"source-file": str(mc.store)},
         )
     else:
@@ -187,10 +187,10 @@ def _extract_contig_ids(
             str(output),
             bins=bins_df,
             pixels=_all_chunks(),
-            dtypes={"count": count_dtype},
             ordered=False,
             symmetric_upper=True,
             assembly=assembly,
+            dtypes={"count": count_dtype},
             metadata={"source-file": str(mc.store)},
         )
 

@@ -44,15 +44,15 @@ def flatten(
     bins["start"] = bins["start"].astype(np.int32)
     bins["end"] = bins["end"].astype(np.int32)
 
+    # Stream pixels in chunks to avoid loading the full table into memory.
+    chunksize = 1_000_000
+    n_pix = mc._clr.info["nnz"]
+
     # Preserve the width of the source ``count`` column: a binnified source
     # writes int64 and would silently wrap if narrowed back to int32 here.
     count_dtype = resolve_count_dtype(
         mc._clr.pixels()[:0]["count"].dtype, context="flatten"
     )
-
-    # Stream pixels in chunks to avoid loading the full table into memory.
-    chunksize = 1_000_000
-    n_pix = mc._clr.info["nnz"]
 
     def _pixel_stream():
         for _i in range(0, n_pix, chunksize):
@@ -75,9 +75,9 @@ def flatten(
         str(output),
         bins=bins,
         pixels=_pixel_stream(),
-        dtypes={"count": count_dtype},
         ordered=True,
         symmetric_upper=True,
+        dtypes={"count": count_dtype},
         metadata={"source-file": str(uri), "flattened": True},
     )
     logger.info("Written flattened cool to %s", output)

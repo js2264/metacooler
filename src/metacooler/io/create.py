@@ -702,8 +702,7 @@ def _read_bins_bed(path: str | Path) -> pd.DataFrame:
         )
     if df.shape[1] > 3:
         logger.debug(
-            "Bins BED file has %d columns; using the first three as "
-            "chrom/start/end.",
+            "Bins BED file has %d columns; using the first three as chrom/start/end.",
             df.shape[1],
         )
     df = df.iloc[:, :3].copy()
