@@ -450,10 +450,9 @@ def _build_genomes_table(
         extra_genomes_df: Optional DataFrame from a genomes-metadata TSV
             file (column ``genome_id`` plus any additional columns).  When
             provided, the extra columns are left-merged into the output by
-            genome name.
-        keep_unbinned: If ``True`` (default), include a row for the
-            ``"__unbinned__"`` pseudo-genome whenever at least one contig
-            is unmapped.  Set to ``False`` to omit it from the output.
+            genome name.  Columns colliding with metacooler's own
+            (``name``, ``length``, ``n_contigs``, ``n_bins``) are renamed with a
+            ``user_`` prefix.
 
     Returns:
         DataFrame with columns ``name``, ``length``, ``n_contigs``, and
@@ -644,18 +643,33 @@ def _validate_bin_coords(df: pd.DataFrame) -> None:
         logger.warning("%d zero-width bin(s) (end == start).", int(zero_width.sum()))
 
 
-def _build_bins(
-    bins: str | Path | pd.DataFrame,
-    contig_order: list[str],
-    contig_name_to_id: dict[str, int],
-) -> pd.DataFrame:
-    """Load a BED-format bins file (or DataFrame) and remap contig names to IDs.
+def _read_bins_bed(path: str | Path) -> pd.DataFrame:
+    """Read a headerless BED file of bins into a ``chrom``/``start``/``end`` frame.
 
     Args:
-        bins: Path to a tab-separated BED file with columns ``chrom``,
-            ``start``, ``end`` (without header), or an already-loaded DataFrame.
-        contig_order: Ordered list of contig names; used for validation
-            only.
+        path: Path to a tab-separated BED file without a header row.
+
+    Returns:
+        DataFrame with a string ``chrom`` column and int64 ``start``/``end``.
+    """
+    return pd.read_csv(
+        path,
+        sep="\t",
+        header=None,
+        names=["chrom", "start", "end"],
+        dtype={"chrom": str, "start": np.int64, "end": np.int64},
+    )
+
+
+def _build_bins(
+    bins: pd.DataFrame,
+    contig_name_to_id: dict[str, int],
+) -> pd.DataFrame:
+    """Validate a bins DataFrame and remap its contig names to integer IDs.
+
+    Args:
+        bins: Bins DataFrame with a string ``chrom`` column plus ``start`` and
+            ``end`` (see :func:`_read_bins_bed` for the BED reader).
         contig_name_to_id: Mapping from contig name to integer ID.
 
     Returns:
@@ -666,16 +680,7 @@ def _build_bins(
         ValueError: If any contig name in the bins file is not found in
             *contig_name_to_id*, or if bin coordinates are malformed.
     """
-    if isinstance(bins, str | Path):
-        df = pd.read_csv(
-            bins,
-            sep="\t",
-            header=None,
-            names=["chrom", "start", "end"],
-            dtype={"chrom": str, "start": np.int64, "end": np.int64},
-        )
-    else:
-        df = bins.copy()
+    df = bins.copy()
     _validate_bin_coords(df)
     # Map chrom name -> contig id
     mapped = df["chrom"].map(contig_name_to_id)
@@ -1329,8 +1334,8 @@ def _stream_remapped_pixels(
     n_pixels: int,
     old_to_new_bin: np.ndarray,
     nproc: int,
+    count_dtype: np.dtype,
     chunksize: int = 1_000_000,
-    count_dtype: np.dtype | None = None,
 ) -> Iterable[pd.DataFrame]:
     """Stream pixels from a cool file with bin-ID remapping and rich progress.
 
@@ -1338,18 +1343,16 @@ def _stream_remapped_pixels(
         cool_path_str: Filesystem path to the source cool file.
         n_pixels: Total pixel count (used for progress bar).
         old_to_new_bin: Array mapping old bin indices to new bin indices.
-        nproc: Number of parallel reader threads (1 = serial).
+        nproc: Accepted for backwards compatibility but currently ignored — see
+            the warning logged below.
+        count_dtype: dtype for the output ``count`` column, as resolved by
+            :func:`metacooler.io._utils.resolve_count_dtype`.
         chunksize: Pixels per read batch.
-        count_dtype: dtype for the ``count`` column.  Defaults to the source's
-            own width; never narrows, so an int64 source is not truncated.
 
     Yields:
         Remapped pixel DataFrames with columns ``bin1_id``, ``bin2_id``,
         ``count``.
     """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
     from rich.console import Console
     from rich.progress import (
         BarColumn,
@@ -1360,23 +1363,26 @@ def _stream_remapped_pixels(
         TimeRemainingColumn,
     )
 
-    thread_local = threading.local()
-    # libhdf5 is not guaranteed to be built thread-safe, so concurrent reads
-    # through independent handles to the same file can corrupt data or crash.
-    # Serialise the actual file reads with a lock; the numpy remapping below
-    # still overlaps across worker threads.
-    read_lock = threading.Lock()
+    if nproc > 1:
+        # The worker pool used to exist, but libhdf5 is not guaranteed to be
+        # built thread-safe, so every read had to be taken under a single lock —
+        # serialising the only expensive step. The threads bought nothing and
+        # each leaked an open Cooler handle, so the read is now plainly serial.
+        logger.warning(
+            "nproc=%d has no effect on pixel remapping: the HDF5 reads are "
+            "serialised, so the work is done in a single thread.",
+            nproc,
+        )
+
+    clr = cooler.Cooler(cool_path_str)
 
     def _remap_chunk(lo: int, hi: int) -> pd.DataFrame:
-        if not hasattr(thread_local, "clr"):
-            thread_local.clr = cooler.Cooler(cool_path_str)
-        with read_lock:
-            chunk = thread_local.clr.pixels()[lo:hi].copy()
+        chunk = clr.pixels()[lo:hi].copy()
         chunk["bin1_id"] = old_to_new_bin[chunk["bin1_id"].values.astype(np.int64)]
         chunk["bin2_id"] = old_to_new_bin[chunk["bin2_id"].values.astype(np.int64)]
         # Drop pixels that touch a dropped contig (sentinel -1).
         chunk = chunk[(chunk["bin1_id"] >= 0) & (chunk["bin2_id"] >= 0)].copy()
-        chunk["count"] = chunk["count"].astype(count_dtype or np.int32)
+        chunk["count"] = chunk["count"].astype(count_dtype)
         swap = chunk["bin1_id"] > chunk["bin2_id"]
         chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
             swap, ["bin2_id", "bin1_id"]
@@ -1397,26 +1403,41 @@ def _stream_remapped_pixels(
         disable=not con.is_terminal,
     ) as progress:
         task = progress.add_task("", total=len(ranges))
-        if nproc == 1:
-            for lo, hi in ranges:
-                yield _remap_chunk(lo, hi)
-                progress.update(task, advance=1)
-        else:
-            from collections import deque
+        for lo, hi in ranges:
+            yield _remap_chunk(lo, hi)
+            progress.update(task, advance=1)
 
-            with ThreadPoolExecutor(max_workers=nproc) as pool:
-                in_flight: deque = deque()
-                for lo, hi in ranges:
-                    in_flight.append(pool.submit(_remap_chunk, lo, hi))
-                    # Keep at most nproc+1 futures in flight to bound memory
-                    if len(in_flight) > nproc:
-                        f = in_flight.popleft()
-                        yield f.result()
-                        progress.update(task, advance=1)
-                while in_flight:
-                    f = in_flight.popleft()
-                    yield f.result()
-                    progress.update(task, advance=1)
+
+@contextlib.contextmanager
+def _staged_output(final: Path) -> Iterator[Path]:
+    """Build the output at a sibling temp path, moving it into place on success.
+
+    Writing straight to the final path meant a partial or invalid file could sit
+    at the name the user asked for, and the old ``except BaseException: unlink()``
+    guard fired on ``KeyboardInterrupt`` — Ctrl-C during the final ``validate()``
+    of a multi-hour run deleted the finished file. Staging solves both: nothing
+    ever appears at the final name until validation has passed, and a failure
+    leaves the artifact behind (under the temp name) so it can be diagnosed.
+
+    Args:
+        final: Path the caller wants the finished file to have.
+
+    Yields:
+        The temporary path to write to.
+    """
+    tmp = final.with_name(final.name + ".partial")
+    check_output_path(tmp, force=True)
+    try:
+        yield tmp
+    except Exception:
+        logger.error(
+            "Creation failed. The partial file was left at %s for inspection; "
+            "%s was not written.",
+            tmp,
+            final,
+        )
+        raise
+    os.replace(tmp, final)
 
 
 def _remap_bins(
@@ -1540,25 +1561,17 @@ def from_pairs(
 
     # --- Resolve contig lengths and initial bins DataFrame ---
     if isinstance(bins, str | Path):
-        bins_df = pd.read_csv(
-            bins,
-            sep="\t",
-            header=None,
-            names=["chrom", "start", "end"],
-            dtype={"chrom": str, "start": np.int64, "end": np.int64},
-        )
-        contig_lengths = bins_df.groupby("chrom")["end"].max().to_dict()
+        bins_df = _read_bins_bed(bins)
+        contig_lengths = _read_contig_lengths(bins=bins_df)
     elif isinstance(bins, pd.DataFrame):
         bins_df = bins.copy()
-        contig_lengths = bins_df.groupby("chrom")["end"].max().to_dict()
+        contig_lengths = _read_contig_lengths(bins=bins_df)
     elif bins is None:
         # Integer binsize mode: need contig lengths from fasta or pairs header
         contig_lengths = _read_contig_lengths(fasta=fasta, pairs=pairs)
         bins_df = None
     else:
         raise TypeError("bins must be a path, DataFrame, or None")
-    contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
-    logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
 
     # --- Resolve the reference ("fasta") contig order, if one is requested ---
     # When lengths come from a bins table their dict order is whatever
@@ -1592,7 +1605,6 @@ def from_pairs(
         contig_lengths,
         cg_map,
         extra_genomes_df,
-        keep_unbinned=not drop_unassigned,
     )
     contig_name_to_id = {name: i for i, name in enumerate(contig_order)}
     contigs_df = _build_contigs_table(
@@ -1609,7 +1621,7 @@ def from_pairs(
             raise ValueError("binsize required when bins is None")
         bins_df = _tile_bins(contig_order, contig_lengths, contig_name_to_id, binsize)
     else:
-        bins_df = _build_bins(bins_df, contig_order, contig_name_to_id)
+        bins_df = _build_bins(bins_df, contig_name_to_id)
     bins_df = bins_df.sort_values(["chrom", "start"]).reset_index(drop=True)
     logger.info(
         f"Built final bins table with {len(bins_df)} bins tiling "
@@ -1734,9 +1746,9 @@ def from_cool(
         drop_unassigned: If ``True``, drop contigs absent from the contig table
             instead of collecting them under ``__unbinned__``.
         metadata: Optional metadata dictionary to store in the file attrs.
-        nproc: Number of parallel reader threads for pixel remapping.
-            Values greater than 1 use a ``ThreadPoolExecutor`` to overlap
-            HDF5 reads across chunks.
+        nproc: Accepted for backwards compatibility, but currently has **no
+            effect**: HDF5 reads must be serialised, so pixel remapping runs in
+            a single thread.  Values greater than 1 log a warning.
         sort_in_memory: If ``True``, collect all pixels in RAM and sort before
             writing (fast for small files).  If ``False``, pass the unsorted
             stream to cooler's external sort (scalable for large files).  If
