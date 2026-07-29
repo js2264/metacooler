@@ -16,11 +16,14 @@ from metacooler.schema import (
 logger = logging.getLogger("metacooler")
 
 
-def _init_mmetacool_attrs(f: h5py.File) -> None:
-    """Write the top-level format attributes for a new ``.mmetacool`` file.
+def init_mmetacool_attrs(f: h5py.File) -> None:
+    """Initialise an open HDF5 file as an empty ``.mmetacool`` collection.
 
     Sets ``format`` to ``HDF5::MMetaCooler`` and ``format-version`` to the
-    current :data:`~metacooler.schema.MMETACOOLER_FORMAT_VERSION`.
+    current :data:`~metacooler.schema.MMETACOOLER_FORMAT_VERSION`, and
+    creates the top-level ``/entries`` group.  Both are required by
+    :func:`metacooler.schema.is_mmetacooler`, so a file initialised through
+    this function is a valid (empty) mmetacool.
 
     Args:
         f: Open ``h5py.File`` in write or append mode.  Attributes are
@@ -28,6 +31,46 @@ def _init_mmetacool_attrs(f: h5py.File) -> None:
     """
     f.attrs["format"] = MMETACOOLER_FORMAT
     f.attrs["format-version"] = MMETACOOLER_FORMAT_VERSION
+    f.require_group("entries")
+
+
+#: Deprecated private alias kept so existing importers keep working.
+_init_mmetacool_attrs = init_mmetacool_attrs
+
+
+def _require_mmetacool(path: Path) -> Path:
+    """Check that *path* is an existing, valid ``.mmetacool`` file.
+
+    Every mutating helper below opens its target in HDF5 append mode, which
+    happily *creates* a missing file — leaving behind a stray file that has
+    none of the mmetacool attributes and that
+    :func:`metacooler.schema.is_mmetacooler` then rejects.  This guard is
+    called first so a bad path fails cleanly instead.
+
+    Args:
+        path: Path to the ``.mmetacool`` file to check.
+
+    Returns:
+        The path as a :class:`pathlib.Path`.
+
+    Raises:
+        FileNotFoundError: If *path* does not exist.
+        ValueError: If *path* exists but is not a valid mmetacool file.
+    """
+    from metacooler.schema import is_mmetacooler
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"mmetacool file not found: {path}. "
+            "Create it first (e.g. with create_mmetacool() or 'metacooler stack')."
+        )
+    if not is_mmetacooler(path):
+        raise ValueError(
+            f"Not a valid .mmetacool file: {path} (expected format attribute "
+            f"{MMETACOOLER_FORMAT!r} and a top-level 'entries' group)."
+        )
+    return path
 
 
 def create_mmetacool(
@@ -58,8 +101,7 @@ def create_mmetacool(
             raise FileNotFoundError(f"Source file not found for entry {name!r}: {src}")
 
     with h5py.File(output, "w") as dst:
-        _init_mmetacool_attrs(dst)
-        dst.require_group("entries")
+        init_mmetacool_attrs(dst)
         for name, src in entries.items():
             logger.info("Adding entry %r from %s", name, src)
             with h5py.File(src, "r") as src_f:
@@ -83,11 +125,13 @@ def add_entry(
         overwrite: If True, replace an existing entry with the same name.
 
     Raises:
-        FileNotFoundError: If *metacool* does not exist.
+        FileNotFoundError: If *metacool* or *mmetacool* does not exist.
+        ValueError: If *mmetacool* is not a valid mmetacool file.
         KeyError: If *name* already exists and *overwrite* is False.
     """
-    if not metacool.exists():
+    if not Path(metacool).exists():
         raise FileNotFoundError(f"Source file not found: {metacool}")
+    mmetacool = _require_mmetacool(mmetacool)
 
     with h5py.File(mmetacool, "a") as dst:
         grp = dst.require_group("entries")
@@ -110,8 +154,11 @@ def remove_entry(mmetacool: Path, name: str) -> None:
         name: Name of the entry to remove.
 
     Raises:
+        FileNotFoundError: If *mmetacool* does not exist.
+        ValueError: If *mmetacool* is not a valid mmetacool file.
         KeyError: If *name* does not exist.
     """
+    mmetacool = _require_mmetacool(mmetacool)
     with h5py.File(mmetacool, "a") as f:
         grp = f.require_group("entries")
         if name not in grp:
@@ -135,11 +182,14 @@ def copy_entry(
         overwrite: If True, replace an existing destination entry.
 
     Raises:
+        FileNotFoundError: If *mmetacool* does not exist.
         KeyError: If *src* does not exist or *dst* exists and *overwrite* is False.
-        ValueError: If *src* and *dst* are the same.
+        ValueError: If *src* and *dst* are the same, or *mmetacool* is not a
+            valid mmetacool file.
     """
     if src == dst:
         raise ValueError("Source and destination cannot be the same.")
+    mmetacool = _require_mmetacool(mmetacool)
 
     with h5py.File(mmetacool, "a") as f:
         grp = f.require_group("entries")
@@ -163,6 +213,12 @@ def move_entry(
 ) -> None:
     """Move (rename) an entry within the same ``.mmetacool`` file.
 
+    Implemented as an HDF5 link rename (:meth:`h5py.Group.move`), which is
+    O(1) and rewrites no data.  Copying then deleting instead would need
+    twice the peak disk space and would leave the freed space stranded —
+    HDF5 never returns deleted space to the filesystem, so a rename would
+    permanently grow the file by the size of the entry.
+
     Args:
         mmetacool: Path to the ``.mmetacool`` file.
         src: Source entry name.
@@ -170,19 +226,44 @@ def move_entry(
         overwrite: If True, replace an existing destination entry.
 
     Raises:
+        FileNotFoundError: If *mmetacool* does not exist.
         KeyError: If *src* does not exist or *dst* exists and *overwrite* is False.
-        ValueError: If *src* and *dst* are the same.
+        ValueError: If *src* and *dst* are the same, or *mmetacool* is not a
+            valid mmetacool file.
     """
-    copy_entry(mmetacool, src, dst, overwrite=overwrite)
-    remove_entry(mmetacool, src)
+    if src == dst:
+        raise ValueError("Source and destination cannot be the same.")
+    mmetacool = _require_mmetacool(mmetacool)
+
+    with h5py.File(mmetacool, "a") as f:
+        grp = f.require_group("entries")
+        if src not in grp:
+            raise KeyError(f"Source entry {src!r} not found.")
+        if dst in grp:
+            if not overwrite:
+                raise KeyError(
+                    f"Destination entry {dst!r} already exists. Use overwrite=True."
+                )
+            del grp[dst]
+        grp.move(src, dst)
     logger.info("Moved entry %r → %r in %s", src, dst, mmetacool)
 
 
 def list_entries(mmetacool: Path) -> list[str]:
     """List all entry names in an ``.mmetacool`` file.
 
+    Both this and :func:`metacooler.schema.list_metacoolers` are thin
+    conventions over the single scan in
+    :func:`metacooler.schema.list_entry_names`: this one yields bare entry
+    names (``"sample1"``), that one yields URI-ready group paths
+    (``"/entries/sample1"``).
+
+    Args:
+        mmetacool: Path to the ``.mmetacool`` file.
+
     Returns:
-        A list of entry names (keys under ``/entries``).
+        A list of entry names (keys under ``/entries``), or an empty list if
+        the file has no ``entries`` group.
     """
     return list_entry_names(mmetacool)
 
@@ -204,15 +285,19 @@ def copy_entry_cross_file(
         overwrite: If True, replace an existing destination entry.
 
     Raises:
+        FileNotFoundError: If *src_file* or *dst_file* does not exist.
         KeyError: If source entry does not exist or destination exists
             and *overwrite* is False.
-        ValueError: If source and destination resolve to the same file.
+        ValueError: If source and destination resolve to the same file, or
+            either is not a valid mmetacool file.
     """
     if Path(src_file).resolve() == Path(dst_file).resolve():
         raise ValueError(
             f"Source and destination are the same file: {src_file}. "
             "Use rename_entry() to rename entries within a file."
         )
+    src_file = _require_mmetacool(src_file)
+    dst_file = _require_mmetacool(dst_file)
     with h5py.File(src_file, "r") as sf:
         if "entries" not in sf or src_name not in sf["entries"]:
             raise KeyError(f"Source entry {src_name!r} not found in {src_file}")
