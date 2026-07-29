@@ -72,10 +72,14 @@ def _aggregate_sparse(
     mapping = _bin_to_level_mapping(mc, level)  # also validates *level*
     n = len(mc.contigs) if level == "contig" else len(mc.genomes)
 
-    rows_list, cols_list, data_list = [], [], []
-    n_pix = len(mc._clr.pixels())
+    # Reduce each chunk into a running aggregate instead of buffering every
+    # chunk: peak memory stays bounded by the output matrix plus one chunk,
+    # rather than growing with the whole pixel table (~24 bytes/pixel).
+    agg = sparse.csr_matrix((n, n), dtype=np.int64)
+    pixels = mc._clr.pixels()
+    n_pix = len(pixels)
     for i in range(0, n_pix, chunksize):
-        chunk = mc._clr.pixels()[i : i + chunksize]
+        chunk = pixels[i : i + chunksize]
         c1 = mapping[chunk["bin1_id"].values]
         c2 = mapping[chunk["bin2_id"].values]
         # int64 so scipy's duplicate-summing in .tocsr() cannot overflow int32
@@ -84,15 +88,10 @@ def _aggregate_sparse(
 
         c1, c2 = to_upper_triangle(c1, c2)
 
-        rows_list.append(c1)
-        cols_list.append(c2)
-        data_list.append(vals)
+        # .tocsr() sums the duplicates within this chunk; the addition sums
+        # across chunks, so the total is identical to concatenating first.
+        agg = agg + sparse.coo_matrix((vals, (c1, c2)), shape=(n, n)).tocsr()
 
-    rows = np.concatenate(rows_list) if rows_list else np.array([], dtype=np.int64)
-    cols = np.concatenate(cols_list) if cols_list else np.array([], dtype=np.int64)
-    data = np.concatenate(data_list) if data_list else np.array([], dtype=np.int64)
-    agg = sparse.coo_matrix((data, (rows, cols)), shape=(n, n))
-    agg = agg.tocsr()
     agg = (
         agg
         + agg.T
@@ -140,8 +139,7 @@ def _aggregate_pixel_stream(
             vals = vals.astype(np.int64)
 
         # Enforce upper triangle
-        swap = c1 > c2
-        c1[swap], c2[swap] = c2[swap], c1[swap]
+        c1, c2 = to_upper_triangle(c1, c2)
 
         df = pd.DataFrame(
             {
