@@ -15,7 +15,9 @@ import pandas as pd
 from metacooler.io._utils import chrom_codes
 from metacooler.schema import (
     read_table,
-    validate,
+)
+from metacooler.schema import (
+    validate as _validate,
 )
 
 if TYPE_CHECKING:
@@ -34,12 +36,24 @@ class MetaCooler:
     entry within an mmetacool collection.
     """
 
-    def __init__(self, store: str | Path):
+    def __init__(self, store: str | Path, *, validate: bool = True):
         """Open a ``.metacool`` (or mmetacool entry) file.
 
         Args:
             store: File path, optionally with a URI group suffix
                 (``file.mmetacool::entries/entry_name``).
+            validate: If ``True`` (default), run
+                :func:`metacooler.schema.validate` on the store before
+                opening it.  Pass ``False`` to skip that check as a fast
+                path on very large files, where a full structural rescan
+                (indexes, column lengths, pixel ordering) costs a
+                noticeable amount of I/O on every single ``MetaCooler()``
+                construction.  **Only skip validation on a file you know
+                to be well-formed**: with ``validate=False`` a corrupt or
+                truncated file is not diagnosed here, and instead surfaces
+                later as an opaque ``IndexError``/``KeyError`` from
+                cooler, or — worse — as silently wrong slices if only the
+                indexes are stale.
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -72,7 +86,8 @@ class MetaCooler:
             with h5py.File(self._store, "r") as f:
                 if group_path.lstrip("/") not in f:
                     raise KeyError(f"Group {group_path!r} not found in {self._store}")
-            validate(f"{self._store}::{group_path}")
+            if validate:
+                _validate(f"{self._store}::{group_path}")
             # Use cooler URI to open the specific group
             cooler_uri = f"{self._store}::{group_path}"
             self._clr = cooler.Cooler(cooler_uri)
@@ -87,7 +102,8 @@ class MetaCooler:
                     f"Use '::' to specify a group path, e.g. "
                     f"{self._store}::{entries[0] if entries else '/entries/<name>'}."
                 )
-            validate(self._store)
+            if validate:
+                _validate(self._store)
             self._clr = cooler.Cooler(str(self._store))
 
     @property
@@ -257,8 +273,15 @@ class MetaCooler:
         base["format-version"] = base.pop("metacooler-format-version", None)
         base["ordering"] = base.pop("contig-ordering", None)
         base["ncontigs"] = base.pop("nchroms", None)
-        # Normalise assembly key (file stores "assembly-name", expose as "assembly")
-        base["assembly"] = base.pop("assembly-name", base.pop("assembly", None))
+        # Normalise the assembly key. The file stores it in cooler's standard
+        # "genome-assembly" attribute; "assembly-name" is only read as a
+        # fallback so files written by older metacooler versions (which wrote
+        # that attribute instead) still report their assembly.
+        legacy = base.pop("assembly-name", None)
+        assembly = base.pop("genome-assembly", base.pop("assembly", None))
+        if assembly in (None, "", "unknown") and legacy is not None:
+            assembly = legacy
+        base["assembly"] = assembly
         # Remove metadata field if present (accessed via .metadata property)
         base.pop("metadata", None)
         # Cast numeric fields to int (cooler may return numpy scalars or strings)
