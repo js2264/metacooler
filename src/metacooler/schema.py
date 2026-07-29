@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-import cooler
 import h5py
 import numpy as np
 import pandas as pd
@@ -18,26 +17,40 @@ METACOOLER_FORMAT_VERSION = 1
 METACOOLER_FORMAT_URL = "https://github.com/js2264/metacooler"
 MMETACOOLER_FORMAT = "HDF5::MMetaCooler"
 MMETACOOLER_FORMAT_VERSION = 1
-COOLER_FORMAT: Literal["HDF5::Cooler"] = cooler.create._constants.MAGIC
+# These two mirror ``cooler.create._constants.MAGIC`` / ``.URL``.  They are
+# vendored as literals rather than imported: that module is private, so an
+# upstream refactor (rename, relocation, lazy submodule) would otherwise break
+# every metacooler import.  The values are part of the on-disk cooler format
+# and therefore cannot change without a format version bump.
+COOLER_FORMAT: Literal["HDF5::Cooler"] = "HDF5::Cooler"
 COOLER_FORMAT_URL: Literal["https://github.com/open2c/cooler"] = (
-    cooler.create._constants.URL
+    "https://github.com/open2c/cooler"
 )
 
 # Dense matrix size guard: refuse to allocate matrices larger than this
 DENSE_MATRIX_BIN_LIMIT = 50_000
 
-# Dtypes matching cooler conventions
-CHROMID_DTYPE = np.int32
-COORD_DTYPE = np.int32
-BIN_DTYPE = np.int64
-COUNT_DTYPE = np.int32
+# Rows sampled from each probed window of the pixel table (see ``validate``).
+PIXEL_SAMPLE_SIZE = 1000
 
-# Column dtypes for metacooler-specific tables
+# Storage modes understood by the validator.  metacooler only ever writes
+# ``symmetric-upper``; ``square`` is accepted (cooler writes it) but disables
+# the upper-triangle check, which is meaningless for a full matrix.
+STORAGE_MODES = frozenset({"symmetric-upper", "square"})
+
+# ``contig-ordering`` values that lay contigs out grouped by ascending
+# ``genome_id``.  Only for these is ``indexes/genome_offset`` a meaningful
+# offset array (see ``validate``).
+GENOME_GROUPED_ORDERINGS = frozenset({"genome-then-length", "genome-then-alpha"})
+
+# Column dtypes for metacooler-specific tables.
+# ``n_bins`` is deliberately absent from GENOMES_DTYPE: the column is inserted
+# into the genomes table by ``io.create._compute_all_offsets`` *after* the
+# dtype cast in ``_build_genomes_table``, so declaring it here had no effect.
 GENOMES_DTYPE = {
     "name": "object",
     "length": "i8",
     "n_contigs": "i4",
-    "n_bins": "i8",
 }
 
 CONTIGS_DTYPE = {
@@ -51,6 +64,133 @@ class MetaCoolerFormatError(ValueError):
     """Raised when a file does not conform to the metacooler format."""
 
 
+def _attr(node: h5py.Group, key: str) -> object:
+    """Return an HDF5 attribute, decoding byte strings to ``str``.
+
+    Args:
+        node: HDF5 file or group carrying the attribute.
+        key: Attribute name.
+
+    Returns:
+        The attribute value, or ``None`` if it is absent.
+    """
+    value = node.attrs.get(key)
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value
+
+
+def _int_attr(node: h5py.Group, key: str) -> int | None:
+    """Return an integer-valued HDF5 attribute, or ``None`` if unset.
+
+    ``bin-size`` is written as the string ``"null"`` for variable-width bins,
+    so string sentinels are treated as "absent" rather than as an error.
+
+    Args:
+        node: HDF5 file or group carrying the attribute.
+        key: Attribute name.
+
+    Returns:
+        The attribute as an ``int``, or ``None`` if absent or explicitly null.
+
+    Raises:
+        MetaCoolerFormatError: If the attribute is present but not an integer.
+    """
+    value = _attr(node, key)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.strip().lower() in ("", "null", "none", "nan"):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            raise MetaCoolerFormatError(
+                f"attrs[{key!r}] must be an integer, got {value!r}"
+            ) from None
+    if isinstance(value, (bool, np.bool_)):
+        raise MetaCoolerFormatError(f"attrs[{key!r}] must be an integer, got {value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return int(value)
+    raise MetaCoolerFormatError(f"attrs[{key!r}] must be an integer, got {value!r}")
+
+
+def _table_length(group: h5py.Group, name: str) -> int:
+    """Return the shared row count of an HDF5 table group.
+
+    Every dataset under a table group is a column of the same table, so all of
+    them must have the same length.  Without this check a truncated column
+    (e.g. a ``/pixels/count`` that is shorter than ``/pixels/bin1_id``) passes
+    validation and silently mis-pairs counts with coordinates.
+
+    Only dataset *shapes* are read, so the cost is O(n_columns).
+
+    Args:
+        group: HDF5 group holding one dataset per column.
+        name: Group name, used in the error message.
+
+    Returns:
+        The common column length, or ``0`` if the group holds no datasets.
+
+    Raises:
+        MetaCoolerFormatError: If two columns have different lengths.
+    """
+    lengths = {
+        key: len(group[key])
+        for key in group
+        if isinstance(group[key], h5py.Dataset) and group[key].ndim > 0
+    }
+    if not lengths:
+        return 0
+    if len(set(lengths.values())) > 1:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(lengths.items()))
+        raise MetaCoolerFormatError(
+            f"/{name} columns have unequal lengths ({detail}); every column of a "
+            "table must have one row per record"
+        )
+    return next(iter(lengths.values()))
+
+
+def _check_offset_array(
+    values: np.ndarray, name: str, expected_len: int, total: int
+) -> None:
+    """Validate the universal invariants of a CSR-style offset array.
+
+    An offset array must have exactly ``expected_len`` entries, start at 0, end
+    at *total*, and never decrease.  ``bin1_offset`` in particular is the most
+    load-bearing index in the format — every range query walks it — yet it was
+    previously only checked at its two endpoints.  ``np.diff`` makes the full
+    check O(len(values)).
+
+    Args:
+        values: The offset array, as int64.
+        name: Dataset name, used in error messages.
+        expected_len: Required number of entries.
+        total: Required value of the final entry.
+
+    Raises:
+        MetaCoolerFormatError: If any invariant is violated.
+    """
+    if len(values) != expected_len:
+        raise MetaCoolerFormatError(f"{name} length ({len(values)}) != {expected_len}")
+    if len(values) == 0:
+        return
+    if int(values[0]) != 0 or int(values[-1]) != total:
+        raise MetaCoolerFormatError(
+            f"{name} endpoints ({int(values[0])}, {int(values[-1])}) "
+            f"do not bracket the table (0, {total})"
+        )
+    deltas = np.diff(values)
+    if np.any(deltas < 0):
+        bad = int(np.argmax(deltas < 0))
+        raise MetaCoolerFormatError(
+            f"{name} is not non-decreasing: {name}[{bad}]={int(values[bad])} > "
+            f"{name}[{bad + 1}]={int(values[bad + 1])}"
+        )
+
+
 def is_metacooler(uri: str | Path) -> bool:
     """Return ``True`` if *uri* points to a valid ``.metacool`` file.
 
@@ -60,23 +200,37 @@ def is_metacooler(uri: str | Path) -> bool:
     for a metacool file because of the soft-link ``chroms → contigs``
     and the ``format = "HDF5::Cooler"`` attribute.
 
+    Accepts the same ``file::group`` URI syntax as :func:`validate`, so
+    ``is_metacooler("reps.mmetacool::entries/rep1")`` tests the entry rather
+    than the collection root.
+
     Args:
-        uri: Path to the file to test.
+        uri: Path to the file to test, optionally followed by ``::group``.
 
     Returns:
-        ``True`` if the file is a valid metacool file, ``False`` otherwise
-        (including if the file does not exist or cannot be opened).
+        ``True`` if the target is a valid metacool file or entry, ``False``
+        otherwise (including if the file does not exist or cannot be opened).
     """
-    path = Path(uri)
+    from metacooler.uri import parse_uri
+
+    try:
+        path, group_path = parse_uri(str(uri))
+    except ValueError:
+        return False
     if not path.exists():
         return False
     try:
-        with h5py.File(path, "r") as f:
-            fmt = f.attrs.get("metacooler-format")
-            if fmt != METACOOLER_FORMAT:
+        with h5py.File(path, "r") as froot:
+            key = group_path.lstrip("/")
+            if key and key not in froot:
+                return False
+            node = froot[key] if key else froot
+            if not isinstance(node, h5py.Group):
+                return False
+            if _attr(node, "metacooler-format") != METACOOLER_FORMAT:
                 return False
             return all(
-                g in f for g in ("genomes", "contigs", "bins", "pixels", "indexes")
+                g in node for g in ("genomes", "contigs", "bins", "pixels", "indexes")
             )
     except Exception:
         return False
@@ -88,6 +242,10 @@ def validate(uri: str | Path) -> None:
     Performs a structural integrity check: required groups, columns,
     indexes, and cross-count consistency.
 
+    Every check is O(n_bins) / O(n_contigs) at worst — the pixel table is
+    never scanned end to end — because this runs on every ``MetaCooler``
+    construction.
+
     Args:
         uri: Path to the ``.metacool`` file, or a URI of the form
             ``file.mmetacool::entries/entry`` to validate a sub-group inside
@@ -95,7 +253,8 @@ def validate(uri: str | Path) -> None:
 
     Raises:
         MetaCoolerFormatError: If any required group, dataset, or attribute
-            is missing or malformed.
+            is missing or malformed, or if the URI names a group that does
+            not exist.
     """
     from metacooler.uri import parse_uri
 
@@ -104,7 +263,26 @@ def validate(uri: str | Path) -> None:
         raise MetaCoolerFormatError(f"File not found: {file_path}")
 
     with h5py.File(file_path, "r") as _froot:
-        f = _froot[group_path.lstrip("/")] if group_path != "/" else _froot
+        # Resolve the group named by the URI.  A typo used to surface as a bare
+        # h5py KeyError, contradicting the documented contract that every
+        # failure of this function is a MetaCoolerFormatError.
+        key = group_path.lstrip("/")
+        if key:
+            if key not in _froot:
+                available = sorted(_froot.keys())
+                raise MetaCoolerFormatError(
+                    f"Group {group_path!r} not found in {file_path}. "
+                    f"Top-level keys: {available[:20]}"
+                )
+            node = _froot[key]
+            if not isinstance(node, h5py.Group):
+                raise MetaCoolerFormatError(
+                    f"{group_path!r} in {file_path} is a "
+                    f"{type(node).__name__}, not an HDF5 group"
+                )
+            f = node
+        else:
+            f = _froot
         # --- format attributes ---
         fmt = f.attrs.get("format")
         if fmt != COOLER_FORMAT:
@@ -153,11 +331,11 @@ def validate(uri: str | Path) -> None:
             if ds not in idx:
                 raise MetaCoolerFormatError(f"Missing index dataset: /indexes/{ds}")
 
-        # --- cross-check counts ---
-        n_genomes = len(g["name"])
-        n_contigs = len(c["name"])
-        n_bins = len(b["chrom"])
-        n_pixels = len(p["bin1_id"])
+        # --- per-group column lengths must agree, then cross-check counts ---
+        n_genomes = _table_length(g, "genomes")
+        n_contigs = _table_length(c, "contigs")
+        n_bins = _table_length(b, "bins")
+        n_pixels = _table_length(p, "pixels")
         if n_pixels == 0:
             logger.warning("Empty pixels table")
         if n_contigs == 0:
@@ -185,14 +363,44 @@ def validate(uri: str | Path) -> None:
             raise MetaCoolerFormatError("genome names are not unique")
 
         # --- attribute consistency ---
-        nchroms_attr = f.attrs.get("nchroms")
-        if nchroms_attr is not None and int(nchroms_attr) != n_contigs:
+        # Every one of these is optional (docs/format.md allows a file written
+        # by an older writer to omit them), but must agree with the tables when
+        # present.  ``ngenomes`` used to be the only documented count with no
+        # check, which made it silently drift from /genomes.
+        for attr_name, actual, label in (
+            ("nchroms", n_contigs, "len(/contigs)"),
+            ("ngenomes", n_genomes, "len(/genomes)"),
+            ("nbins", n_bins, "len(/bins)"),
+            ("nnz", n_pixels, "len(/pixels)"),
+        ):
+            declared = _int_attr(f, attr_name)
+            if declared is not None and declared != actual:
+                raise MetaCoolerFormatError(
+                    f"attrs[{attr_name!r}] ({declared}) != {label} ({actual})"
+                )
+
+        mfmt_version = _int_attr(f, "metacooler-format-version")
+        if mfmt_version is not None and mfmt_version != METACOOLER_FORMAT_VERSION:
             raise MetaCoolerFormatError(
-                f"attrs['nchroms'] ({int(nchroms_attr)}) != len(/contigs) ({n_contigs})"
+                f"attrs['metacooler-format-version'] is {mfmt_version}; this "
+                f"metacooler only understands version {METACOOLER_FORMAT_VERSION}"
+            )
+
+        storage_mode = _attr(f, "storage-mode")
+        if storage_mode is not None and storage_mode not in STORAGE_MODES:
+            raise MetaCoolerFormatError(
+                f"attrs['storage-mode'] must be one of {sorted(STORAGE_MODES)}, "
+                f"got {storage_mode!r}"
+            )
+        if storage_mode == "square":
+            logger.warning(
+                "storage-mode='square': skipping the upper-triangle check "
+                "(metacooler writes 'symmetric-upper')"
             )
 
         # --- contig lengths must be positive ---
-        if (np.array(c["length"]) <= 0).any():
+        contig_lengths = np.array(c["length"]).astype(np.int64)
+        if (contig_lengths <= 0).any():
             raise MetaCoolerFormatError("contig lengths must be positive (> 0)")
 
         # --- bins/chrom range and ordering ---
@@ -205,39 +413,89 @@ def validate(uri: str | Path) -> None:
             if np.any(np.diff(bins_chrom) < 0):
                 raise MetaCoolerFormatError("bins are not sorted by contig (chrom)")
 
-        # --- index dataset lengths ---
-        if len(idx["chrom_offset"]) != n_contigs + 1:
+        # --- bins geometry ---
+        # Fully vectorised, O(n_bins).  Without this an int32 overflow in a bin
+        # tiler can write negative starts, or a stale /contigs/length can leave
+        # bins hanging off the end of their contig, and the file still validates.
+        bins_start = np.array(b["start"]).astype(np.int64)
+        bins_end = np.array(b["end"]).astype(np.int64)
+        if n_bins > 0:
+            if (bins_start < 0).any():
+                bad = int(np.argmax(bins_start < 0))
+                raise MetaCoolerFormatError(
+                    f"bins/start must be non-negative (bin {bad} starts at "
+                    f"{int(bins_start[bad])}); this is the signature of an "
+                    "integer overflow in the bin tiler"
+                )
+            empty_or_inverted = bins_start >= bins_end
+            if empty_or_inverted.any():
+                bad = int(np.argmax(empty_or_inverted))
+                raise MetaCoolerFormatError(
+                    f"bins must satisfy start < end (bin {bad}: "
+                    f"start={int(bins_start[bad])}, end={int(bins_end[bad])})"
+                )
+            past_end = bins_end > contig_lengths[bins_chrom]
+            if past_end.any():
+                bad = int(np.argmax(past_end))
+                raise MetaCoolerFormatError(
+                    f"bin {bad} ends at {int(bins_end[bad])} but its contig "
+                    f"({int(bins_chrom[bad])}) is only "
+                    f"{int(contig_lengths[bins_chrom[bad]])} bp long"
+                )
+            same_contig = bins_chrom[1:] == bins_chrom[:-1]
+            overlapping = same_contig & (bins_start[1:] < bins_end[:-1])
+            if overlapping.any():
+                bad = int(np.argmax(overlapping))
+                raise MetaCoolerFormatError(
+                    f"bins {bad} and {bad + 1} overlap or are out of order within "
+                    f"contig {int(bins_chrom[bad])}: "
+                    f"[{int(bins_start[bad])}, {int(bins_end[bad])}) then "
+                    f"[{int(bins_start[bad + 1])}, {int(bins_end[bad + 1])})"
+                )
+
+        # --- bin-size must describe the bins it claims to describe ---
+        bin_type = _attr(f, "bin-type")
+        if bin_type is not None and bin_type not in ("fixed", "variable"):
             raise MetaCoolerFormatError(
-                f"chrom_offset length ({len(idx['chrom_offset'])}) != n_contigs+1 ({n_contigs + 1})"
+                f"attrs['bin-type'] must be 'fixed' or 'variable', got {bin_type!r}"
             )
-        if len(idx["bin1_offset"]) != n_bins + 1:
+        bin_size = _int_attr(f, "bin-size")
+        if bin_type == "fixed" and bin_size is None:
             raise MetaCoolerFormatError(
-                f"bin1_offset length ({len(idx['bin1_offset'])}) != n_bins+1 ({n_bins + 1})"
+                "attrs['bin-type']='fixed' but attrs['bin-size'] is missing or null"
             )
+        if bin_type == "variable" and bin_size is not None:
+            logger.warning(
+                "attrs['bin-type']='variable' but attrs['bin-size']=%d; "
+                "downstream tools will disagree about the resolution",
+                bin_size,
+            )
+        if bin_size is not None and bin_size <= 0:
+            raise MetaCoolerFormatError(
+                f"attrs['bin-size'] must be positive, got {bin_size}"
+            )
+        if bin_size is not None and n_bins > 0:
+            # cooler's own rule (``cooler.util.get_binsize``): the last bin of
+            # each contig may be short, every other bin is exactly binsize.
+            is_last_in_contig = np.append(bins_chrom[1:] != bins_chrom[:-1], True)
+            widths = bins_end - bins_start
+            wrong = ~is_last_in_contig & (widths != bin_size)
+            if wrong.any():
+                bad = int(np.argmax(wrong))
+                raise MetaCoolerFormatError(
+                    f"attrs['bin-size'] is {bin_size} but bin {bad} is "
+                    f"{int(widths[bad])} bp wide"
+                )
+
+        # --- index datasets: shape, endpoints and monotonicity ---
+        chrom_offset = np.array(idx["chrom_offset"]).astype(np.int64)
+        _check_offset_array(chrom_offset, "chrom_offset", n_contigs + 1, n_bins)
+        bin1_offset = np.array(idx["bin1_offset"]).astype(np.int64)
+        _check_offset_array(bin1_offset, "bin1_offset", n_bins + 1, n_pixels)
         if "genome_offset" not in idx:
             raise MetaCoolerFormatError("indexes/genome_offset is missing")
-        if len(idx["genome_offset"]) != n_genomes + 1:
-            raise MetaCoolerFormatError(
-                f"genome_offset length ({len(idx['genome_offset'])}) != n_genomes+1 ({n_genomes + 1})"
-            )
-
-        # --- chrom_offset must be the bin-count CSR over the (sorted) bins ---
-        chrom_offset = np.array(idx["chrom_offset"]).astype(np.int64)
-        expected_chrom = np.zeros(n_contigs + 1, dtype=np.int64)
-        if n_bins > 0:
-            expected_chrom[1:] = np.cumsum(np.bincount(bins_chrom, minlength=n_contigs))
-        if not np.array_equal(chrom_offset, expected_chrom):
-            raise MetaCoolerFormatError(
-                "chrom_offset is inconsistent with the bins table"
-            )
-
-        # --- bin1_offset endpoints must bracket the pixel table ---
-        bin1_offset = np.array(idx["bin1_offset"]).astype(np.int64)
-        if int(bin1_offset[0]) != 0 or int(bin1_offset[-1]) != n_pixels:
-            raise MetaCoolerFormatError(
-                f"bin1_offset endpoints ({int(bin1_offset[0])}, {int(bin1_offset[-1])}) "
-                f"do not bracket the pixel table (0, {n_pixels})"
-            )
+        genome_offset = np.array(idx["genome_offset"]).astype(np.int64)
+        _check_offset_array(genome_offset, "genome_offset", n_genomes + 1, n_contigs)
 
         # --- contig genome_ids must be in range ---
         genome_ids = np.array(c["genome_id"]).astype(np.int64)
@@ -246,30 +504,40 @@ def validate(uri: str | Path) -> None:
                 f"genome_id values out of range [0, {n_genomes})"
             )
 
-        # --- genome_offset must be the contig-count CSR over genomes ---
-        genome_offset = np.array(idx["genome_offset"]).astype(np.int64)
-        genome_contig_counts = np.bincount(genome_ids, minlength=n_genomes)
-        expected_genome = np.zeros(n_genomes + 1, dtype=np.int64)
-        expected_genome[1:] = np.cumsum(genome_contig_counts)
-        if not np.array_equal(genome_offset, expected_genome):
+        # --- chrom_offset must be the bin-count CSR over the (sorted) bins ---
+        expected_chrom = np.zeros(n_contigs + 1, dtype=np.int64)
+        if n_bins > 0:
+            expected_chrom[1:] = np.cumsum(np.bincount(bins_chrom, minlength=n_contigs))
+        if not np.array_equal(chrom_offset, expected_chrom):
             raise MetaCoolerFormatError(
-                f"genome_offset {genome_offset.tolist()} is inconsistent with the "
-                f"contig genome_id counts; expected {expected_genome.tolist()}"
-            )
-        # For genome-grouped orderings, contigs must be physically laid out in
-        # ascending genome_id order (otherwise genome_offset — though numerically
-        # consistent with the counts — would not delimit each genome's contigs).
-        ordering = f.attrs.get("contig-ordering")
-        if ordering in ("genome-then-length", "genome-then-alpha") and np.any(
-            np.diff(genome_ids) < 0
-        ):
-            raise MetaCoolerFormatError(
-                f"contig-ordering={ordering!r} requires contigs grouped by ascending "
-                "genome_id, but the genome_id sequence is not non-decreasing, so "
-                "genome_offset does not match the physical contig layout"
+                "chrom_offset is inconsistent with the bins table"
             )
 
-        # --- genomes/n_contigs and n_bins must match reality ---
+        genome_contig_counts = np.bincount(genome_ids, minlength=n_genomes)
+        # genome_offset only *means* anything when the contigs are physically
+        # laid out grouped by ascending genome_id: for `alpha`, `fasta` and
+        # `cool` orderings the array is still written (docs/format.md:111
+        # describes it unconditionally) but it cannot delimit a genome's contig
+        # block, so only its shape/monotonicity — checked above — is validated.
+        ordering = _attr(f, "contig-ordering")
+        if ordering in GENOME_GROUPED_ORDERINGS:
+            if np.any(np.diff(genome_ids) < 0):
+                raise MetaCoolerFormatError(
+                    f"contig-ordering={ordering!r} requires contigs grouped by "
+                    "ascending genome_id, but the genome_id sequence is not "
+                    "non-decreasing, so genome_offset does not match the physical "
+                    "contig layout"
+                )
+            expected_genome = np.zeros(n_genomes + 1, dtype=np.int64)
+            expected_genome[1:] = np.cumsum(genome_contig_counts)
+            if not np.array_equal(genome_offset, expected_genome):
+                raise MetaCoolerFormatError(
+                    f"genome_offset {genome_offset.tolist()} is inconsistent with "
+                    f"the contig genome_id counts; expected "
+                    f"{expected_genome.tolist()}"
+                )
+
+        # --- genomes/n_contigs, n_bins and length must match reality ---
         if not np.array_equal(
             np.array(g["n_contigs"]).astype(np.int64), genome_contig_counts
         ):
@@ -284,21 +552,41 @@ def validate(uri: str | Path) -> None:
             np.array(g["n_bins"]).astype(np.int64), genome_bin_counts
         ):
             raise MetaCoolerFormatError("genomes/n_bins does not match the bins table")
+        genome_lengths = np.array(g["length"]).astype(np.int64)
+        expected_lengths = np.bincount(
+            genome_ids, weights=contig_lengths.astype(np.float64), minlength=n_genomes
+        ).astype(np.int64)
+        if not np.array_equal(genome_lengths, expected_lengths):
+            bad = int(np.argmax(genome_lengths != expected_lengths))
+            raise MetaCoolerFormatError(
+                f"genomes/length does not match the contigs table: genome {bad} "
+                f"declares {int(genome_lengths[bad])} bp but its contigs sum to "
+                f"{int(expected_lengths[bad])} bp"
+            )
 
-        # --- pixel ordering, range, and upper-triangle (sampled first/last rows) ---
+        # --- pixel ordering, range, and upper-triangle ---
+        # Global bin1_id ordering is proven by the monotonicity of bin1_offset
+        # (checked above, O(n_bins)); a full pass over the pixel table would be
+        # O(n_pixels) and this function runs on every file open.  What is left
+        # is checked on three sampled windows — head, middle and tail — each of
+        # which is additionally reconciled against bin1_offset, so an interior
+        # scramble no longer slips through the way it did with head/tail-only
+        # sampling.
         if n_pixels > 0:
-            sample_size = min(1000, n_pixels)
-            for sl in (
-                slice(0, sample_size),
-                slice(max(0, n_pixels - sample_size), n_pixels),
-            ):
-                b1 = np.array(p["bin1_id"][sl])
-                b2 = np.array(p["bin2_id"][sl])
+            window = min(PIXEL_SAMPLE_SIZE, n_pixels)
+            starts = sorted(
+                {0, max(0, (n_pixels - window) // 2), max(0, n_pixels - window)}
+            )
+            for start in starts:
+                stop = min(start + window, n_pixels)
+                positions = np.arange(start, stop)
+                b1 = np.array(p["bin1_id"][start:stop]).astype(np.int64)
+                b2 = np.array(p["bin2_id"][start:stop]).astype(np.int64)
                 if b1.min() < 0 or b2.max() >= n_bins:
                     raise MetaCoolerFormatError(
                         f"pixel bin ids out of range [0, {n_bins})"
                     )
-                if np.any(b1 > b2):
+                if storage_mode != "square" and np.any(b1 > b2):
                     raise MetaCoolerFormatError(
                         "pixels are not upper-triangular (bin1_id <= bin2_id)"
                     )
@@ -307,6 +595,16 @@ def validate(uri: str | Path) -> None:
                 ):
                     raise MetaCoolerFormatError(
                         "pixels are not sorted by (bin1_id, bin2_id)"
+                    )
+                # Each sampled row must live in the bin1_offset slot that claims
+                # it; this ties the (cheap) index check to the actual pixels.
+                owner = np.searchsorted(bin1_offset, positions, side="right") - 1
+                if not np.array_equal(owner, b1):
+                    bad = int(np.argmax(owner != b1))
+                    raise MetaCoolerFormatError(
+                        f"bin1_offset disagrees with pixels/bin1_id at row "
+                        f"{start + bad}: the index places it in bin "
+                        f"{int(owner[bad])}, the pixel says {int(b1[bad])}"
                     )
 
 
@@ -345,19 +643,24 @@ def is_mmetacooler(uri: str | Path) -> bool:
 def validate_mmetacooler(uri: str | Path) -> None:
     """Validate that *uri* is a well-formed ``.mmetacool`` file.
 
-    Checks top-level attributes, the ``entries/`` group, and verifies
-    that each entry contains the required metacooler tables (``bins``,
-    ``pixels``, ``contigs``, ``genomes``, ``indexes``).
+    Checks top-level attributes and the ``entries/`` group, then runs the
+    full :func:`validate` on every entry.  Entry failures are collected and
+    reported together rather than stopping at the first one, so a
+    multi-resolution file is diagnosed in a single pass.
 
     Args:
         uri: Path to the ``.mmetacool`` file to validate.
 
     Raises:
-        MetaCoolerFormatError: If the structure is invalid.
+        MetaCoolerFormatError: If the structure is invalid, or if any entry
+            is not a well-formed metacooler.
     """
     path = Path(uri)
     if not path.exists():
         raise MetaCoolerFormatError(f"File not found: {path}")
+
+    errors: list[str] = []
+    to_validate: list[str] = []
 
     with h5py.File(path, "r") as f:
         fmt = f.attrs.get("format")
@@ -377,11 +680,31 @@ def validate_mmetacooler(uri: str | Path) -> None:
         for name in grp:
             entry = grp[name]
             # Each entry must have the core metacooler tables
-            for tbl in ("bins", "pixels", "contigs", "genomes", "indexes"):
-                if tbl not in entry:
-                    raise MetaCoolerFormatError(
-                        f"Entry {name!r} missing required group: {tbl}"
-                    )
+            missing = [
+                tbl
+                for tbl in ("bins", "pixels", "contigs", "genomes", "indexes")
+                if tbl not in entry
+            ]
+            if missing:
+                errors.append(
+                    f"Entry {name!r} missing required group: {', '.join(missing)}"
+                )
+            else:
+                to_validate.append(name)
+
+    # Run the per-entry validation with the collection closed: validate()
+    # reopens the file itself.
+    for name in to_validate:
+        try:
+            validate(f"{path}::entries/{name}")
+        except MetaCoolerFormatError as exc:
+            errors.append(f"Entry {name!r}: {exc}")
+
+    if errors:
+        raise MetaCoolerFormatError(
+            f"{path} is not a well-formed .mmetacool file:\n  - "
+            + "\n  - ".join(errors)
+        )
 
 
 def list_entry_names(uri: str | Path) -> list[str]:
