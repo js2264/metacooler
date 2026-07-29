@@ -9,6 +9,8 @@ from typing import Literal
 
 import pandas as pd
 
+from metacooler.io._utils import read_user_table
+
 logger = logging.getLogger("metacooler")
 
 
@@ -84,13 +86,7 @@ def parse_contigs_table(
     _check_not_empty(path, "Contig table")
 
     if fmt == "contigs":
-        df = pd.read_csv(
-            path,
-            sep="\t",
-            header=0,
-            dtype=str,
-            keep_default_na=False,
-        )
+        df = read_user_table(path, kind="Contig table")
         if df.shape[1] < 2:
             raise ValueError(
                 "contigs format requires at least 2 columns: "
@@ -116,13 +112,7 @@ def parse_contigs_table(
         # columns makes pandas silently promote the first column to the index,
         # shifting every field left by one and destroying the mapping.  Read all
         # columns, require at least two, and keep the first two.
-        df = pd.read_csv(
-            path,
-            sep="\t",
-            header=None,
-            dtype=str,
-            keep_default_na=False,
-        )
+        df = read_user_table(path, kind="Contig table", header=False)
         if df.shape[1] < 2:
             raise ValueError(
                 "contig_genome format requires at least 2 tab-separated columns "

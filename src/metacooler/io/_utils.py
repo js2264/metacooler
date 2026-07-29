@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +25,183 @@ if TYPE_CHECKING:
     from metacooler.api import MetaCooler
 
 logger = logging.getLogger("metacooler")
+
+# pandas' placeholder name for a header cell that is empty — what a trailing tab
+# on the header line produces.
+_UNNAMED_COLUMN_RE = re.compile(r"Unnamed: \d+")
+# How many ragged line numbers to name in the warning.
+_MAX_REPORTED_RAGGED_LINES = 5
+
+
+def _raw_field_counts(path: Path) -> list[int]:
+    """Count the tab-separated fields on every non-blank line of *path*.
+
+    Counted from the raw bytes rather than read off the parsed frame, because
+    the parsed frame does not remember: ``pandas.read_csv`` pads a row that has
+    fewer fields than the header, and under ``keep_default_na=False`` (which
+    every metacooler table reader uses, so that a genome literally called
+    ``"NA"`` survives) the pad is an empty string — indistinguishable from a
+    field that was present and empty.
+
+    Args:
+        path: Table to scan.  Transparently decompressed when it ends in ``.gz``.
+
+    Returns:
+        One field count per non-blank line, in file order.
+    """
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rb") as fh:
+        return [line.count(b"\t") + 1 for line in fh if line.strip()]
+
+
+def _drop_trailing_unnamed_columns(df: pd.DataFrame, kind: str) -> pd.DataFrame:
+    """Drop trailing header-less columns that no row fills.
+
+    A trailing tab on the header line is an artifact of whatever wrote the file,
+    not a column: pandas turns it into an ``Unnamed: N`` column of empty
+    strings, which metacooler would then write out as a junk ``/genomes`` or
+    ``/contigs`` HDF5 dataset.  Only *trailing* ones are dropped — an empty
+    column in the middle is still a positional placeholder, and removing it
+    would shift every column after it.
+
+    Args:
+        df: Frame just read with ``header=0``.
+        kind: Human-readable table name used in the log message.
+
+    Returns:
+        *df*, or a narrower view of it.
+    """
+    n = df.shape[1]
+    while n > 1 and _UNNAMED_COLUMN_RE.fullmatch(str(df.columns[n - 1])):
+        if not (df.iloc[:, n - 1] == "").all():
+            break
+        n -= 1
+    if n == df.shape[1]:
+        return df
+    logger.debug(
+        "%s: dropped %d unnamed, empty trailing column(s) (trailing tab on the "
+        "header line).",
+        kind,
+        df.shape[1] - n,
+    )
+    return df.iloc[:, :n]
+
+
+def _warn_ragged_rows(
+    counts: list[int], expected: int, kind: str, path: Path, first_line: int
+) -> None:
+    """Warn about individual lines narrower than *expected*.
+
+    Args:
+        counts: Field count of each data line.
+        expected: Field count the table should have.
+        kind: Human-readable table name.
+        path: Table path, for the message.
+        first_line: 1-based file line number of ``counts[0]``.
+    """
+    short = [i + first_line for i, c in enumerate(counts) if c < expected]
+    if not short:
+        return
+    shown = ", ".join(str(n) for n in short[:_MAX_REPORTED_RAGGED_LINES])
+    logger.warning(
+        "%s (%s): %d line(s) have fewer than %d tab-separated field(s) "
+        "(line(s) %s%s); their missing trailing fields were read as empty.",
+        kind,
+        path,
+        len(short),
+        expected,
+        shown,
+        ", ..." if len(short) > _MAX_REPORTED_RAGGED_LINES else "",
+    )
+
+
+def read_user_table(
+    path: str | Path,
+    *,
+    kind: str,
+    header: bool = True,
+) -> pd.DataFrame:
+    """Read a user-supplied TSV, refusing to silently misalign a ragged one.
+
+    Single entry point for every user-facing text table metacooler parses
+    (genomes tables, contig tables), because ``pandas.read_csv`` resolves a
+    header/data field-count mismatch silently and in a different direction
+    depending on which side is wider:
+
+    - Header **wider** than the rows: the trailing columns are padded, so every
+      value lands under a column name to the left of the one it belongs to.  A
+      real MetaTOR genome table shipped an 11-name header over 8-field rows,
+      and its GC content was stored as ``Size``, its completeness as
+      ``n_contigs`` and its taxonomy as ``GC`` — all without a single warning.
+    - Rows **wider** than the header: pandas promotes the surplus leading
+      field(s) into the DataFrame index instead, shifting the values the other
+      way.  This is the same trap already documented for short ``names=`` lists
+      in :func:`metacooler.io.contigs.parse_contigs_table`, reached through the
+      header rather than through ``names``.
+
+    Either way a mislabelled table parses cleanly, so the misalignment only
+    surfaces much later as impossible metadata.  Both shapes are rejected here
+    instead.
+
+    Args:
+        path: Path to the table.  ``.gz`` is handled.
+        kind: Human-readable table name used in errors and warnings, e.g.
+            ``"Genomes table"``.
+        header: Whether the first line names the columns.  When False the frame
+            keeps pandas' positional integer column labels.
+
+    Returns:
+        DataFrame of ``str`` values, with NA-like strings preserved verbatim.
+
+    Raises:
+        ValueError: If *path* has no parseable line, or if its header and data
+            rows systematically disagree on the number of fields.
+    """
+    path = Path(path)
+    counts = _raw_field_counts(path)
+    if not counts:
+        raise ValueError(f"{kind} has no non-blank lines: {path}")
+
+    # keep_default_na=False so that a genome or contig literally named "NA",
+    # "nan" or "None" is not turned into a missing value.
+    read_kwargs = {"sep": "\t", "dtype": str, "keep_default_na": False}
+
+    if not header:
+        widest = max(counts)
+        _warn_ragged_rows(counts, widest, kind, path, first_line=1)
+        return pd.read_csv(path, header=None, **read_kwargs)  # type: ignore[arg-type]
+
+    n_header, data_counts = counts[0], counts[1:]
+    widest = max(data_counts, default=0)
+    if widest > n_header:
+        raise ValueError(
+            f"{kind} is misaligned: {path}\n"
+            f"  The header line has {n_header} tab-separated field(s), but some "
+            f"data row(s) have up to {widest}. The surplus leading field(s) "
+            f"would be absorbed into the row index, storing every value under "
+            f"the name of a column to its left. Give the header one name per "
+            f"column."
+        )
+
+    df = _drop_trailing_unnamed_columns(
+        pd.read_csv(path, header=0, **read_kwargs),  # type: ignore[arg-type]
+        kind,
+    )
+    n_named = df.shape[1]
+    if data_counts and widest < n_named:
+        unfilled = ", ".join(repr(str(c)) for c in df.columns[widest:])
+        raise ValueError(
+            f"{kind} is misaligned: {path}\n"
+            f"  The header names {n_named} column(s), but no data row has more "
+            f"than {widest} field(s), so {unfilled} is/are unfilled on every "
+            f"row. metacooler will not guess whether the absent fields belong "
+            f"at the start or at the end of each row: assuming the end (what "
+            f"pandas does) would store every value under the name of the "
+            f"column {n_named - widest} position(s) to its left. Fix the table "
+            f"so that the header and the data rows agree."
+        )
+    _warn_ragged_rows(data_counts, n_named, kind, path, first_line=2)
+    return df
 
 
 def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:

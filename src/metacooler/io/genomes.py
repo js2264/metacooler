@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from metacooler.io._utils import read_user_table
+
 logger = logging.getLogger("metacooler")
 
 
@@ -29,25 +31,16 @@ def parse_genomes_table(path: str | Path) -> pd.DataFrame:
 
     Raises:
         FileNotFoundError: If *path* does not exist.
-        ValueError: If the file contains fewer than 1 column or the first
-            column is not named ``genome_name``.
+        ValueError: If the file is empty, its header and data rows disagree on
+            the number of fields, or its first column is not named
+            ``genome_name``.
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Genomes table not found: {path}")
     if path.stat().st_size == 0:
         raise ValueError(f"Genomes table is empty: {path}")
-    df = pd.read_csv(
-        path,
-        sep="\t",
-        header=0,
-        dtype=str,
-        keep_default_na=False,
-    )
-    if df.shape[1] < 1:
-        raise ValueError(
-            "genomes table requires at least 1 column: column 1 (genome_name)."
-        )
+    df = read_user_table(path, kind="Genomes table")
     if df.columns[0] != "genome_name":
         raise ValueError(
             f"genomes table expects first column to be 'genome_name', "
