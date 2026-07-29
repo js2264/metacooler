@@ -7,36 +7,18 @@ from pathlib import Path
 
 import rich_click as click
 
-from metacooler.cli.cmd_create import _reconstruct_command
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
+from metacooler.cli._provenance import read_metadata_uri, reconstruct_command
 from metacooler.cli.main import MetaCoolURI, cli
 
 
-def _read_metadata_dict(uri: str) -> dict:
-    """Read and parse the ``metadata`` attribute from a metacool file.
-
-    Args:
-        uri: Plain file path or metacool URI
-            (``file.mmetacool::entries/entry_name``).
-
-    Returns:
-        Metadata as a plain Python dict.  Returns ``{}`` if the
-        attribute is absent.
-    """
-    import h5py
-
-    from metacooler.uri import parse_uri
-
-    file_path, group_path = parse_uri(uri)
-    with h5py.File(file_path, "r") as f:
-        grp = f[group_path] if group_path != "/" else f
-        raw = grp.attrs.get("metadata", "{}")
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        return json.loads(raw) if isinstance(raw, str) else dict(raw)
-
-
 @cli.command(name="merge", help="Merge metacool files with identical axes.")
-@click.argument("metacool_paths", nargs=-1, type=MetaCoolURI())
+@click.argument("metacool_paths", nargs=-1, type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
@@ -44,23 +26,15 @@ def _read_metadata_dict(uri: str) -> dict:
     required=True,
     help="Output .metacool file path.",
 )
-@click.option(
-    "-f",
-    "--force",
-    is_flag=True,
-    help="Overwrite output file if it already exists.",
-)
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@force_option
+@verbose_option
+@quiet_option
 def cmd_merge(
     metacool_paths: tuple[str, ...],
     output: Path,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Merge multiple ``.metacool`` files with identical axes.
 
@@ -74,17 +48,12 @@ def cmd_merge(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.merge import merge
 
-    setup_logging(verbose, command_name="metacooler merge")
+    setup_logging(verbose, command_name="metacooler merge", quiet=quiet)
 
     if len(metacool_paths) < 2:
         raise click.UsageError("At least two input files required.")
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
     merge(inputs=metacool_paths, output=output)
 
@@ -92,7 +61,7 @@ def cmd_merge(
     combined_meta: dict = {}
     all_commands: list[str] = []
     for inp in metacool_paths:
-        meta = _read_metadata_dict(inp)
+        meta = read_metadata_uri(inp)
         for key, value in meta.items():
             if key == "commands":
                 if isinstance(value, list):
@@ -101,7 +70,7 @@ def cmd_merge(
                             all_commands.append(cmd)
             else:
                 combined_meta[key] = value
-    all_commands.append(_reconstruct_command())
+    all_commands.append(reconstruct_command())
     combined_meta["commands"] = all_commands
 
     with h5py.File(output, "a") as f:

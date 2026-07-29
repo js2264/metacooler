@@ -6,11 +6,17 @@ from pathlib import Path
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="flatten", help="Flatten a metacool file into a standard cool file.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
@@ -18,23 +24,15 @@ from metacooler.cli.main import MetaCoolURI, cli
     required=True,
     help="Output .cool file path.",
 )
-@click.option(
-    "-f",
-    "--force",
-    is_flag=True,
-    help="Overwrite output file if it already exists.",
-)
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@force_option
+@verbose_option
+@quiet_option
 def cmd_flatten(
     metacool_path: Path,
     output: Path,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Flatten a metacool file by removing the genome hierarchy.
 
@@ -46,13 +44,8 @@ def cmd_flatten(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.flatten import flatten
 
-    setup_logging(verbose, command_name="metacooler flatten")
+    setup_logging(verbose, command_name="metacooler flatten", quiet=quiet)
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
     flatten(uri=metacool_path, output=output)

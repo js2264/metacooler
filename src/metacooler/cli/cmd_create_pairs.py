@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Literal, cast
 
 import rich_click as click
-import yaml
 
-from metacooler.cli.cmd_create import _reconstruct_command, create, shared_options
-from metacooler.cli.cmd_metadata import _stringify_values
+from metacooler.cli._options import check_output
+from metacooler.cli._provenance import load_metadata_file, reconstruct_command
+from metacooler.cli.cmd_create import create, shared_options
 
 
 @create.command(
@@ -64,10 +63,13 @@ from metacooler.cli.cmd_metadata import _stringify_values
 @click.option(
     "--chunksize",
     type=int,
-    default=15_000_000,
+    default=50_000_000,
     show_default=True,
-    help="Number of pairs to process per chunk. Under 'external' sorting each "
-    "chunk is written as a temporary cooler, so smaller chunks cost more.",
+    help="Number of pairs to process per chunk. This is chunk granularity, not "
+    "read memory (the pyarrow read block is capped separately). Under "
+    "'external' sorting each chunk is written as a temporary cooler at a fixed "
+    "per-call cost that scales with contig count, so smaller chunks cost "
+    "disproportionately more.",
 )
 @click.option(
     "--sort-strategy",
@@ -97,6 +99,7 @@ def cmd_create_pairs(
     sort_strategy: str,
     force: bool,
     verbose: bool,
+    quiet: bool,
     metadata: Path | None,
 ) -> None:
     """
@@ -105,14 +108,9 @@ def cmd_create_pairs(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.create import from_pairs
 
-    setup_logging(verbose, command_name="metacooler create pairs")
+    setup_logging(verbose, command_name="metacooler create pairs", quiet=quiet)
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
     # Map --sort-strategy to sort_in_memory bool
     sort_in_memory: bool | None = {"auto": None, "memory": True, "external": False}[
@@ -129,16 +127,10 @@ def cmd_create_pairs(
         if not bins_path.exists():
             raise click.BadParameter(f"Bins file not found: {bins}") from None
 
-    meta: dict = {"commands": [_reconstruct_command()]}
-    if metadata is not None:
-        data = metadata.read_text()
-        if metadata.suffix in (".yaml", ".yml"):
-            loaded = yaml.safe_load(data)
-        else:
-            loaded = json.loads(data)
-        if not isinstance(loaded, dict):
-            raise click.BadParameter("Metadata file must contain a JSON/YAML object")
-        meta.update(_stringify_values(loaded))
+    # ``commands`` is provenance and must survive the user's metadata file;
+    # load_metadata_file() rejects a file that tries to set it.
+    meta: dict = {"commands": [reconstruct_command()]}
+    meta.update(load_metadata_file(metadata))
 
     from_pairs(
         uri=output,

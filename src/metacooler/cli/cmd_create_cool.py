@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Literal, cast
 
 import rich_click as click
-import yaml
 
-from metacooler.cli.cmd_create import _reconstruct_command, create, shared_options
-from metacooler.cli.cmd_metadata import _stringify_values
+from metacooler.cli._options import check_output
+from metacooler.cli._provenance import load_metadata_file, reconstruct_command
+from metacooler.cli.cmd_create import create, shared_options
 
 
 @create.command(name="cool", help="Create a metacool file from an existing cool file.")
@@ -81,6 +80,7 @@ def cmd_create_cool(
     metadata: Path | None,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Create a metacool file from an existing cool file.
 
@@ -90,30 +90,19 @@ def cmd_create_cool(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.create import from_cool
 
-    setup_logging(verbose, command_name="metacooler create cool")
+    setup_logging(verbose, command_name="metacooler create cool", quiet=quiet)
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
     # Map --sort-strategy to sort_in_memory bool
     sort_in_memory: bool | None = {"auto": None, "memory": True, "external": False}[
         sort_strategy
     ]
 
-    meta: dict = {"commands": [_reconstruct_command()]}
-    if metadata is not None:
-        data = metadata.read_text()
-        if metadata.suffix in (".yaml", ".yml"):
-            loaded = yaml.safe_load(data)
-        else:
-            loaded = json.loads(data)
-        if not isinstance(loaded, dict):
-            raise click.BadParameter("Metadata file must contain a JSON/YAML object")
-        meta.update(_stringify_values(loaded))
+    # ``commands`` is provenance and must survive the user's metadata file;
+    # load_metadata_file() rejects a file that tries to set it.
+    meta: dict = {"commands": [reconstruct_command()]}
+    meta.update(load_metadata_file(metadata))
 
     from_cool(
         cool_uri=cool_path,

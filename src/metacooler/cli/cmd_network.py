@@ -7,11 +7,17 @@ from typing import Literal, cast
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="network", help="Export a network edge list from a metacool file.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "--level",
     type=click.Choice(["bin", "contig", "genome"]),
@@ -44,12 +50,9 @@ from metacooler.cli.main import MetaCoolURI, cli
     show_default=True,
     help="Number of pixels to process per chunk (memory control).",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@force_option
+@verbose_option
+@quiet_option
 def cmd_network(
     metacool_path: str,
     level: str,
@@ -57,7 +60,9 @@ def cmd_network(
     output: Path | None,
     header: bool,
     chunksize: int,
+    force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Export a network edge list (TSV, no header by default).
 
@@ -70,7 +75,9 @@ def cmd_network(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.network import network
 
-    setup_logging(verbose, command_name="metacooler network")
+    setup_logging(verbose, command_name="metacooler network", quiet=quiet)
+
+    check_output(output, force)
 
     network(
         uri=metacool_path,
@@ -79,4 +86,5 @@ def cmd_network(
         out=output,
         header=header,
         chunksize=chunksize,
+        force=force,
     )

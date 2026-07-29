@@ -7,11 +7,17 @@ from typing import Literal, cast
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="aggregate", help="Aggregate contacts to contig or genome level.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
@@ -45,18 +51,9 @@ from metacooler.cli.main import MetaCoolURI, cli
     show_default=True,
     help="Number of pixels read per chunk (controls peak memory usage).",
 )
-@click.option(
-    "-f",
-    "--force",
-    is_flag=True,
-    help="Overwrite output file if it already exists.",
-)
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@force_option
+@verbose_option
+@quiet_option
 def cmd_aggregate(
     metacool_path: str,
     output: Path,
@@ -65,6 +62,7 @@ def cmd_aggregate(
     chunksize: int,
     force: bool = False,
     verbose: bool = False,
+    quiet: bool = False,
 ) -> None:
     """Aggregate a metacool contact map to a standard ``.cool`` file.
 
@@ -75,14 +73,9 @@ def cmd_aggregate(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.aggregate import aggregate
 
-    setup_logging(verbose, command_name="metacooler aggregate")
+    setup_logging(verbose, command_name="metacooler aggregate", quiet=quiet)
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
     aggregate(
         uri=metacool_path,

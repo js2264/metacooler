@@ -7,22 +7,22 @@ from typing import Literal, cast
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="show", help="Visualize contact maps.")
-@click.option(
-    "-f",
-    "--file",
-    type=MetaCoolURI(),
-    help="Path to a ``.metacool`` file or mmetacool entry URI.",
-    required=True,
-)
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
     type=click.Path(path_type=Path),
-    help="Save heatmap to this file instead of opening an interactive window.",
+    help="Output image file path.",
     required=True,
 )
 @click.option(
@@ -88,12 +88,6 @@ from metacooler.cli.main import MetaCoolURI, cli
     help="DPI for output image.",
 )
 @click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-@click.option(
     "-r",
     "--range",
     "range1",
@@ -111,8 +105,11 @@ from metacooler.cli.main import MetaCoolURI, cli
     default=None,
     help="Column-dimension range (defaults to --range when omitted). Implies --level bin.",
 )
+@force_option
+@verbose_option
+@quiet_option
 def cmd_show(
-    file: str,
+    metacool_path: str,
     level: str,
     genome: str | None,
     genomes: tuple[str, str] | None,
@@ -124,20 +121,24 @@ def cmd_show(
     dpi: int,
     range1: str | None,
     range2: str | None,
+    force: bool = False,
     verbose: bool = False,
+    quiet: bool = False,
 ) -> None:
     """Render a contact map heatmap from a metacool file."""
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.show import show
 
-    setup_logging(verbose, command_name="metacooler show")
+    setup_logging(verbose, command_name="metacooler show", quiet=quiet)
+
+    check_output(output, force)
 
     # --range implies bin-level rendering for any non-bin level
     if range1 is not None and level != "bin":
         level = "bin"
 
     show(
-        uri=file,
+        uri=metacool_path,
         level=cast(Literal["bin", "contig", "genome"], level),
         genome=genome,
         genomes=genomes,
@@ -149,4 +150,5 @@ def cmd_show(
         separators=separators,
         out=output,
         dpi=dpi,
+        force=force,
     )

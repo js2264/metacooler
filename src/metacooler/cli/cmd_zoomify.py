@@ -6,11 +6,17 @@ from pathlib import Path
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="zoomify", help="Create a multi-resolution mmetacool file.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
@@ -31,30 +37,37 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=str,
     default=None,
     help=(
-        "cooler-style resolution list, e.g. '1000,2000,5000', '1000N' (nice "
-        "1-2-5 progression), '1000B' (binary x2 progression), or '4DN'. "
-        "Takes precedence over --levels."
+        "Resolution ladder, in cooler's own [b]ladder-token[/b] grammar — "
+        "deliberately [i]not[/i] the plain comma-separated list used by "
+        "--genomes/--contigs elsewhere in this CLI. Accepts an explicit list "
+        "('1000,2000,5000'), or a single generator token: '1000N' (nice 1-2-5 "
+        "progression from 1000), '1000B' (binary x2 progression from 1000), or "
+        "'4DN' (the 4DN standard ladder). Every requested resolution must be a "
+        "multiple of the base bin size. Takes precedence over --levels."
     ),
 )
 @click.option(
-    "-f",
-    "--force",
-    is_flag=True,
-    help="Overwrite output file if it already exists.",
+    "--temp-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Directory for the intermediate per-level files (default: the system "
+        "temporary directory). Mirrors cooler's own [cyan]zoomify --temp-dir[/cyan]; "
+        "point it at fast local scratch with room for one level."
+    ),
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@force_option
+@verbose_option
+@quiet_option
 def cmd_zoomify(
     metacool_path: str,
     output: Path,
     levels: int,
     resolutions: str | None,
+    temp_dir: Path | None,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Create a multi-resolution mmetacool file.
 
@@ -65,14 +78,16 @@ def cmd_zoomify(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.zoomify import zoomify
 
-    setup_logging(verbose, command_name="metacooler zoomify")
+    setup_logging(verbose, command_name="metacooler zoomify", quiet=quiet)
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
-    zoomify(uri=metacool_path, output=output, levels=levels, resolutions=resolutions)
+    zoomify(
+        uri=metacool_path,
+        output=output,
+        levels=levels,
+        resolutions=resolutions,
+        temp_dir=temp_dir,
+        force=force,
+    )
     click.echo(f"Zoomified {metacool_path} → {output}")

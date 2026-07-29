@@ -6,17 +6,13 @@ from pathlib import Path
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    parse_comma_list,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
-
-
-def _parse_comma_list(ctx, param, value):
-    """Parse a comma-separated or multi-value option into a flat list."""
-    if not value:
-        return []
-    result = []
-    for v in value:
-        result.extend(v.split(","))
-    return [x.strip() for x in result if x.strip()]
 
 
 @cli.command(
@@ -29,7 +25,7 @@ def _parse_comma_list(ctx, param, value):
     file per genome is created. 
     """,
 )
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
@@ -41,14 +37,14 @@ def _parse_comma_list(ctx, param, value):
     "--genomes",
     type=str,
     multiple=True,
-    callback=_parse_comma_list,
+    callback=parse_comma_list,
     help="Genome name(s) to extract (comma-separated or repeated).",
 )
 @click.option(
     "--contigs",
     type=str,
     multiple=True,
-    callback=_parse_comma_list,
+    callback=parse_comma_list,
     help="Contig name(s) to extract (comma-separated or repeated).",
 )
 @click.option(
@@ -62,12 +58,8 @@ def _parse_comma_list(ctx, param, value):
     is_flag=True,
     help="Overwrite existing output file(s), including per-genome files with --split.",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@verbose_option
+@quiet_option
 def cmd_extract(
     metacool_path: Path,
     genomes: list[str],
@@ -76,6 +68,7 @@ def cmd_extract(
     split: bool,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Extract a standard cool file from a metacool file.
 
@@ -86,14 +79,12 @@ def cmd_extract(
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.extract import extract
 
-    setup_logging(verbose, command_name="metacooler extract")
+    setup_logging(verbose, command_name="metacooler extract", quiet=quiet)
 
-    if not split and output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if not split and force and output.exists():
-        output.unlink()
+    # With --split, *output* is a prefix rather than a file; the per-genome
+    # destinations are guarded inside extract() instead.
+    if not split:
+        check_output(output, force)
 
     genome_list = list(genomes)
     if not genome_list and not contigs:

@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING
 
 import rich_click as click
 
+from metacooler.cli._options import (
+    check_output,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 if TYPE_CHECKING:
@@ -14,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @cli.command(name="binnify", help="Re-bin a metacool file to a new bin size.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "-o",
     "--output",
@@ -40,41 +46,42 @@ if TYPE_CHECKING:
     ),
 )
 @click.option(
-    "-f",
-    "--force",
-    is_flag=True,
-    help="Overwrite output file if it already exists.",
+    "--chunksize",
+    type=int,
+    default=1_000_000,
+    show_default=True,
+    help="Number of pixels read per chunk (controls peak memory usage).",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
+@force_option
+@verbose_option
+@quiet_option
 def cmd_binnify(
     metacool_path: str,
     output: Path,
     binsize: int,
     level: Literal["contig", "genome"],
+    chunksize: int,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Re-bin a metacool file to a larger bin size.
 
     \b
-    The new bin size must be larger than the current bin size.
+    The new bin size must be an exact multiple of the current bin size.
     Uses midpoint assignment to map old bins to new bins.
     """
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.binnify import binnify
 
-    setup_logging(verbose, command_name="metacooler binnify")
+    setup_logging(verbose, command_name="metacooler binnify", quiet=quiet)
 
-    if output.exists() and not force:
-        raise click.ClickException(
-            f"Output file already exists: {output}. Use --force to overwrite."
-        )
-    if force and output.exists():
-        output.unlink()
+    check_output(output, force)
 
-    binnify(uri=metacool_path, output=output, binsize=binsize, level=level)
+    binnify(
+        uri=metacool_path,
+        output=output,
+        binsize=binsize,
+        level=level,
+        chunksize=chunksize,
+    )

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import shlex
 from pathlib import Path
 
 import rich_click as click
 
+from metacooler.cli._options import force_option, quiet_option, verbose_option
 from metacooler.cli.main import cli
 
 _CONTIGS_FORMAT_HELP = """
@@ -18,56 +18,14 @@ _CONTIGS_FORMAT_HELP = """
     """
 
 
-def _reconstruct_command() -> str:
-    """Reconstruct the exact command-line invocation from the current Click context.
-
-    Called from within a running Click command to produce a string
-    representation of all non-default options and arguments, which is
-    then stored in the output file's ``metadata.commands`` attribute for
-    provenance tracking.
-
-    Returns:
-        A shell-escaped string of the form ``metacooler <subcommand>
-        [OPTIONS] [ARGS]``.
-
-    Raises:
-        RuntimeError: If called outside of an active Click command context.
-    """
-    ctx = click.get_current_context()
-    if ctx is None:
-        raise RuntimeError(
-            "_reconstruct_command() called outside of a click command context."
-        )
-    parts = [ctx.command_path]
-    for param in ctx.command.params:
-        if isinstance(param, click.Option):
-            value = ctx.params.get(param.name)
-            if value is not None and value != param.default:
-                opt_str = param.opts[0] if param.opts else f"--{param.name}"
-                if param.is_flag:
-                    if value:
-                        parts.append(opt_str)
-                elif param.multiple:
-                    for v in value:
-                        parts.extend([opt_str, str(v)])
-                else:
-                    parts.extend([opt_str, str(value)])
-        elif isinstance(param, click.Argument):
-            value = ctx.params.get(param.name)
-            if value is not None:
-                if isinstance(value, tuple):
-                    for v in value:
-                        parts.append(str(v))
-                else:
-                    parts.append(str(value))
-    return shlex.join(parts)
-
-
 def shared_options(f):
     """Apply options shared by all ``create`` subcommands.
 
     Adds: ``-o/--output``, ``--contigs``, ``--contigs-format``, ``--genomes``,
-    ``--metadata``, ``-f/--force``, ``-v/--verbose``.
+    ``--metadata``, ``-f/--force``, ``-v/--verbose``, ``-q/--quiet``.
+
+    The force/verbose/quiet flags come from :mod:`metacooler.cli._options` so
+    they stay identical to every other command in the CLI.
     """
     decorators = [
         click.option(
@@ -104,18 +62,9 @@ def shared_options(f):
             type=click.Path(exists=True, path_type=Path),
             help="Path to a JSON or YAML file containing metadata to ingest into the file.",
         ),
-        click.option(
-            "-f",
-            "--force",
-            is_flag=True,
-            help="Overwrite output file if it already exists.",
-        ),
-        click.option(
-            "-v",
-            "--verbose",
-            is_flag=True,
-            help="Increase verbosity (debug logging).",
-        ),
+        force_option,
+        verbose_option,
+        quiet_option,
     ]
     for dec in reversed(decorators):
         f = dec(f)
