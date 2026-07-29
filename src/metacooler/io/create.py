@@ -38,7 +38,33 @@ _UNBINNED_SENTINELS: frozenset[str] = frozenset(
 )
 # Row budget for the in-memory pixel sort, shared by ``from_pairs`` and
 # ``from_cool``. Beyond it, pixels go through cooler's external sort instead.
-_SORT_IN_MEMORY_PIXEL_THRESHOLD = 100_000_000  # 100 M pixels
+#
+# This counts DEDUPLICATED pixels. ``_buffer_pixels`` folds its buffer as it
+# fills (see that function), so the number compared here is the real pixel table
+# being built, not the raw per-chunk row count. That distinction is what keeps
+# the threshold honest: Hi-C pixel counts saturate — on a fixed bin grid, 20x
+# more pairs yields well under 2x more pixels — so an unfolded row count
+# overestimates the true memory need by an order of magnitude and spills to the
+# external sort for datasets that would comfortably have sorted in RAM.
+# At 3 int64 columns, 100 M pixels is ~2.4 GB resident plus the fold transient.
+_SORT_IN_MEMORY_PIXEL_THRESHOLD = 100_000_000  # 100 M deduplicated pixels
+# Fraction of the row budget that may accumulate unfolded before ``_buffer_pixels``
+# re-aggregates. Folding on every chunk would re-scan the accumulator far too
+# often; folding only at the budget would defeat the point. A quarter keeps the
+# unfolded overhang bounded while amortising the fold cost across many chunks.
+_PIXEL_FOLD_FRACTION = 4
+# Ceiling on the raw text block pyarrow buffers per read batch. Binned pixels are
+# coalesced back up to the requested chunksize afterwards, so raising chunksize
+# costs chunk-granularity, not read memory.
+_PAIRS_READ_BLOCK_MAX_BYTES = 128 * 1024**2  # 128 MiB (~1.2 M pairs)
+# Column names metacooler writes itself into /genomes and /contigs.  A user table
+# is free to carry extra columns, but one of these names would collide.
+_GENOMES_RESERVED_COLUMNS = frozenset({"name", "length", "n_contigs", "n_bins"})
+_CONTIGS_RESERVED_COLUMNS = frozenset({"name", "length", "genome_id"})
+# How many distinct unknown contig names to remember for the dropped-pair report.
+_MAX_REPORTED_UNKNOWN_CONTIGS = 10
+# How many genome names to name when the contigs and genomes tables diverge.
+_MAX_REPORTED_DIVERGENT_GENOMES = 10
 
 logger = logging.getLogger("metacooler")
 
@@ -821,8 +847,11 @@ def _stream_pairs(
     pa_col_names = [f"f{c1 - 1}", f"f{p1 - 1}", f"f{c2 - 1}", f"f{p2 - 1}"]
     final_col_names = ["chrom1", "pos1", "chrom2", "pos2"]
 
-    # Aim for approximately chunksize rows per batch; assume ~120 bytes/row.
-    block_size = max(chunksize * 120, 8 * 1024 * 1024)
+    # pyarrow buffers one whole block of raw text at a time, so this controls
+    # peak memory rather than the caller's chunk granularity (``_stream_binned_pairs``
+    # coalesces batches back up to *chunksize*). Aim for roughly chunksize rows
+    # at ~120 bytes/row, but cap it so a large chunksize stays affordable.
+    block_size = min(max(chunksize * 120, 8 * 1024 * 1024), _PAIRS_READ_BLOCK_MAX_BYTES)
 
     read_opts = pa_csv.ReadOptions(
         skip_rows=n_header,
@@ -1213,11 +1242,30 @@ def _sort_and_dedup_pixels(
         yield all_pixels.iloc[lo : lo + write_chunk]
 
 
+def _merge_pixel_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate binned pixel frames, re-summing bin pairs seen in more than one.
+
+    Args:
+        frames: Non-empty list of aggregated pixel DataFrames.
+
+    Returns:
+        A single aggregated pixel DataFrame.
+    """
+    if len(frames) == 1:
+        return frames[0]
+    return (
+        pd.concat(frames, ignore_index=True)
+        .groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"]
+        .sum()
+    )
+
+
 def _buffer_pixels(
     pixel_iter: Iterable[pd.DataFrame],
     max_rows: int,
+    fold_rows: int | None = None,
 ) -> tuple[list[pd.DataFrame], Iterable[pd.DataFrame] | None]:
-    """Buffer pixel frames in RAM, stopping as soon as *max_rows* is exceeded.
+    """Buffer pixel frames in RAM, folding as it goes, until *max_rows* is exceeded.
 
     Lets a caller pick a sort strategy from the pixel volume it actually sees
     rather than from a proxy such as the input file size.  This matters because
@@ -1225,22 +1273,60 @@ def _buffer_pixels(
     call carries a fixed cost proportional to the number of contigs — several
     seconds for a metagenome — regardless of how many pixels the chunk holds.
 
+    The buffer is periodically **folded**: the pending frames are aggregated
+    into a single running frame, so the row count driving the decision is the
+    deduplicated pixel table rather than the sum of per-chunk row counts.
+    Without that, the two diverge badly.  Bin pairs recur across chunks, and
+    Hi-C pixel counts saturate on a fixed bin grid, so a deep library can stream
+    hundreds of millions of raw rows that collapse to single-digit millions of
+    distinct pixels — enough to trip an unfolded budget and pay for an external
+    sort that the data never needed.
+
     Args:
         pixel_iter: Iterable of unsorted pixel DataFrames.
-        max_rows: Row budget; buffering stops once the total exceeds it.
+        max_rows: Budget, in *deduplicated* pixels.  Buffering stops once the
+            folded frame exceeds it.
+        fold_rows: Rows that may accumulate unfolded before a fold is forced.
+            Defaults to ``max_rows // _PIXEL_FOLD_FRACTION``.
 
     Returns:
-        ``(frames, rest)``.  *rest* is ``None`` when the whole stream fit within
-        the budget; otherwise it is the unconsumed remainder of *pixel_iter*.
+        ``(frames, rest)``.  *frames* holds at most one (folded) DataFrame.
+        *rest* is ``None`` when the whole stream fit within the budget;
+        otherwise it is the unconsumed remainder of *pixel_iter*.
     """
-    frames: list[pd.DataFrame] = []
-    n_rows = 0
+    if fold_rows is None:
+        fold_rows = max(max_rows // _PIXEL_FOLD_FRACTION, 1)
+    folded: pd.DataFrame | None = None
+    pending: list[pd.DataFrame] = []
+    pending_rows = 0
+
+    def _fold() -> None:
+        nonlocal folded, pending, pending_rows
+        if not pending:
+            return
+        group = pending if folded is None else [folded, *pending]
+        # Drop our references before the merge so the concat inside it is not
+        # competing with a second set of live frames.
+        folded = None
+        pending = []
+        pending_rows = 0
+        folded = _merge_pixel_frames(group)
+
     for df in pixel_iter:
-        frames.append(df)
-        n_rows += len(df)
-        if n_rows > max_rows:
-            return frames, pixel_iter
-    return frames, None
+        pending.append(df)
+        pending_rows += len(df)
+        if pending_rows >= fold_rows:
+            _fold()
+            assert folded is not None  # a fold with pending always sets it
+            if len(folded) > max_rows:
+                # Hand the accumulator back as ONE frame rather than slicing it:
+                # in the external path every frame becomes its own
+                # ``cooler.create`` call, and that call's cost is dominated by a
+                # fixed per-call overhead that scales with contig count, not
+                # with pixels. One large chunk is far cheaper than twenty small.
+                return [folded], pixel_iter
+    _fold()
+    return ([] if folded is None else [folded]), None
 
 
 def _chain_pixel_frames(
@@ -1320,13 +1406,28 @@ def _stream_binned_pairs(
         disable=not con.is_terminal,
     ) as progress:
         task = progress.add_task("", total=None)
+        pending: list[pd.DataFrame] = []
+        pending_pairs = 0
+        stats = _PairsDropStats()
         for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
             progress.update(task, advance=len(chunk))
             result = _bin_pairs_chunk(
-                chunk, contig_name_to_id, chrom_offset, binsize, bin_starts
+                chunk, contig_name_to_id, chrom_offset, binsize, bin_starts, stats
             )
             if result is not None and not result.empty:
-                yield result
+                pending.append(result)
+            pending_pairs += len(chunk)
+            # The reader may hand back smaller batches than requested (its block
+            # size is capped); coalesce them so a consumer that pays a fixed cost
+            # per chunk sees the chunk count the caller asked for.
+            if pending_pairs >= chunksize:
+                if pending:
+                    yield _merge_pixel_frames(pending)
+                pending = []
+                pending_pairs = 0
+        if pending:
+            yield _merge_pixel_frames(pending)
+    stats.report()
 
 
 def _stream_remapped_pixels(
@@ -1499,7 +1600,7 @@ def from_pairs(
     genomes_table: str | Path | None = None,
     pairs_kwargs: dict | None = None,
     metadata: dict | None = None,
-    chunksize: int = 15_000_000,
+    chunksize: int = 50_000_000,
     sort_in_memory: bool | None = None,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
@@ -1528,9 +1629,16 @@ def from_pairs(
         pairs_kwargs: Extra kwargs passed to the pairs reader (column
             indices, etc.).
         metadata: Additional metadata dict stored in file attrs.
-        chunksize: Number of pairs to process per chunk.  Matches cooler's own
-            default; under ``sort_in_memory=False`` every chunk costs one
-            ``cooler.create`` call, so small chunks are expensive.
+        chunksize: Number of *pairs* to process per chunk.  This is chunk
+            granularity, not read memory: pyarrow's read block is capped
+            separately at ``_PAIRS_READ_BLOCK_MAX_BYTES``, and the binned
+            batches are coalesced back up to *chunksize* afterwards.  Under
+            ``sort_in_memory=False`` every chunk costs one ``cooler.create``
+            call, whose runtime is dominated by a fixed overhead that scales
+            with contig count rather than pixels (seconds per call on a
+            metagenome), so small chunks are disproportionately expensive.
+            The cost of a large value is the pixels held while coalescing one
+            chunk — roughly ``chunksize`` rows at 24 bytes in the worst case.
         sort_in_memory: If ``True``, collect all pixels in RAM and sort before
             writing (fast for small files).  If ``False``, pass the unsorted
             stream to cooler's external sort (scalable for large files).  If
@@ -1580,6 +1688,9 @@ def from_pairs(
         contig_lengths = _apply_reference_order(
             contig_lengths, fasta=fasta, pairs=pairs
         )
+
+    contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
+    logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
 
     # --- Filter unassigned contigs ---
     if drop_unassigned:
@@ -1658,9 +1769,12 @@ def from_pairs(
             ordered = True
         else:
             logger.warning(
-                "Pixel stream exceeded %d rows — switching to sort_in_memory=False "
-                "(cooler external sort). Pass sort_in_memory=True to override.",
-                _SORT_IN_MEMORY_PIXEL_THRESHOLD,
+                "Deduplicated pixels exceeded the %s-row in-memory budget "
+                "(%s distinct pixels buffered so far) — switching to "
+                "sort_in_memory=False (cooler external sort). Pass "
+                "sort_in_memory=True to override.",
+                f"{_SORT_IN_MEMORY_PIXEL_THRESHOLD:,}",
+                f"{len(frames[0]):,}" if frames else "0",
             )
             pixel_source = _chain_pixel_frames(frames, rest)
             ordered = False
@@ -1839,13 +1953,13 @@ def from_cool(
     logger.info(
         f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
     )
-    # Preserve the source's ``count`` width: a binnified cool writes int64 and
-    # a blind cast back to int32 wraps silently.
+    # Preserve the source count width: hard-casting to int32 wraps the int64
+    # counts ops/binnify.py deliberately writes, and floors float counts to 0.
     count_dtype = resolve_count_dtype(
-        clr.pixels()[:0]["count"].dtype, context="from_cool"
+        clr.pixels()[0:1]["count"].dtype, context="from_cool"
     )
     raw_pixels: Iterable[pd.DataFrame] = _stream_remapped_pixels(
-        str(cool_path), clr.info["nnz"], old_to_new_bin, nproc, count_dtype=count_dtype
+        str(cool_path), clr.info["nnz"], old_to_new_bin, nproc, count_dtype
     )
     if sort_in_memory:
         pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
@@ -1861,11 +1975,11 @@ def from_cool(
             str(staged),
             bins=bins_remapped,
             pixels=pixel_source,
-            dtypes={"count": count_dtype},
             ordered=ordered,
             symmetric_upper=True,
             assembly=assembly_name or "imported",
             metadata=metadata or {},
+            dtypes={"count": count_dtype},
         )
 
         # --- Add metacooler-specific groups and attributes ---
