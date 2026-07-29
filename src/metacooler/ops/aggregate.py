@@ -21,6 +21,7 @@ import pandas as pd
 from scipy import sparse
 
 from metacooler.api import MetaCooler
+from metacooler.io._utils import chrom_codes, to_upper_triangle
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -35,7 +36,7 @@ def _bin_to_level_mapping(
     Returns a fresh ``int`` array of length ``n_bins`` (safe for callers to
     mutate).  Raises ``ValueError`` for an unknown *level*.
     """
-    codes = mc.bins()[["chrom"]]["chrom"].cat.codes.values
+    codes = chrom_codes(mc.bins()[["chrom"]])
     if level == "contig":
         return codes.copy()
     if level == "genome":
@@ -81,8 +82,7 @@ def _aggregate_sparse(
         # (a genome pair can exceed 2**31 contacts on real metagenomic data).
         vals = chunk["count"].values.astype(np.int64)
 
-        swap = c1 > c2
-        c1[swap], c2[swap] = c2[swap], c1[swap]
+        c1, c2 = to_upper_triangle(c1, c2)
 
         rows_list.append(c1)
         cols_list.append(c2)

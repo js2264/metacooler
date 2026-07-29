@@ -8,7 +8,7 @@ from pathlib import Path
 import cooler
 import numpy as np
 
-from metacooler.io._utils import resolve_count_dtype
+from metacooler.io._utils import enforce_upper_triangle, resolve_count_dtype
 
 logger = logging.getLogger("metacooler")
 
@@ -60,10 +60,7 @@ def flatten(
             chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
             chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
             chunk["count"] = chunk["count"].astype(count_dtype)
-            swap = chunk["bin1_id"] > chunk["bin2_id"]
-            chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
-                swap, ["bin2_id", "bin1_id"]
-            ].values
+            enforce_upper_triangle(chunk)
             yield chunk[["bin1_id", "bin2_id", "count"]]
 
     logger.info(

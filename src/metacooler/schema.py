@@ -384,6 +384,27 @@ def validate_mmetacooler(uri: str | Path) -> None:
                     )
 
 
+def list_entry_names(uri: str | Path) -> list[str]:
+    """Return the bare names of every entry in an ``.mmetacool`` file.
+
+    Single implementation of the ``/entries`` scan.  The two public spellings
+    differ only in their return convention and both derive from this:
+    :func:`list_metacoolers` yields URI-ready group paths, while
+    :func:`metacooler.io.mmetacool.list_entries` yields bare names.
+
+    Args:
+        uri: Path to the ``.mmetacool`` file.
+
+    Returns:
+        Entry names in HDF5 iteration order, or ``[]`` if the file has no
+        ``entries`` group.
+    """
+    with h5py.File(Path(uri), "r") as f:
+        if "entries" not in f:
+            return []
+        return list(f["entries"].keys())
+
+
 def list_metacoolers(uri: str | Path) -> list[str]:
     """Return HDF5 group paths of all metacooler entries in an mmetacool file.
 
@@ -398,11 +419,7 @@ def list_metacoolers(uri: str | Path) -> list[str]:
         "/entries/sample2"]``).  Returns an empty list if the file has no
         ``entries`` group.
     """
-    path = Path(uri)
-    with h5py.File(path, "r") as f:
-        if "entries" not in f:
-            return []
-        return [f"/entries/{name}" for name in f["entries"]]
+    return [f"/entries/{name}" for name in list_entry_names(uri)]
 
 
 def read_table(uri: str | Path, group: str) -> pd.DataFrame:

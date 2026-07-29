@@ -7,7 +7,11 @@ from pathlib import Path
 
 import h5py
 
-from metacooler.schema import MMETACOOLER_FORMAT, MMETACOOLER_FORMAT_VERSION
+from metacooler.schema import (
+    MMETACOOLER_FORMAT,
+    MMETACOOLER_FORMAT_VERSION,
+    list_entry_names,
+)
 
 logger = logging.getLogger("metacooler")
 
@@ -180,10 +184,7 @@ def list_entries(mmetacool: Path) -> list[str]:
     Returns:
         A list of entry names (keys under ``/entries``).
     """
-    with h5py.File(mmetacool, "r") as f:
-        if "entries" not in f:
-            return []
-        return list(f["entries"].keys())
+    return list_entry_names(mmetacool)
 
 
 def copy_entry_cross_file(

@@ -10,7 +10,12 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from metacooler.io._utils import _filter_by_genomes_and_contigs, resolve_count_dtype
+from metacooler.io._utils import (
+    _filter_by_genomes_and_contigs,
+    chrom_codes,
+    enforce_upper_triangle,
+    resolve_count_dtype,
+)
 
 logger = logging.getLogger("metacooler")
 
@@ -91,7 +96,7 @@ def _extract_contig_ids(
 ) -> None:
     """Extract bins/pixels for a set of contig IDs and write a cool file."""
     all_bins = mc.bins()
-    bin_chrom_codes = all_bins["chrom"].cat.codes.values
+    bin_chrom_codes = chrom_codes(all_bins)
 
     # Boolean mask: bins belonging to selected contigs
     genome_bin_mask = np.isin(bin_chrom_codes, contig_ids)
@@ -147,10 +152,7 @@ def _extract_contig_ids(
             chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
             chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
             chunk["count"] = chunk["count"].astype(count_dtype)
-            swap = chunk["bin1_id"] > chunk["bin2_id"]
-            chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
-                swap, ["bin2_id", "bin1_id"]
-            ].values
+            enforce_upper_triangle(chunk)
             yield chunk[["bin1_id", "bin2_id", "count"]]
 
     pixel_stream = _pixel_stream()

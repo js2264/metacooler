@@ -12,6 +12,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from metacooler.io._utils import chrom_codes
 from metacooler.schema import (
     read_table,
     validate,
@@ -354,7 +355,7 @@ class MetaCooler:
         gid = genomes.loc[genomes["name"] == genome].index[0]
         contig_ids = contigs.index[contigs["genome_id"] == gid].tolist()
         bins = self.bins()
-        return bins[bins["chrom"].cat.codes.isin(contig_ids)].copy()
+        return bins[np.isin(chrom_codes(bins), contig_ids)].copy()
 
     def bins_for_contig(self, contig: str) -> pd.DataFrame:
         """Return all bins belonging to *contig*.
@@ -378,7 +379,7 @@ class MetaCooler:
             )
         cid = contigs.loc[contigs["name"] == contig].index[0]
         bins = self.bins()
-        return bins[bins["chrom"].cat.codes == cid].copy()
+        return bins[chrom_codes(bins) == cid].copy()
 
     def pixels_for_genome_pair(self, g1: str, g2: str) -> pd.DataFrame:
         """Return pixels where one bin is in *g1* and the other is in *g2*.
@@ -408,7 +409,7 @@ class MetaCooler:
                 )
 
         bins = self._bins_cache
-        bin_to_contig = bins["chrom"].cat.codes.values
+        bin_to_contig = chrom_codes(bins)
 
         contigs = self.contigs
         gid1 = int(genomes.loc[genomes["name"] == g1].index[0])
@@ -479,7 +480,7 @@ class MetaCooler:
         gid = genomes.loc[genomes["name"] == genome].index[0]
         cids = contigs.index[contigs["genome_id"] == gid].tolist()
         bins = self.bins()
-        return bins.index[bins["chrom"].cat.codes.isin(cids)].to_numpy(dtype=np.int64)
+        return bins.index[np.isin(chrom_codes(bins), cids)].to_numpy(dtype=np.int64)
 
     def genome_extent(self, genome: str) -> tuple[int, int]:
         """Return the half-open bin-index range for all bins in *genome*.
@@ -543,7 +544,7 @@ class MetaCooler:
             )
         cid = contigs.loc[contigs["name"] == contig].index[0]
         bins = self.bins()
-        sel = bins[bins["chrom"].cat.codes == cid]
+        sel = bins[chrom_codes(bins) == cid]
         if sel.empty:
             return (0, 0)
         return (int(sel.index[0]), int(sel.index[-1]) + 1)

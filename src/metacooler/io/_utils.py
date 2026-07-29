@@ -53,6 +53,33 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
     return np.asarray(arr)
 
 
+def check_output_path(path: str | Path, force: bool = False) -> None:
+    """Refuse to overwrite an existing output file unless *force* is set.
+
+    Single home for the "output exists" guard shared by the CLI commands and
+    the ops layer, so every command reports the same message and every command
+    that accepts ``--force`` actually honours it.
+
+    Args:
+        path: Output path about to be written.
+        force: If True, remove an existing file instead of raising.
+
+    Raises:
+        FileExistsError: If *path* exists and *force* is False.
+        IsADirectoryError: If *path* exists and is a directory.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    if path.is_dir():
+        raise IsADirectoryError(f"Output path {str(path)!r} is a directory.")
+    if not force:
+        raise FileExistsError(
+            f"Output file {str(path)!r} already exists. Use --force to overwrite."
+        )
+    path.unlink()
+
+
 def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:
     """Pick a lossless on-disk dtype for a ``pixels/count`` column being copied.
 
@@ -87,6 +114,78 @@ def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np
     if dtype.itemsize >= 8 or (dtype.kind == "u" and dtype.itemsize >= 4):
         return np.dtype(np.int64)
     return np.dtype(np.int32)
+
+
+def to_upper_triangle(
+    bin1: np.ndarray, bin2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reorder each ``(bin1, bin2)`` pair so that ``bin1 <= bin2``.
+
+    metacooler stores pixels in ``symmetric-upper`` form, so every writer that
+    remaps bin ids has to restore that invariant afterwards.  This used to be
+    open-coded five times in two different spellings — a NumPy
+    ``a[swap], b[swap] = b[swap], a[swap]`` dance (which relies on fancy
+    indexing returning copies) and a pandas ``.loc[...] = ....values`` swap
+    (which is only correct because of the trailing ``.values``: without it,
+    pandas aligns on column *labels* and the assignment is a silent no-op).
+    Both are correct today and both are one careless edit away from not being.
+    ``minimum``/``maximum`` says the same thing with nothing to get wrong.
+
+    Args:
+        bin1: Row bin ids.
+        bin2: Column bin ids, same shape as *bin1*.
+
+    Returns:
+        ``(lo, hi)`` — new arrays with ``lo <= hi`` elementwise.  Inputs are
+        not modified.
+    """
+    return np.minimum(bin1, bin2), np.maximum(bin1, bin2)
+
+
+def enforce_upper_triangle(
+    pixels: pd.DataFrame, col1: str = "bin1_id", col2: str = "bin2_id"
+) -> pd.DataFrame:
+    """Reorder a pixel frame's bin-id columns in place so ``col1 <= col2``.
+
+    DataFrame-shaped wrapper over :func:`to_upper_triangle`.
+
+    Args:
+        pixels: Pixel frame to fix up, modified in place.
+        col1: Name of the row bin-id column.
+        col2: Name of the column bin-id column.
+
+    Returns:
+        The same *pixels* object, for chaining.
+    """
+    lo, hi = to_upper_triangle(pixels[col1].to_numpy(), pixels[col2].to_numpy())
+    pixels[col1] = lo
+    pixels[col2] = hi
+    return pixels
+
+
+def chrom_codes(bins: pd.DataFrame) -> np.ndarray:
+    """Return the integer contig id of every row of a *bins* frame.
+
+    Single spelling for an idiom that was repeated ~12 times across the
+    codebase as ``bins["chrom"].cat.codes.values``.  That form assumes cooler
+    handed back a *categorical* ``chrom`` column and raises ``AttributeError``
+    the moment it did not (a plain integer column read straight from HDF5, or a
+    frame that has been through a groupby); this handles both.
+
+    Args:
+        bins: A bins DataFrame with a ``chrom`` column — either cooler's
+            categorical form or plain integer contig ids.
+
+    Returns:
+        A fresh ``int64`` array of contig ids, safe for the caller to mutate.
+
+    Raises:
+        KeyError: If *bins* has no ``chrom`` column.
+    """
+    col = bins["chrom"]
+    if isinstance(col.dtype, pd.CategoricalDtype):
+        return col.cat.codes.to_numpy(dtype=np.int64)
+    return col.to_numpy(dtype=np.int64)
 
 
 def _finalize_metacool_file(
