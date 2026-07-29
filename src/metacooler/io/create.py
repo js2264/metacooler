@@ -279,12 +279,108 @@ def _normalize_genome_name(v: str) -> str:
     return "__unbinned__" if v.strip().lower() in _UNBINNED_SENTINELS else v
 
 
+def _protect_reserved_columns(
+    df: pd.DataFrame,
+    reserved: frozenset[str],
+    keys: frozenset[str],
+    context: str,
+) -> pd.DataFrame:
+    """Rename user columns that collide with metacooler's reserved column names.
+
+    A user table is free to carry extra columns (``docs/format.md`` advertises
+    this), but a column called ``length``/``name``/``n_bins`` would collide with
+    the columns metacooler itself writes: the ``merge`` below would add ``_x``/
+    ``_y`` suffixes (``KeyError: "['length'] not in index"``) or the later
+    ``insert("n_bins")`` would fail outright.  Rename them out of the way
+    instead, loudly.
+
+    Args:
+        df: User-supplied table.
+        reserved: Column names metacooler writes itself.
+        keys: Column names in *df* that are merge keys and must be left alone.
+        context: Human-readable table name used in the warning.
+
+    Returns:
+        *df* unchanged, or a renamed copy.
+    """
+    renames: dict[str, str] = {}
+    taken = set(df.columns)
+    for col in df.columns:
+        if col in keys or col not in reserved:
+            continue
+        new = f"user_{col}"
+        while new in taken:
+            new = f"user_{new}"
+        renames[col] = new
+        taken.add(new)
+    if not renames:
+        return df
+    logger.warning(
+        "%s: column(s) %s collide with metacooler's reserved column names; "
+        "renamed to %s.",
+        context,
+        ", ".join(repr(k) for k in renames),
+        ", ".join(repr(v) for v in renames.values()),
+    )
+    return df.rename(columns=renames)
+
+
+def _report_genome_table_divergence(
+    derived: list[str], extra_genomes_df: pd.DataFrame
+) -> None:
+    """Report genome names the contigs table and the genomes table disagree on.
+
+    ``/genomes`` is *derived* from the contig→genome assignments; a ``--genomes``
+    table only contributes extra metadata columns on top of it, via a left merge
+    on the genome name.  Two consequences are easy to mistake for metacooler
+    inventing or losing genomes, and both used to happen in complete silence:
+
+    - A genome named in the contigs table but absent from the genomes table
+      still gets a row, with ``length``/``n_contigs``/``n_bins`` computed from
+      its contigs and empty metadata.  On a real MetaTOR dataset this added 66
+      ``MetaTOR_MGE_*`` bins that the MAG-only genomes table did not list, and
+      they looked fabricated because their metadata columns were blank.
+    - A genome listed in the genomes table with no contigs assigned to it has
+      nothing to derive a row from and never reaches the output at all.
+
+    Both are legitimate — a genomes table may cover a superset or a subset of
+    the bins — so this warns rather than raising.
+
+    Args:
+        derived: Genome names derived from the contig assignments.
+        extra_genomes_df: Parsed ``--genomes`` table, keyed by ``genome_id``.
+    """
+    listed = set(extra_genomes_df["genome_id"])
+    # __unbinned__ is metacooler's own synthetic catch-all, never a table row.
+    unlisted = sorted(set(derived) - listed - {"__unbinned__"})
+    unused = sorted(listed - set(derived))
+    for names, message in (
+        (
+            unlisted,
+            "%d genome(s) in the contigs table have no row in the genomes "
+            "table: %s%s. They are kept, with length/n_contigs/n_bins computed "
+            "from their contigs and empty metadata columns.",
+        ),
+        (
+            unused,
+            "%d genome(s) in the genomes table have no contig assigned to them "
+            "in the contigs table: %s%s. They are absent from /genomes.",
+        ),
+    ):
+        if names:
+            logger.warning(
+                message,
+                len(names),
+                ", ".join(names[:_MAX_REPORTED_DIVERGENT_GENOMES]),
+                ", ..." if len(names) > _MAX_REPORTED_DIVERGENT_GENOMES else "",
+            )
+
+
 def _build_genomes_table(
     contig_order: list[str],
     contig_lengths: dict[str, int],
     contig_genome_map: dict[str, str],
     extra_genomes_df: pd.DataFrame | None = None,
-    keep_unbinned: bool = True,
 ) -> pd.DataFrame:
     """Build the ``/genomes`` DataFrame from contig data.
 
@@ -335,8 +431,19 @@ def _build_genomes_table(
         }
     )
 
+    # The genomes table only decorates the derived rows; say so out loud
+    # whenever the two tables cover different sets of genomes.
+    if extra_genomes_df is not None:
+        _report_genome_table_divergence(sorted_names, extra_genomes_df)
+
     # Merge extra columns from the genomes file if provided
     if extra_genomes_df is not None and len(extra_genomes_df.columns) > 1:
+        extra_genomes_df = _protect_reserved_columns(
+            extra_genomes_df,
+            reserved=_GENOMES_RESERVED_COLUMNS,
+            keys=frozenset({"genome_id"}),
+            context="Genomes table",
+        )
         extra_cols = [c for c in extra_genomes_df.columns if c != "genome_id"]
         extra = extra_genomes_df.rename(columns={"genome_id": "name"})[
             ["name"] + extra_cols
@@ -377,7 +484,9 @@ def _build_contigs_table(
             each genome's integer index (``genome_id``).
         contig_df: Optional DataFrame parsed from a contigs-metadata TSV
             file.  Extra columns beyond ``contig_name`` and ``genome_id``
-            are left-merged into the output by contig name.
+            are left-merged into the output by contig name; columns colliding
+            with metacooler's own (``name``, ``length``) are renamed with a
+            ``user_`` prefix.
 
     Returns:
         DataFrame with columns ``name``, ``length``, ``genome_id``, and
@@ -407,6 +516,12 @@ def _build_contigs_table(
 
     # Merge additional columns from the input contig table if provided
     if contig_df is not None and len(contig_df.columns) > 2:
+        contig_df = _protect_reserved_columns(
+            contig_df,
+            reserved=_CONTIGS_RESERVED_COLUMNS,
+            keys=frozenset({"contig_name", "genome_id"}),
+            context="Contigs table",
+        )
         # Identify extra columns beyond contig_name and genome_id
         extra_cols = [
             c for c in contig_df.columns if c not in ("contig_name", "genome_id")
