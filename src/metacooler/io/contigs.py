@@ -125,12 +125,7 @@ def parse_contigs_table(
         return mapping, df
 
     if fmt == "metator":
-        df = pd.read_csv(
-            path,
-            sep="\t",
-            dtype=str,
-            keep_default_na=False,
-        )
+        df = read_user_table(path, kind="Contig table")
         if "Name" not in df.columns or "Final_bin" not in df.columns:
             raise ValueError("metator format requires 'Name' and 'Final_bin' columns")
         df = df.rename(columns={"Name": "contig_name", "Final_bin": "genome_id"})
@@ -146,15 +141,14 @@ def parse_contigs_table(
 
         if contig_col < 1 or genome_col < 1:
             raise ValueError("Column indices in contigs format must be >= 1")
+        if contig_col == genome_col:
+            raise ValueError(
+                f"contigs format column spec {fmt!r} points the contig-name and "
+                f"genome-name columns at the same column ({contig_col}). "
+                "Give two different 1-based column indices, e.g. '1,2'."
+            )
 
-        header: int | None = None if noheader else 0
-        df = pd.read_csv(
-            path,
-            sep="\t",
-            header=header,
-            dtype=str,
-            keep_default_na=False,
-        )
+        df = read_user_table(path, kind="Contig table", header=not noheader)
 
         required_cols = max(contig_col, genome_col)
         if df.shape[1] < required_cols:
@@ -163,9 +157,28 @@ def parse_contigs_table(
                 f"{required_cols} columns in the table, got {df.shape[1]}."
             )
 
-        contig_key = df.columns[contig_col - 1]
-        genome_key = df.columns[genome_col - 1]
-        df = df.rename(columns={contig_key: "contig_name", genome_key: "genome_id"})
+        # Rename *positionally* rather than with ``rename(columns=...)``: a table
+        # that already carries a ``contig_name``/``genome_id`` label elsewhere
+        # would otherwise end up with duplicate labels, and ``df["contig_name"]``
+        # then returns a DataFrame instead of a Series — which silently builds a
+        # garbage mapping instead of raising.
+        new_columns = list(df.columns)
+        new_columns[contig_col - 1] = "contig_name"
+        new_columns[genome_col - 1] = "genome_id"
+        for i, name in enumerate(new_columns):
+            if i in (contig_col - 1, genome_col - 1):
+                continue
+            if name in ("contig_name", "genome_id"):
+                new_columns[i] = f"{name}_col{i + 1}"
+                logger.warning(
+                    "Column %d is named %r, which collides with the column "
+                    "selected by the %r format spec; renamed it to %r.",
+                    i + 1,
+                    name,
+                    fmt,
+                    new_columns[i],
+                )
+        df.columns = new_columns
         _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
