@@ -40,6 +40,26 @@ def _run(args: list[str]):
     return _runner.invoke(cli, args, catch_exceptions=True)
 
 
+def _flat(output: str) -> str:
+    """Collapse rich-click's box-drawing/wrapped output to a single line.
+
+    rich-click renders errors inside a Unicode box and hard-wraps at the
+    terminal width, so a message assertion must not depend on where the wrap
+    landed.  This strips the border characters and normalises whitespace.
+    """
+    stripped = output.translate({ord(c): " " for c in "│╭╮╰╯─"})
+    return " ".join(stripped.split())
+
+
+def _squash(output: str) -> str:
+    """Like :func:`_flat` but with *all* whitespace removed.
+
+    rich-click wraps mid-token when a long tmp_path does not fit the line, so
+    assertions that embed a path must ignore whitespace entirely.
+    """
+    return "".join(_flat(output).split())
+
+
 def _make_corrupt_hdf5(path: Path) -> None:
     """Write a plain HDF5 file that is NOT a valid metacool file."""
     with h5py.File(path, "w") as f:
@@ -1061,6 +1081,10 @@ class TestExtractCLI:
 
 
 class TestShowCLI:
+    # NOTE: ``show`` takes the metacool URI as a POSITIONAL argument, and ``-f``
+    # means ``--force``.  Passing ``-f <path>`` still "works" by accident (the
+    # path falls through to the positional slot) while silently enabling
+    # --force, so every test here must use the positional form.
     def test_show_help(self):
         r = _run(["show", "--help"])
         assert r.exit_code == 0
@@ -1068,17 +1092,13 @@ class TestShowCLI:
 
     def test_show_genome_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_genome.png"
-        r = _run(
-            ["show", "--level", "genome", "-o", str(out), "-f", str(tiny_metacooler)]
-        )
+        r = _run(["show", "--level", "genome", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
     def test_show_contig_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_contig.png"
-        r = _run(
-            ["show", "--level", "contig", "-o", str(out), "-f", str(tiny_metacooler)]
-        )
+        r = _run(["show", "--level", "contig", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1094,7 +1114,6 @@ class TestShowCLI:
                 "MAG_1",
                 "-o",
                 str(out),
-                "-f",
                 str(tiny_metacooler),
             ]
         )
@@ -1103,9 +1122,7 @@ class TestShowCLI:
 
     def test_show_single_genome_view(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_intra.png"
-        r = _run(
-            ["show", "--genome", "MAG_1", "-o", str(out), "-f", str(tiny_metacooler)]
-        )
+        r = _run(["show", "--genome", "MAG_1", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1119,7 +1136,6 @@ class TestShowCLI:
                 "MAG_2",
                 "-o",
                 str(out),
-                "-f",
                 str(tiny_metacooler),
             ]
         )
@@ -1128,39 +1144,86 @@ class TestShowCLI:
 
     def test_show_transform_none(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_raw.png"
-        r = _run(
-            ["show", "--transform", "none", "-o", str(out), "-f", str(tiny_metacooler)]
-        )
+        r = _run(["show", "--transform", "none", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
+        assert out.exists()
 
     def test_show_custom_cmap(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_blues.png"
-        r = _run(
-            ["show", "--cmap", "Blues", "-o", str(out), "-f", str(tiny_metacooler)]
-        )
+        r = _run(["show", "--cmap", "Blues", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
+        assert out.exists()
 
     def test_show_custom_dpi(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_dpi.png"
-        r = _run(["show", "--dpi", "72", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(["show", "--dpi", "72", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
+        assert out.exists()
 
     def test_show_verbose(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_v.png"
-        r = _run(["show", "-v", "-o", str(out), "-f", str(tiny_metacooler)])
+        r = _run(["show", "-v", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
+        assert out.exists()
+
+    def test_show_quiet(self, tiny_metacooler, tmp_path):
+        out = tmp_path / "show_q.png"
+        r = _run(["show", "-q", "-o", str(out), str(tiny_metacooler)])
+        assert r.exit_code == 0, r.output
+        assert out.exists()
+
+    # --- the -f/--force contract ---
+
+    def test_show_refuses_to_overwrite_without_force(self, tiny_metacooler, tmp_path):
+        """``-f`` on ``show`` is ``--force``, not the input file option."""
+        out = tmp_path / "show_force.png"
+        first = _run(["show", "--dpi", "50", "-o", str(out), str(tiny_metacooler)])
+        assert first.exit_code == 0, first.output
+        stamp = out.stat().st_mtime_ns
+
+        second = _run(["show", "--dpi", "50", "-o", str(out), str(tiny_metacooler)])
+        assert second.exit_code == 1, second.output
+        assert "already exists" in _flat(second.output)
+        assert "--force" in _flat(second.output)
+        assert out.stat().st_mtime_ns == stamp  # untouched
+
+    @pytest.mark.parametrize("flag", ["-f", "--force"])
+    def test_show_force_overwrites_existing_output(
+        self, tiny_metacooler, tmp_path, flag
+    ):
+        out = tmp_path / f"show_force{flag.strip('-')}.png"
+        assert (
+            _run(
+                ["show", "--dpi", "50", "-o", str(out), str(tiny_metacooler)]
+            ).exit_code
+            == 0
+        )
+        r = _run(["show", "--dpi", "50", "-o", str(out), flag, str(tiny_metacooler)])
+        assert r.exit_code == 0, r.output
+        assert out.exists()
 
     # --- failures ---
 
     def test_show_nonexistent_input_fails(self, tmp_path):
+        """Missing input is rejected by MetaCoolURI at parse time (exit 2)."""
         out = tmp_path / "show.png"
-        r = _run(["show", "-o", str(out), str(tmp_path / "ghost.metacool")])
-        assert r.exit_code != 0
+        ghost = tmp_path / "ghost.metacool"
+        r = _run(["show", "-o", str(out), str(ghost)])
+        assert r.exit_code == 2, r.output
+        flat = _flat(r.output)
+        assert "Invalid value for 'METACOOL_PATH'" in flat
+        # the path is a long unbreakable token, so ignore whitespace entirely
+        assert f"Path'{ghost}'doesnotexist." in _squash(r.output)
+        assert not out.exists()
 
     def test_show_invalid_level_fails(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
         r = _run(["show", "--level", "BADLEVEL", "-o", str(out), str(tiny_metacooler)])
-        assert r.exit_code != 0
+        assert r.exit_code == 2, r.output
+        flat = _flat(r.output)
+        assert "Invalid value for '--level'" in flat
+        assert "'BADLEVEL' is not one of 'bin', 'contig', 'genome'." in flat
+        assert not out.exists()
 
     def test_show_invalid_transform_fails(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
@@ -1174,14 +1237,33 @@ class TestShowCLI:
                 str(tiny_metacooler),
             ]
         )
-        assert r.exit_code != 0
+        assert r.exit_code == 2, r.output
+        flat = _flat(r.output)
+        assert "Invalid value for '--transform'" in flat
+        assert "'sqrt' is not one of 'log1p', 'log10', 'none'." in flat
+        assert not out.exists()
 
     def test_show_unknown_genome_fails(self, tiny_metacooler, tmp_path):
+        """An unknown genome reaches the command body and errors there (exit 1)."""
         out = tmp_path / "show.png"
         r = _run(
             ["show", "--genome", "NONEXISTENT", "-o", str(out), str(tiny_metacooler)]
         )
-        assert r.exit_code != 0
+        assert r.exit_code == 1, r.output
+        flat = _flat(r.output)
+        assert "Unknown genome: 'NONEXISTENT'" in flat
+        assert "MAG_1" in flat  # the message lists the available genomes
+        assert not out.exists()
+
+    def test_show_bare_mmetacool_rejected(self, tiny_mmetacool, tmp_path):
+        """A collection root is rejected by MetaCoolURI(require_entry=True)."""
+        out = tmp_path / "show.png"
+        r = _run(["show", "-o", str(out), str(tiny_mmetacool)])
+        assert r.exit_code == 2, r.output
+        flat = _flat(r.output)
+        assert "Invalid value for 'METACOOL_PATH'" in flat
+        assert "is an mmetacool collection" in flat
+        assert not out.exists()
 
 
 # ===========================================================================

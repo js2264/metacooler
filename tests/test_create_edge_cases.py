@@ -474,7 +474,7 @@ class TestFromCoolExtras:
         )
         assert out.exists()
         with h5py.File(out, "r") as f:
-            assert f.attrs["assembly-name"] == "my_assembly"
+            assert f.attrs["genome-assembly"] == "my_assembly"
 
     def test_from_cool_drop_unassigned_succeeds(self, tmp_path):
         """drop_unassigned=True should create a file with only assigned contigs."""
@@ -524,7 +524,7 @@ class TestBuildBinsErrors:
     def test_unknown_contig_raises(self):
         bins = pd.DataFrame({"chrom": ["ghost"], "start": [0], "end": [100]})
         with pytest.raises(ValueError, match="unknown contig"):
-            _build_bins(bins, ["c"], {"c": 0})
+            _build_bins(bins, {"c": 0})
 
 
 class TestParsePairsHeaderErrors:
@@ -649,3 +649,108 @@ class TestFromPairsGzip:
         from metacooler.api import MetaCooler
 
         assert MetaCooler(out).shape[0] > 0
+
+
+class TestBufferPixelsFolding:
+    """``_buffer_pixels`` must decide on deduplicated pixels, not raw rows.
+
+    The sort-strategy decision used to be driven by the sum of per-chunk row
+    counts.  Bin pairs recur across chunks and Hi-C pixel counts saturate on a
+    fixed bin grid, so that proxy overestimates the real pixel table badly on a
+    deep library — tripping the budget and paying for an external sort (one
+    ``cooler.create`` call per chunk, seconds each on a metagenome) that the
+    data never needed.  Folding the buffer as it fills makes the budget measure
+    the thing it is supposed to bound.
+    """
+
+    @staticmethod
+    def _chunks(n_chunks: int, rows: int, n_bins: int, seed: int = 0):
+        """Build aggregated pixel chunks drawn from a bin grid of *n_bins*."""
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        out = []
+        for _ in range(n_chunks):
+            b1 = rng.integers(0, n_bins, rows)
+            b2 = rng.integers(0, n_bins, rows)
+            frame = pd.DataFrame(
+                {
+                    "bin1_id": np.minimum(b1, b2),
+                    "bin2_id": np.maximum(b1, b2),
+                    "count": np.ones(rows, dtype="int64"),
+                }
+            )
+            out.append(
+                frame.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)[
+                    "count"
+                ].sum()
+            )
+        return out
+
+    def test_saturating_stream_stays_in_memory(self):
+        """Raw rows over budget but distinct pixels under it must not spill."""
+        from metacooler.io.create import _buffer_pixels
+
+        chunks = self._chunks(n_chunks=40, rows=5000, n_bins=200)
+        raw_rows = sum(len(c) for c in chunks)
+        distinct = len(
+            pd.concat(chunks)
+            .groupby(["bin1_id", "bin2_id"], as_index=False)["count"]
+            .sum()
+        )
+        budget = 50_000
+        # The premise of the test: the two measures straddle the budget.
+        assert distinct < budget < raw_rows
+
+        frames, rest = _buffer_pixels(iter(chunks), max_rows=budget)
+        assert rest is None, "a saturating stream must not fall back to external sort"
+        assert len(frames) == 1, "the buffer should be folded to a single frame"
+
+    def test_folding_preserves_counts_exactly(self):
+        """Folding must be arithmetically identical to one global aggregate."""
+        from metacooler.io.create import _buffer_pixels
+
+        chunks = self._chunks(n_chunks=40, rows=5000, n_bins=200, seed=1)
+        expected = (
+            pd.concat(chunks)
+            .groupby(["bin1_id", "bin2_id"], as_index=False)["count"]
+            .sum()
+            .sort_values(["bin1_id", "bin2_id"])
+            .reset_index(drop=True)
+        )
+        frames, _ = _buffer_pixels(iter(chunks), max_rows=50_000)
+        got = (
+            frames[0]
+            .sort_values(["bin1_id", "bin2_id"])
+            .reset_index(drop=True)
+            .astype(expected.dtypes.to_dict())
+        )
+        pd.testing.assert_frame_equal(got, expected)
+        assert got["count"].sum() == sum(int(c["count"].sum()) for c in chunks)
+
+    def test_non_saturating_stream_still_spills(self):
+        """The external-sort safety net must survive the optimisation.
+
+        Folding narrows *when* the fallback fires; it must not remove it, or a
+        genuinely huge pixel table would be held entirely in RAM.
+        """
+        from metacooler.io.create import _buffer_pixels
+
+        chunks = self._chunks(n_chunks=40, rows=5000, n_bins=10_000_000)
+        frames, rest = _buffer_pixels(iter(chunks), max_rows=50_000)
+        assert rest is not None
+        assert len(frames) == 1, "the partial accumulator is handed back as one frame"
+
+    def test_empty_stream(self):
+        from metacooler.io.create import _buffer_pixels
+
+        assert _buffer_pixels(iter([]), max_rows=1000) == ([], None)
+
+    def test_single_oversized_chunk_spills(self):
+        """One chunk larger than the whole budget must still be detected."""
+        from metacooler.io.create import _buffer_pixels
+
+        chunks = self._chunks(n_chunks=1, rows=20_000, n_bins=10_000_000)
+        frames, rest = _buffer_pixels(iter(chunks), max_rows=100)
+        assert rest is not None
+        assert len(frames) == 1

@@ -286,7 +286,7 @@ class TestRoundTripChromLengths:
     """Tests that chrom name ↔ length mapping is preserved through cool→metacool→cool.
 
     These tests specifically guard against the chrom-ID-remapping bug where
-    ``import_from_cooler`` remaps bin chrom IDs but leaves bins in the original
+    ``io.create.from_cool`` remaps bin chrom IDs but leaves bins in the original
     cool order. ``cooler.create_cooler`` then renumbers codes by first-appearance,
     causing a misalignment between the contigs table (name → expected length) and
     the actual bin data stored under each code.
@@ -469,3 +469,163 @@ class TestRoundTripChromLengths:
                 f"CLI round-trip length mismatch for {name}: "
                 f"original={orig_sizes[name]}, recovered={recv_sizes[name]}"
             )
+
+
+# ===========================================================================
+# create cool — strict table equality against the source cooler
+# ===========================================================================
+
+
+def _bins_frame(clr: cooler.Cooler):
+    """Bins as ``chrom``/``start``/``end`` with ``chrom`` as plain strings."""
+    import pandas as pd  # noqa: F401  (imported for the dtype cast below)
+
+    return (
+        clr.bins()[:][["chrom", "start", "end"]]
+        .reset_index(drop=True)
+        .astype({"chrom": str})
+    )
+
+
+def _coordinate_pixels(clr: cooler.Cooler):
+    """Pixels re-keyed by genomic coordinate instead of bin id.
+
+    Bin ids are only meaningful relative to a bin table, so a file whose contigs
+    were reordered has legitimately different ``bin1_id``/``bin2_id`` while
+    describing exactly the same contacts.  Re-keying to
+    ``(contig, start)`` pairs — and normalising each pair's orientation, since
+    reordering can flip which side of the upper triangle a contact lands on —
+    gives a representation that is invariant to contig ordering, so the two can
+    still be compared exactly.
+    """
+    import pandas as pd
+
+    bins = clr.bins()[:][["chrom", "start"]].astype({"chrom": str})
+    chrom = bins["chrom"].to_numpy()
+    start = bins["start"].to_numpy()
+    pix = clr.pixels()[:]
+    side1 = list(zip(chrom[pix["bin1_id"]], start[pix["bin1_id"]], strict=True))
+    side2 = list(zip(chrom[pix["bin2_id"]], start[pix["bin2_id"]], strict=True))
+    ordered = [(a, b) if a <= b else (b, a) for a, b in zip(side1, side2, strict=True)]
+    frame = pd.DataFrame(
+        {
+            "k1": [k[0] for k in ordered],
+            "k2": [k[1] for k in ordered],
+            "count": pix["count"].to_numpy(),
+        }
+    )
+    return (
+        frame.groupby(["k1", "k2"], as_index=False)["count"]
+        .sum()
+        .sort_values(["k1", "k2"])
+        .reset_index(drop=True)
+    )
+
+
+class TestCreateCoolMatchesSource:
+    """``create cool`` must reproduce its source cooler's tables exactly.
+
+    Two distinct contracts, both checked here:
+
+    - ``--contig-order cool`` preserves the source's contig order, so the bins
+      and pixel tables must be **byte-identical** to the source — and must stay
+      identical after ``flatten`` takes the file back to a plain ``.cool``.
+    - The default ``genome-then-length`` deliberately regroups contigs by
+      genome, so bin ids necessarily change.  The contacts themselves must not:
+      re-keyed to genomic coordinates, the pixel table must still be identical.
+
+    Existing round-trip tests only compared ``shape`` and ``nnz``, which a
+    scrambled-but-same-size table would satisfy.
+    """
+
+    DATA = Path("tests/data")
+
+    SOURCES = [
+        ("fixed-1kb", "assembly_1_rep1_1kb.cool"),
+        ("variable-dpnii", "assembly_1_rep1_DpnII.cool"),
+    ]
+
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
+
+    def _import(self, runner, tmp_path, source, order):
+        out = tmp_path / f"imported_{order}.metacool"
+        result = runner.invoke(
+            cli,
+            [
+                "create",
+                "cool",
+                "--cool",
+                str(self.DATA / source),
+                "--contigs",
+                str(self.DATA / "contigs_table_1.tsv"),
+                "--genomes",
+                str(self.DATA / "mag_table_1.tsv"),
+                "--contig-order",
+                order,
+                "-o",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return out
+
+    @pytest.mark.parametrize(("label", "source"), SOURCES, ids=[s[0] for s in SOURCES])
+    def test_contig_order_cool_is_table_identical(
+        self, runner, tmp_path, label, source
+    ):
+        """``--contig-order cool`` reproduces bins and pixels exactly."""
+        import pandas as pd
+
+        out = self._import(runner, tmp_path, source, "cool")
+        src = cooler.Cooler(str(self.DATA / source))
+        got = cooler.Cooler(str(out))
+
+        pd.testing.assert_frame_equal(_bins_frame(src), _bins_frame(got))
+        pd.testing.assert_frame_equal(
+            src.pixels()[:].reset_index(drop=True),
+            got.pixels()[:].reset_index(drop=True),
+        )
+        assert got.info["sum"] == src.info["sum"]
+        assert len(got.pixels()[:]) > 0
+
+    @pytest.mark.parametrize(("label", "source"), SOURCES, ids=[s[0] for s in SOURCES])
+    def test_flatten_round_trip_is_table_identical(
+        self, runner, tmp_path, label, source
+    ):
+        """cool -> metacool -> cool under ``--contig-order cool`` is lossless."""
+        import pandas as pd
+
+        out = self._import(runner, tmp_path, source, "cool")
+        flat = tmp_path / "flattened.cool"
+        result = runner.invoke(cli, ["flatten", str(out), "-o", str(flat)])
+        assert result.exit_code == 0, result.output
+
+        src = cooler.Cooler(str(self.DATA / source))
+        back = cooler.Cooler(str(flat))
+        pd.testing.assert_frame_equal(_bins_frame(src), _bins_frame(back))
+        pd.testing.assert_frame_equal(
+            src.pixels()[:].reset_index(drop=True),
+            back.pixels()[:].reset_index(drop=True),
+        )
+
+    @pytest.mark.parametrize(("label", "source"), SOURCES, ids=[s[0] for s in SOURCES])
+    def test_default_ordering_preserves_contacts_not_bin_ids(
+        self, runner, tmp_path, label, source
+    ):
+        """Regrouping by genome may renumber bins but must not move contacts."""
+        import pandas as pd
+
+        out = self._import(runner, tmp_path, source, "genome-then-length")
+        src = cooler.Cooler(str(self.DATA / source))
+        got = cooler.Cooler(str(out))
+
+        # Bin ids legitimately differ...
+        assert not _bins_frame(src).equals(_bins_frame(got)), (
+            "genome-then-length should reorder contigs on this fixture; if it no "
+            "longer does, this test has stopped exercising the reordered path"
+        )
+        # ...but the contacts, keyed by coordinate, must not.
+        pd.testing.assert_frame_equal(_coordinate_pixels(src), _coordinate_pixels(got))
+        assert got.info["sum"] == src.info["sum"]

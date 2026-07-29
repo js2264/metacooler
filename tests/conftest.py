@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from metacooler.io.create import from_pairs
+
+
+@pytest.fixture(autouse=True)
+def _isolate_metacooler_logger():
+    """Undo ``cli.setup_logging``'s global side effects around every test.
+
+    ``setup_logging`` reconfigures the shared ``"metacooler"`` logger: it
+    replaces the handler list and sets ``propagate = False`` so a host
+    application does not receive every record a second time in its own format.
+    That mutation outlives the CLI invocation that caused it, so without this
+    fixture any test that runs a CLI command would silently stop ``caplog`` —
+    which listens on the *root* logger — from seeing records in every test that
+    happens to run afterwards, making log assertions pass or fail on ordering
+    alone.
+    """
+    logger = logging.getLogger("metacooler")
+    saved = (logger.handlers[:], logger.propagate, logger.level)
+    logger.handlers = []
+    logger.propagate = True
+    logger.setLevel(logging.NOTSET)
+    yield
+    logger.handlers, logger.propagate, logger.level = saved
 
 
 @pytest.fixture
@@ -182,7 +205,7 @@ def tiny_cool_reversed_order(tmp_path: Path) -> tuple[Path, Path]:
     MAG ordering:  MAG_1 = [contig_A, contig_B], MAG_2 = [contig_C], unbinned = [contig_D]
     Genome-then-length reorder: contig_A (1000), contig_B (600), contig_C (400), contig_D (200)
 
-    Using reversed bins triggers the chrom-ID-remapping bug in import_from_cooler.
+    Using reversed bins exercises the chrom-ID remapping in ``io.create.from_cool``.
     """
     import cooler
     import pandas as pd
@@ -340,19 +363,7 @@ def tiny_genomes_no_header(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.fixture
-def tiny_fasta_valid(tmp_path: Path) -> Path:
-    """A properly-formatted 4-contig FASTA safe for pyfaidx indexing.
-
-    The ``tiny_fasta`` fixture uses implicit string literal concatenation that
-    accidentally writes multiple ``>contig_X`` headers per sequence, causing
-    pyfaidx to raise ``ValueError('Duplicate key ...')``.  This fixture
-    writes each sequence as a single-line record to avoid that issue.
-    """
-    path = tmp_path / "tiny_valid.fa"
-    with open(path, "w") as f:
-        f.write(">contig_A\n" + "ACGT" * 250 + "\n")  # 1000 bp
-        f.write(">contig_B\n" + "TGCA" * 150 + "\n")  # 600 bp
-        f.write(">contig_C\n" + "AATT" * 100 + "\n")  # 400 bp
-        f.write(">contig_D\n" + "GGCC" * 50 + "\n")  # 200 bp
-    return path
+# NOTE: a ``tiny_fasta_valid`` fixture used to live here.  It was byte-identical
+# to ``tiny_fasta`` and its docstring described a pyfaidx "Duplicate key" bug
+# that does not exist — ``tiny_fasta`` already writes one single-line record per
+# contig.  Use ``tiny_fasta``.

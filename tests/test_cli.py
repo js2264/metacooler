@@ -148,6 +148,8 @@ class TestAggregate:
 
 
 class TestShow:
+    # NOTE: the metacool URI is a POSITIONAL argument to ``show``; ``-f`` is
+    # ``--force``. Do not reintroduce ``-f <path>`` here.
     def test_show_genome(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "show.png"
         result = runner.invoke(
@@ -160,11 +162,10 @@ class TestShow:
                 str(out),
                 "--dpi",
                 "50",
-                "-f",
                 str(tiny_metacooler),
             ],
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert out.exists()
 
     def test_show_contig(self, runner, tiny_metacooler, tmp_path):
@@ -179,11 +180,10 @@ class TestShow:
                 str(out),
                 "--dpi",
                 "50",
-                "-f",
                 str(tiny_metacooler),
             ],
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert out.exists()
 
 

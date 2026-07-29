@@ -982,7 +982,7 @@ class TestStack:
 
     def test_stack_entry_names(self, runner, tmp_path, a1_rep1_1kb, a1_rep2_1kb):
         out = tmp_path / "stacked_names.mmetacool"
-        runner.invoke(
+        stacked = runner.invoke(
             cli,
             [
                 "stack",
@@ -994,12 +994,22 @@ class TestStack:
                 "rep1,rep2",
             ],
         )
+        assert stacked.exit_code == 0, stacked.output
         ls = runner.invoke(cli, ["ls", str(out)])
         assert ls.exit_code == 0, ls.output
         assert "rep1" in ls.output
         assert "rep2" in ls.output
 
-        out = tmp_path / "stacked_names.mmetacool"
+    def test_stack_names_count_mismatch_is_usage_error(
+        self, runner, tmp_path, a1_rep1_1kb, a1_rep2_1kb
+    ):
+        """A --names/inputs count mismatch is a UsageError (exit 2).
+
+        Use a *fresh* output path: with an existing output the command would
+        exit 1 from the overwrite guard, masking the real cause.
+        """
+        out = tmp_path / "stacked_count_mismatch.mmetacool"
+        assert not out.exists()
         stacked = runner.invoke(
             cli,
             [
@@ -1012,7 +1022,35 @@ class TestStack:
                 "rep1,rep2,repX",
             ],
         )
-        assert stacked.exit_code == 1, stacked.output
+        assert stacked.exit_code == 2, stacked.output
+        flat = " ".join(
+            stacked.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
+        )
+        assert "Number of --names (3) must match number of inputs (2)." in flat
+        assert not out.exists()
+
+    def test_stack_duplicate_names_is_usage_error(
+        self, runner, tmp_path, a1_rep1_1kb, a1_rep2_1kb
+    ):
+        out = tmp_path / "stacked_dup_names.mmetacool"
+        stacked = runner.invoke(
+            cli,
+            [
+                "stack",
+                "--output",
+                str(out),
+                str(a1_rep1_1kb),
+                str(a1_rep2_1kb),
+                "--names",
+                "rep1,rep1",
+            ],
+        )
+        assert stacked.exit_code == 2, stacked.output
+        flat = " ".join(
+            stacked.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
+        )
+        assert "duplicate entry names" in flat
+        assert not out.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1315,13 +1353,24 @@ class TestCpMvRm:
         assert "assembly_1_rep2_1kb" in entries
 
     def test_rm_without_force_prompts(self, runner, editable_mmetacool):
-        """Without -f flag rm should either prompt or fail non-interactively."""
+        """Declining the prompt keeps the entry AND reports failure.
+
+        ``click.confirm(..., abort=True)`` exits non-zero; a declined delete
+        used to exit 0, so ``metacooler rm … && echo ok`` printed "ok".
+        """
         src = f"{editable_mmetacool}::entries/assembly_1_rep1_1kb"
-        # non-interactive runner will get a no-input response
-        runner.invoke(cli, ["rm", src], input="n\n")
+        result = runner.invoke(cli, ["rm", src], input="n\n")
+        assert result.exit_code != 0
+        assert "Aborted" in result.output
         # should not have removed the entry
         entries = list_entries(editable_mmetacool)
         assert "assembly_1_rep1_1kb" in entries
+
+    def test_rm_with_confirmation_removes_entry(self, runner, editable_mmetacool):
+        src = f"{editable_mmetacool}::entries/assembly_1_rep1_1kb"
+        result = runner.invoke(cli, ["rm", src], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "assembly_1_rep1_1kb" not in list_entries(editable_mmetacool)
 
 
 # ---------------------------------------------------------------------------

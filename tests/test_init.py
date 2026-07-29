@@ -60,11 +60,25 @@ class TestInit:
         expected = {
             "__version__",
             "MetaCooler",
+            # creation
             "from_pairs",
             "from_cool",
+            # transforms and readers
+            "extract",
+            "flatten",
+            "merge",
+            "binnify",
+            "zoomify",
+            "aggregate",
+            "network",
+            "dump_table",
+            # format
             "is_metacooler",
             "is_mmetacooler",
+            "validate",
+            "validate_mmetacooler",
             "parse_uri",
+            # mmetacool collections
             "create_mmetacool",
             "add_entry",
             "remove_entry",
@@ -74,6 +88,18 @@ class TestInit:
             "copy_entry_cross_file",
         }
         assert expected == set(metacooler.__all__)
+
+    def test_all_exports_have_a_getattr_branch(self):
+        """Every name in ``__all__`` must resolve through the lazy dispatch.
+
+        Guards the convention in CLAUDE.md: public API is added by extending
+        ``__all__`` *and* adding an ``if name == ...`` branch.  Forgetting the
+        branch is otherwise only caught at first use.
+        """
+        import metacooler
+
+        for name in metacooler.__all__:
+            assert hasattr(metacooler, name), f"{name} has no __getattr__ branch"
 
     def test_all_exports_accessible(self):
         import metacooler

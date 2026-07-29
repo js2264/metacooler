@@ -114,9 +114,21 @@ class TestRmCommand:
         assert "entry2" in entries
 
     def test_rm_nonexistent_entry(self, runner, two_entry_mmetacool: Path):
+        """A missing group is rejected by MetaCoolURI at parse time (exit 2).
+
+        This is a Click UsageError raised while converting TARGET, not an
+        exit-1 error from the command body.
+        """
         target = f"{two_entry_mmetacool}::entries/nonexistent"
         result = runner.invoke(cli, ["rm", "-f", target])
-        assert result.exit_code != 0
+        assert result.exit_code == 2, result.output
+        flat = " ".join(
+            result.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
+        )
+        assert "Invalid value for 'TARGET'" in flat
+        assert "Group '/entries/nonexistent' not found" in flat
+        # nothing was removed
+        assert list_entries(two_entry_mmetacool) == ["entry1", "entry2"]
 
     def test_rm_with_confirmation(self, runner, two_entry_mmetacool: Path):
         target = f"{two_entry_mmetacool}::entries/entry1"
@@ -124,3 +136,21 @@ class TestRmCommand:
         assert result.exit_code == 0
         entries = list_entries(two_entry_mmetacool)
         assert "entry1" not in entries
+
+    def test_rm_declined_exits_nonzero(self, runner, two_entry_mmetacool: Path):
+        """Declining the confirmation must fail, not silently report success."""
+        target = f"{two_entry_mmetacool}::entries/entry1"
+        result = runner.invoke(cli, ["rm", target], input="n\n")
+        assert result.exit_code != 0
+        assert "Aborted" in result.output
+        assert "entry1" in list_entries(two_entry_mmetacool)
+
+    def test_rm_bare_mmetacool_rejected(self, runner, two_entry_mmetacool: Path):
+        """A collection root is not a valid rm target (UsageError, exit 2)."""
+        result = runner.invoke(cli, ["rm", "-f", str(two_entry_mmetacool)])
+        assert result.exit_code == 2, result.output
+        flat = " ".join(
+            result.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
+        )
+        assert "is an mmetacool collection" in flat
+        assert list_entries(two_entry_mmetacool) == ["entry1", "entry2"]

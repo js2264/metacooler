@@ -6,7 +6,9 @@ Covers:
 - ``--genomes`` validation: valid table, missing ``genome_name`` column, no header
 - ``--assembly-name`` stored in HDF5 attrs
 - ``--chunksize`` / ``--nproc`` do not cause errors (pairs only)
-- Pixel correctness: ``create pairs --contig-order fasta`` matches ``cooler cload pairs``
+- Bins + pixel correctness: ``create pairs --contig-order fasta`` matches
+  ``cooler cload pairs``, for fixed-width and digest (variable-width) bins,
+  across every chunking and sort path
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 import h5py
 import pytest
 from click.testing import CliRunner
+from numpy.testing import assert_array_equal
 
 from metacooler.cli.main import cli
 
@@ -300,7 +303,7 @@ class TestCreatePairsContigOrder:
 
     @pytest.mark.parametrize(
         "order",
-        ["genome-then-length", "genome-then-alpha", "fasta", "alpha"],
+        ["genome-then-length", "genome-then-alpha", "alpha"],
     )
     def test_valid_contig_order(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table, order
@@ -318,6 +321,40 @@ class TestCreatePairsContigOrder:
         )
         assert result.exit_code == 0, result.output
         assert out.exists()
+
+    def test_contig_order_fasta_with_fasta(
+        self,
+        runner,
+        tmp_path,
+        tiny_pairs,
+        tiny_bins_bed,
+        tiny_contigs_table,
+        tiny_fasta,
+    ):
+        """``fasta`` order works when a FASTA is supplied to define the order."""
+        out = tmp_path / "out_fasta.metacool"
+        result = runner.invoke(
+            cli,
+            _base_pairs_args(
+                out,
+                tiny_pairs,
+                tiny_bins_bed,
+                tiny_contigs_table,
+                contig_order="fasta",
+                extra=["--fasta", str(tiny_fasta)],
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        with h5py.File(out, "r") as f:
+            names = [
+                n.decode() if isinstance(n, bytes) else n
+                for n in f["contigs"]["name"][:]
+            ]
+        # FASTA order, NOT alphabetical-by-accident (they coincide here, so
+        # assert the recorded ordering too).
+        assert names == ["contig_A", "contig_B", "contig_C", "contig_D"]
+        with h5py.File(out, "r") as f:
+            assert f.attrs["contig-ordering"] == "fasta"
 
     def test_contig_order_genome_then_length_produces_sorted_contigs(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
@@ -366,10 +403,17 @@ class TestCreatePairsContigOrder:
             ]
         assert names == sorted(names)
 
-    def test_contig_order_fasta_requires_fasta_or_bins(
+    def test_contig_order_fasta_without_reference_is_refused(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
     ):
-        """``fasta`` order with a BED bins file succeeds (order inferred from bins)."""
+        """``fasta`` order is refused when nothing defines the FASTA order.
+
+        Regression test for review item #5: with lengths coming from a BED and
+        no FASTA and no ``#chromsize:`` pairs header, there is no FASTA order to
+        preserve.  The old code silently fell back to *alphabetical* while still
+        recording ``contig-ordering="fasta"``, so two files with different
+        layouts both claimed the same ordering and ``merge`` would scramble them.
+        """
         out = tmp_path / "out.metacool"
         result = runner.invoke(
             cli,
@@ -381,7 +425,9 @@ class TestCreatePairsContigOrder:
                 contig_order="fasta",
             ),
         )
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0
+        assert "fasta" in result.output.lower()
+        assert not out.exists()
 
     def test_contig_order_invalid_choice(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
@@ -507,7 +553,7 @@ class TestCreatePairsAssemblyName:
         )
         assert result.exit_code == 0, result.output
         with h5py.File(out, "r") as f:
-            assert f.attrs.get("assembly-name") == "my_metagenome"
+            assert f.attrs.get("genome-assembly") == "my_metagenome"
 
     def test_assembly_name_absent_by_default(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
@@ -536,7 +582,7 @@ class TestCreatePairsAssemblyName:
         )
         assert result.exit_code == 0, result.output
         with h5py.File(out, "r") as f:
-            assert f.attrs.get("assembly-name") == "my metagenome v2"
+            assert f.attrs.get("genome-assembly") == "my metagenome v2"
 
 
 # ===========================================================================
@@ -548,7 +594,7 @@ class TestCreatePairsBinsAsInteger:
     """``--bins`` accepts an integer bin size with ``--fasta`` for contig lengths."""
 
     def test_binsize_integer_with_fasta(
-        self, runner, tmp_path, tiny_pairs, tiny_fasta_valid, tiny_contigs_table
+        self, runner, tmp_path, tiny_pairs, tiny_fasta, tiny_contigs_table
     ):
         out = tmp_path / "out.metacool"
         result = runner.invoke(
@@ -563,7 +609,7 @@ class TestCreatePairsBinsAsInteger:
                 "--bins",
                 "200",
                 "--fasta",
-                str(tiny_fasta_valid),
+                str(tiny_fasta),
                 "--contigs",
                 str(tiny_contigs_table),
             ],
@@ -823,72 +869,184 @@ class TestCreateCoolGenomesTable:
         assert result.exit_code != 0
 
 
-# ===========================================================================
-# create pairs — pixel correctness vs. cooler cload pairs
-# ===========================================================================
-
-
 class TestCreatePairsPixelCorrectness:
-    """``create pairs --contig-order fasta`` must produce an identical pixel table
-    to ``cooler cload pairs`` when using the same pairs file and bin size.
+    """``create pairs --contig-order fasta`` must reproduce ``cooler cload pairs``.
 
-    The pre-built ``assembly_1_rep1_1kb.cool`` in ``tests/data/`` was generated
-    with::
+    Both the **bins** table and the **pixel** table must match the reference
+    cooler exactly.  Comparing pixels alone is not enough: bin ids are only
+    meaningful relative to a bin table, so two files could agree pixel-for-pixel
+    while binning the genome differently.
+
+    The reference coolers in ``tests/data/`` are built by ``raw-to-cool.sh``::
 
         cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 \\
             assembly_1.chrom.sizes:1000 contacts_1_rep1.pairs.gz \\
             assembly_1_rep1_1kb.cool
+        cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 \\
+            assembly_1_DpnII-digested.bed contacts_1_rep1.pairs.gz \\
+            assembly_1_rep1_DpnII.cool
 
-    Using ``--contig-order fasta`` preserves the chromsize order from the pairs
-    header, which matches ``assembly_1.chrom.sizes``, so both files must have
-    identical bin numbering and therefore identical pixel tables.
+    ``--contig-order fasta`` preserves the chromsize order from the pairs
+    header, which matches both ``assembly_1.chrom.sizes`` and the digest BED, so
+    bin numbering is identical and the tables are directly comparable.
     """
 
     DATA = Path("tests/data")
+
+    # (label, --bins value, reference cooler) — fixed-width and variable-width.
+    # The variable-width case is the one that exercises a caller-supplied bin
+    # table rather than metacooler's own tiling.
+    BIN_SPECS = [
+        ("fixed-1kb", "1000", "assembly_1_rep1_1kb.cool"),
+        (
+            "variable-dpnii",
+            str(Path("tests/data") / "assembly_1_DpnII-digested.bed"),
+            "assembly_1_rep1_DpnII.cool",
+        ),
+    ]
+
+    # (label, read_block, chunksize, --sort-strategy, pixel budget, expect_spill)
+    #
+    # None of these knobs may perturb the output by a single count. The
+    # multi-chunk rows matter most — they are the only end-to-end check that
+    # ``_buffer_pixels``' folding, and cooler's external sort, agree with a
+    # plain single-pass ``cload`` to the row.
+    #
+    # Forcing many chunks needs BOTH levers: pyarrow's read block has an 8 MiB
+    # floor and this 50 k-contact fixture fits inside one block, so lowering
+    # ``--chunksize`` alone still yields exactly one chunk (the batches are
+    # coalesced straight back) and the multi-chunk cases would pass vacuously.
+    # Capping ``_PAIRS_READ_BLOCK_MAX_BYTES`` to 64 KiB gives ~39 real chunks.
+    # ``expect_spill`` is None where ``--sort-strategy`` is explicit, since
+    # ``_buffer_pixels`` is then bypassed entirely.
+    STRATEGIES = [
+        ("default-single-pass", None, None, "auto", None, False),
+        ("many-chunks-in-memory", 1 << 16, 1000, "memory", None, None),
+        ("many-chunks-external-sort", 1 << 16, 1000, "external", None, None),
+        ("many-chunks-folded-in-memory", 1 << 16, 1000, "auto", 50_000, False),
+        ("many-chunks-folded-then-spilled", 1 << 16, 1000, "auto", 500, True),
+    ]
 
     @pytest.fixture
     def runner(self):
         return CliRunner()
 
-    def test_pixels_match_cooler_cload(self, runner, tmp_path):
-        """``create pairs --contig-order fasta --bins 1000`` pixel table equals
-        the pre-built cooler file pixel-for-pixel."""
+    @pytest.mark.parametrize(
+        ("bin_label", "bins_arg", "reference"),
+        BIN_SPECS,
+        ids=[b[0] for b in BIN_SPECS],
+    )
+    @pytest.mark.parametrize(
+        ("label", "read_block", "chunksize", "strategy", "budget", "expect_spill"),
+        STRATEGIES,
+        ids=[s[0] for s in STRATEGIES],
+    )
+    def test_matches_cooler_cload(
+        self,
+        runner,
+        tmp_path,
+        monkeypatch,
+        bin_label,
+        bins_arg,
+        reference,
+        label,
+        read_block,
+        chunksize,
+        strategy,
+        budget,
+        expect_spill,
+    ):
+        """Bins and pixels must equal the ``cload`` reference on every path."""
         import cooler
         import pandas as pd
 
-        out = tmp_path / "fasta_order.metacool"
-        result = runner.invoke(
-            cli,
-            [
-                "create",
-                "pairs",
-                "--output",
-                str(out),
-                "--pairs",
-                str(self.DATA / "contacts_1_rep1.pairs.gz"),
-                "--bins",
-                "1000",
-                "--contigs",
-                str(self.DATA / "contigs_table_1.tsv"),
-                "--genomes",
-                str(self.DATA / "mag_table_1.tsv"),
-                "--contig-order",
-                "fasta",
-            ],
-        )
+        from metacooler.io import create as create_mod
+
+        if budget is not None:
+            monkeypatch.setattr(create_mod, "_SORT_IN_MEMORY_PIXEL_THRESHOLD", budget)
+
+        # Spy on the code paths so a future change that quietly collapses these
+        # cases into "one chunk, no folding" fails loudly instead of passing.
+        n_chunks = 0
+        spilled: bool | None = None
+        real_stream = create_mod._stream_binned_pairs
+        real_buffer = create_mod._buffer_pixels
+
+        def counting_stream(*args, **kwargs):
+            nonlocal n_chunks
+            for frame in real_stream(*args, **kwargs):
+                n_chunks += 1
+                yield frame
+
+        def spying_buffer(pixel_iter, max_rows, fold_rows=None):
+            nonlocal spilled
+            frames, rest = real_buffer(pixel_iter, max_rows, fold_rows)
+            spilled = rest is not None
+            return frames, rest
+
+        monkeypatch.setattr(create_mod, "_stream_binned_pairs", counting_stream)
+        monkeypatch.setattr(create_mod, "_buffer_pixels", spying_buffer)
+        if read_block is not None:
+            monkeypatch.setattr(create_mod, "_PAIRS_READ_BLOCK_MAX_BYTES", read_block)
+
+        out = tmp_path / f"{bin_label}_{label}.metacool"
+        args = [
+            "create",
+            "pairs",
+            "--output",
+            str(out),
+            "--pairs",
+            str(self.DATA / "contacts_1_rep1.pairs.gz"),
+            "--bins",
+            bins_arg,
+            "--contigs",
+            str(self.DATA / "contigs_table_1.tsv"),
+            "--genomes",
+            str(self.DATA / "mag_table_1.tsv"),
+            "--contig-order",
+            "fasta",
+            "--sort-strategy",
+            strategy,
+        ]
+        if chunksize is not None:
+            args += ["--chunksize", str(chunksize)]
+
+        result = runner.invoke(cli, args)
         assert result.exit_code == 0, result.output
         assert out.exists()
 
-        pix_cool = cooler.Cooler(str(self.DATA / "assembly_1_rep1_1kb.cool")).pixels()[
-            :
-        ]
-        pix_meta = cooler.Cooler(str(out)).pixels()[:]
+        # The case really did take the path its label claims.
+        if read_block is None:
+            assert n_chunks == 1, "baseline case should be a single chunk"
+        else:
+            assert n_chunks > 10, (
+                f"expected many chunks, got {n_chunks} — the read-block cap and "
+                "--chunksize no longer force chunking, so this case is vacuous"
+            )
+        if expect_spill is not None:
+            assert spilled is expect_spill
 
-        pd.testing.assert_frame_equal(
-            pix_cool.reset_index(drop=True),
-            pix_meta.reset_index(drop=True),
-            check_like=False,
-        )
+        ref = cooler.Cooler(str(self.DATA / reference))
+        got = cooler.Cooler(str(out))
+
+        # --- bins: same tiling, same order, same widths ---
+        cols = ["chrom", "start", "end"]
+        bins_ref = ref.bins()[:][cols].reset_index(drop=True).astype({"chrom": str})
+        bins_got = got.bins()[:][cols].reset_index(drop=True).astype({"chrom": str})
+        pd.testing.assert_frame_equal(bins_ref, bins_got)
+
+        # --- pixels ---
+        pix_ref = ref.pixels()[:].reset_index(drop=True)
+        pix_got = got.pixels()[:].reset_index(drop=True)
+        pd.testing.assert_frame_equal(pix_ref, pix_got, check_like=False)
+
+        # Guard the guard: an empty reference would satisfy everything above.
+        assert len(bins_got) > 0
+        assert len(pix_got) > 0
+        assert pix_got["count"].sum() == pix_ref["count"].sum()
+        if bin_label == "variable-dpnii":
+            widths = bins_got["end"] - bins_got["start"]
+            assert widths.nunique() > 1, "digest bins should not be uniform width"
 
 
 # ===========================================================================
@@ -952,6 +1110,53 @@ class TestCreatePairsSortInMemory:
         assert out.exists()
         with h5py.File(out, "r") as f:
             assert "pixels" in f
+
+    def test_sort_auto_spills_to_external(
+        self,
+        monkeypatch,
+        runner,
+        tmp_path,
+        tiny_pairs,
+        tiny_bins_bed,
+        tiny_contigs_table,
+    ):
+        """auto falls back to the external sort once the row budget is exceeded.
+
+        The spilled path must produce exactly the same pixels as the in-memory
+        one: the frames buffered before the threshold was crossed are replayed
+        ahead of the rest of the stream, so none may be dropped or duplicated.
+        """
+        from metacooler.io import create as create_mod
+
+        ref = tmp_path / "out_auto_ref.metacool"
+        assert (
+            runner.invoke(
+                cli,
+                _base_pairs_args(
+                    ref,
+                    tiny_pairs,
+                    tiny_bins_bed,
+                    tiny_contigs_table,
+                    extra=["--sort-strategy", "memory"],
+                ),
+            ).exit_code
+            == 0
+        )
+
+        # A budget of 0 rows forces the very first chunk over the threshold.
+        monkeypatch.setattr(create_mod, "_SORT_IN_MEMORY_PIXEL_THRESHOLD", 0)
+        out = tmp_path / "out_auto_spill.metacool"
+        result = runner.invoke(
+            cli,
+            _base_pairs_args(out, tiny_pairs, tiny_bins_bed, tiny_contigs_table),
+        )
+        assert result.exit_code == 0, result.output
+
+        with h5py.File(ref, "r") as a, h5py.File(out, "r") as b:
+            assert a.attrs["nnz"] == b.attrs["nnz"]
+            assert a.attrs["sum"] == b.attrs["sum"]
+            for col in ("bin1_id", "bin2_id", "count"):
+                assert_array_equal(a["pixels"][col][:], b["pixels"][col][:])
 
 
 class TestCreateCoolSortInMemory:
