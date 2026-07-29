@@ -20,11 +20,25 @@ from metacooler._version import __version__
 __all__ = [
     "__version__",
     "MetaCooler",
+    # creation
     "from_pairs",
     "from_cool",
+    # transforms and readers
+    "extract",
+    "flatten",
+    "merge",
+    "binnify",
+    "zoomify",
+    "aggregate",
+    "network",
+    "dump_table",
+    # format
     "is_metacooler",
     "is_mmetacooler",
+    "validate",
+    "validate_mmetacooler",
     "parse_uri",
+    # mmetacool collections
     "create_mmetacool",
     "add_entry",
     "remove_entry",
@@ -59,6 +73,46 @@ def __getattr__(name: str) -> object:
         from metacooler.io.create import from_cool as _from_cool
 
         return _from_cool
+    if name == "extract":
+        from metacooler.io.extract import extract as _extract
+
+        return _extract
+    if name == "flatten":
+        from metacooler.io.flatten import flatten as _flatten
+
+        return _flatten
+    if name == "merge":
+        from metacooler.io.merge import merge as _merge
+
+        return _merge
+    if name == "network":
+        from metacooler.io.network import network as _network
+
+        return _network
+    if name == "dump_table":
+        from metacooler.io.dump import dump_table as _dump_table
+
+        return _dump_table
+    if name == "binnify":
+        from metacooler.ops.binnify import binnify as _binnify
+
+        return _binnify
+    if name == "zoomify":
+        from metacooler.ops.zoomify import zoomify as _zoomify
+
+        return _zoomify
+    if name == "aggregate":
+        from metacooler.ops.aggregate import aggregate as _aggregate
+
+        return _aggregate
+    if name == "validate":
+        from metacooler.schema import validate as _validate
+
+        return _validate
+    if name == "validate_mmetacooler":
+        from metacooler.schema import validate_mmetacooler as _validate_mmetacooler
+
+        return _validate_mmetacooler
     if name == "is_metacooler":
         from metacooler.schema import is_metacooler as _is_metacooler
 
