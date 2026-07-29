@@ -8,6 +8,8 @@ from pathlib import Path
 import cooler
 import numpy as np
 
+from metacooler.io._utils import resolve_count_dtype
+
 logger = logging.getLogger("metacooler")
 
 
@@ -42,6 +44,12 @@ def flatten(
     bins["start"] = bins["start"].astype(np.int32)
     bins["end"] = bins["end"].astype(np.int32)
 
+    # Preserve the width of the source ``count`` column: a binnified source
+    # writes int64 and would silently wrap if narrowed back to int32 here.
+    count_dtype = resolve_count_dtype(
+        mc._clr.pixels()[:0]["count"].dtype, context="flatten"
+    )
+
     # Stream pixels in chunks to avoid loading the full table into memory.
     chunksize = 1_000_000
     n_pix = mc._clr.info["nnz"]
@@ -51,7 +59,7 @@ def flatten(
             chunk = mc._clr.pixels()[_i : _i + chunksize].copy()
             chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
             chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
-            chunk["count"] = chunk["count"].astype(np.int32)
+            chunk["count"] = chunk["count"].astype(count_dtype)
             swap = chunk["bin1_id"] > chunk["bin2_id"]
             chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
                 swap, ["bin2_id", "bin1_id"]
@@ -70,6 +78,7 @@ def flatten(
         str(output),
         bins=bins,
         pixels=_pixel_stream(),
+        dtypes={"count": count_dtype},
         ordered=True,
         symmetric_upper=True,
         metadata={"source-file": str(uri), "flattened": True},

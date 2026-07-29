@@ -10,7 +10,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from metacooler.io._utils import _filter_by_genomes_and_contigs
+from metacooler.io._utils import _filter_by_genomes_and_contigs, resolve_count_dtype
 
 logger = logging.getLogger("metacooler")
 
@@ -112,6 +112,12 @@ def _extract_contig_ids(
         }
     )
 
+    # Preserve the width of the source ``count`` column: a binnified source
+    # writes int64 and would silently wrap if narrowed back to int32 here.
+    count_dtype = resolve_count_dtype(
+        mc._clr.pixels()[:0]["count"].dtype, context="extract"
+    )
+
     genome_bin_set = set(genome_bin_indices.tolist())
     genome_bin_array = np.array(sorted(genome_bin_set), dtype=np.int64)
     valid_min, valid_max = genome_bin_array[0], genome_bin_array[-1]
@@ -140,7 +146,7 @@ def _extract_contig_ids(
             chunk["bin2_id"] = chunk["bin2_id"].map(global_to_local_bin)
             chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
             chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
-            chunk["count"] = chunk["count"].astype(np.int32)
+            chunk["count"] = chunk["count"].astype(count_dtype)
             swap = chunk["bin1_id"] > chunk["bin2_id"]
             chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
                 swap, ["bin2_id", "bin1_id"]
@@ -156,13 +162,14 @@ def _extract_contig_ids(
             {
                 "bin1_id": pd.Series(dtype=np.int64),
                 "bin2_id": pd.Series(dtype=np.int64),
-                "count": pd.Series(dtype=np.int32),
+                "count": pd.Series(dtype=count_dtype),
             }
         )
         cooler.create_cooler(
             str(output),
             bins=bins_df,
             pixels=empty_pixels,
+            dtypes={"count": count_dtype},
             ordered=True,
             symmetric_upper=True,
             assembly=assembly,
@@ -178,6 +185,7 @@ def _extract_contig_ids(
             str(output),
             bins=bins_df,
             pixels=_all_chunks(),
+            dtypes={"count": count_dtype},
             ordered=False,
             symmetric_upper=True,
             assembly=assembly,

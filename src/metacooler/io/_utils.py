@@ -53,6 +53,42 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
     return np.asarray(arr)
 
 
+def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:
+    """Pick a lossless on-disk dtype for a ``pixels/count`` column being copied.
+
+    Blindly casting to ``int32`` silently wraps counts written by
+    :mod:`metacooler.ops.binnify` (which deliberately writes ``int64``) and
+    floors float counts towards zero.  This preserves the source width instead.
+
+    Args:
+        dtype: dtype of the source ``count`` column.
+        context: Short description of the caller, used in the float warning.
+
+    Returns:
+        ``int32`` for narrow integer sources, ``int64`` for wide or unsigned
+        ones, and ``float64`` for float sources (with a warning).
+
+    Raises:
+        ValueError: If *dtype* is neither integer, boolean, nor float.
+    """
+    dtype = np.dtype(dtype)
+    if dtype.kind == "f":
+        logger.warning(
+            "%s: source 'count' column is %s; keeping float64 to avoid "
+            "truncating fractional counts.",
+            context,
+            dtype,
+        )
+        return np.dtype(np.float64)
+    if dtype.kind == "b":
+        return np.dtype(np.int32)
+    if dtype.kind not in ("i", "u"):
+        raise ValueError(f"Unsupported 'count' dtype {dtype!r} in {context}.")
+    if dtype.itemsize >= 8 or (dtype.kind == "u" and dtype.itemsize >= 4):
+        return np.dtype(np.int64)
+    return np.dtype(np.int32)
+
+
 def _finalize_metacool_file(
     path: Path,
     genomes: pd.DataFrame,

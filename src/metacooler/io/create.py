@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from pyfaidx import Fasta
 
-from metacooler.io._utils import _finalize_metacool_file
+from metacooler.io._utils import _finalize_metacool_file, resolve_count_dtype
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
 from metacooler.schema import (
@@ -1012,6 +1012,7 @@ def _stream_remapped_pixels(
     old_to_new_bin: np.ndarray,
     nproc: int,
     chunksize: int = 1_000_000,
+    count_dtype: np.dtype | None = None,
 ) -> Iterable[pd.DataFrame]:
     """Stream pixels from a cool file with bin-ID remapping and rich progress.
 
@@ -1021,6 +1022,8 @@ def _stream_remapped_pixels(
         old_to_new_bin: Array mapping old bin indices to new bin indices.
         nproc: Number of parallel reader threads (1 = serial).
         chunksize: Pixels per read batch.
+        count_dtype: dtype for the ``count`` column.  Defaults to the source's
+            own width; never narrows, so an int64 source is not truncated.
 
     Yields:
         Remapped pixel DataFrames with columns ``bin1_id``, ``bin2_id``,
@@ -1055,7 +1058,7 @@ def _stream_remapped_pixels(
         chunk["bin2_id"] = old_to_new_bin[chunk["bin2_id"].values.astype(np.int64)]
         # Drop pixels that touch a dropped contig (sentinel -1).
         chunk = chunk[(chunk["bin1_id"] >= 0) & (chunk["bin2_id"] >= 0)].copy()
-        chunk["count"] = chunk["count"].astype(np.int32)
+        chunk["count"] = chunk["count"].astype(count_dtype or np.int32)
         swap = chunk["bin1_id"] > chunk["bin2_id"]
         chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
             swap, ["bin2_id", "bin1_id"]
@@ -1495,8 +1498,13 @@ def from_cool(
     logger.info(
         f"Building metacool file: {len(genomes)} genomes, {len(contigs)} contigs"
     )
+    # Preserve the source's ``count`` width: a binnified cool writes int64 and
+    # a blind cast back to int32 wraps silently.
+    count_dtype = resolve_count_dtype(
+        clr.pixels()[:0]["count"].dtype, context="from_cool"
+    )
     raw_pixels: Iterable[pd.DataFrame] = _stream_remapped_pixels(
-        str(cool_path), clr.info["nnz"], old_to_new_bin, nproc
+        str(cool_path), clr.info["nnz"], old_to_new_bin, nproc, count_dtype=count_dtype
     )
     if sort_in_memory:
         pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
@@ -1512,6 +1520,7 @@ def from_cool(
             str(output_path),
             bins=bins_remapped,
             pixels=pixel_source,
+            dtypes={"count": count_dtype},
             ordered=ordered,
             symmetric_upper=True,
             assembly=assembly_name or "imported",

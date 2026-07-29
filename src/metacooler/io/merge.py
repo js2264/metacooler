@@ -102,7 +102,11 @@ def merge(
 
     # Use cooler's merge logic on the pixel tables
     uris = [str(p) for p in inputs]
-    cooler.merge_coolers(str(output), uris, mergebuf=int(2e7))
+    # Use cooler's merge logic on the pixel tables.  ``dtypes`` is mandatory:
+    # without it the summed counts inherit the int32 of the inputs and wrap.
+    cooler.merge_coolers(
+        str(output), uris, mergebuf=int(2e7), dtypes={"count": np.int64}
+    )
 
     # Post-process: add back metacooler-specific groups
     with h5py.File(first, "r") as fsrc, h5py.File(output, "a") as fdst:
