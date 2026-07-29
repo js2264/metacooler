@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import rich_click as click
 
-from metacooler.cli.main import cli
+from metacooler.cli._options import quiet_option, verbose_option
+from metacooler.cli.cmd_cp import parse_entry_uri
+from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(
@@ -17,7 +19,7 @@ from metacooler.cli.main import cli
 )
 @click.argument(
     "target",
-    type=str,
+    type=MetaCoolURI(require_entry=True),
     metavar="TARGET",
 )
 @click.option(
@@ -26,25 +28,18 @@ from metacooler.cli.main import cli
     is_flag=True,
     help="Remove without confirmation.",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-def cmd_rm(target: str, force: bool, verbose: bool) -> None:
+@verbose_option
+@quiet_option
+def cmd_rm(target: str, force: bool, verbose: bool, quiet: bool) -> None:
     """Remove an entry from an mmetacool file."""
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import list_entries, remove_entry
-    from metacooler.uri import parse_uri
 
-    setup_logging(verbose, command_name="metacooler rm")
+    setup_logging(verbose, command_name="metacooler rm", quiet=quiet)
 
-    file_path, group_path = parse_uri(target)
-    entry_name = group_path.rstrip("/").split("/")[-1]
-
-    if not file_path.exists():
-        raise click.ClickException(f"File not found: {file_path}")
+    # File existence and "this is not a bare collection path" are enforced by
+    # MetaCoolURI; parse_entry_uri rejects the remaining empty-name cases.
+    file_path, entry_name = parse_entry_uri(target, "Target")
 
     entries = list_entries(file_path)
     if entry_name not in entries:
@@ -52,10 +47,9 @@ def cmd_rm(target: str, force: bool, verbose: bool) -> None:
             f"Entry {entry_name!r} not found. Available: {entries}"
         )
 
-    if not force and not click.confirm(
-        f"Remove entry {entry_name!r} from {file_path}?"
-    ):
-        click.echo("Aborted.")
-        return
+    # abort=True so a declined delete exits non-zero — `rm … && echo ok` used to
+    # print "ok" after the user said no.
+    if not force:
+        click.confirm(f"Remove entry {entry_name!r} from {file_path}?", abort=True)
 
     remove_entry(file_path, entry_name)

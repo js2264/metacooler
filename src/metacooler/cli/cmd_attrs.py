@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import rich_click as click
-import yaml
 
 if TYPE_CHECKING:
     import h5py
 
+from metacooler.cli._options import quiet_option, verbose_option
 from metacooler.cli.main import MetaCoolURI, cli
 
 
@@ -94,28 +94,34 @@ def _collect_attrs_tree(obj: h5py.HLObject) -> dict:
     metavar="GROUP_PATH",
     help="HDF5 group path to inspect (default: [cyan]/[/cyan] — the file root).",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-def cmd_attrs(metacool_path: str, group_path: str, verbose: bool) -> None:
+@verbose_option
+@quiet_option
+def cmd_attrs(metacool_path: str, group_path: str, verbose: bool, quiet: bool) -> None:
     """Dump HDF5 attributes as YAML, matching cooler attrs output format.
 
     \b
     GROUP_PATH    HDF5 group path (default: /)
+
+    The group may be given either as the ``::group`` part of the URI or as the
+    positional GROUP_PATH argument, but not both.
     """
     import h5py
+    import yaml
 
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.schema import is_mmetacooler
     from metacooler.uri import parse_uri
 
-    setup_logging(verbose, command_name="metacooler attrs")
+    setup_logging(verbose, command_name="metacooler attrs", quiet=quiet)
 
     file_path, uri_group = parse_uri(metacool_path)
-    # Merge URI group path with explicit group_path argument
+    # Two ways to say the same thing: the URI group used to be silently
+    # discarded here, sending every lookup to the file root.
+    if uri_group != "/" and group_path != "/":
+        raise click.ClickException(
+            f"Group given twice: URI group {uri_group!r} and GROUP_PATH "
+            f"{group_path!r}. Specify the group only once."
+        )
     resolved_group = uri_group if group_path == "/" else group_path
 
     with h5py.File(file_path, "r") as f:

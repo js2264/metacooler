@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import h5py
 import rich_click as click
 
-from metacooler.cli.main import cli
-from metacooler.schema import COOLER_FORMAT
+from metacooler.cli._options import quiet_option, verbose_option
+from metacooler.cli.main import MetaCoolURI, cli
 
 
 def _is_mcool(file_path: Path) -> bool:
@@ -25,6 +24,10 @@ def _is_mcool(file_path: Path) -> bool:
         ``True`` if the file is a valid mcool collection, ``False``
         otherwise (including if the file cannot be opened).
     """
+    import h5py
+
+    from metacooler.schema import COOLER_FORMAT
+
     try:
         with h5py.File(file_path, "r") as f:
             if "resolutions" not in f:
@@ -43,26 +46,36 @@ def _is_mcool(file_path: Path) -> bool:
 
 
 @cli.command(name="ls", help="List entries in a metacool/mmetacool/mcool file.")
-@click.argument("file_path", type=click.Path(exists=True, path_type=Path))
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-def cmd_ls(file_path: Path, verbose: bool) -> None:
+@click.argument("metacool_path", type=MetaCoolURI(), metavar="METACOOL_PATH")
+@verbose_option
+@quiet_option
+def cmd_ls(metacool_path: str, verbose: bool, quiet: bool) -> None:
     """List entries in a metacool, mmetacool, or mcool file.
 
     \b
     For .mmetacool: lists all entries with full URI path.
     For .mcool: lists resolutions under /resolutions/.
     For .metacool: returns the root path.
+
+    A URI that already addresses a single entry (``file::entries/name``) is
+    echoed back unchanged — there is nothing below it to enumerate.
     """
+    import h5py
+
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import list_entries
     from metacooler.schema import is_mmetacooler
+    from metacooler.uri import parse_uri
 
-    setup_logging(verbose, command_name="metacooler ls")
+    setup_logging(verbose, command_name="metacooler ls", quiet=quiet)
+
+    file_path, group_path = parse_uri(metacool_path)
+
+    if group_path != "/":
+        # The URI already names a single map — echo it back so `ls` output is
+        # always a list of URIs this CLI can consume.
+        click.echo(f"{file_path}::{group_path.lstrip('/')}")
+        return
 
     if is_mmetacooler(file_path):
         entries = list_entries(file_path)

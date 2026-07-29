@@ -2,9 +2,45 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import rich_click as click
 
-from metacooler.cli.main import cli
+from metacooler.cli._options import quiet_option, verbose_option
+from metacooler.cli.main import MetaCoolURI, cli
+
+
+def parse_entry_uri(uri: str, role: str) -> tuple[Path, str]:
+    """Split an ``file::entries/name`` URI into ``(file path, entry name)``.
+
+    A bare path (no ``::group``) used to fall through the old
+    ``group_path.rstrip("/").split("/")[-1]`` idiom as an empty entry name,
+    producing the useless ``Entry '' not found``.  This is the single guard
+    that turns it into an actionable message.  Destination URIs cannot be
+    validated by :class:`~metacooler.cli.main.MetaCoolURI` because the group
+    they name does not exist yet, so they go through here instead.
+
+    Args:
+        uri: Raw CLI URI string.
+        role: Human-readable role of the argument (``"Source"`` /
+            ``"Destination"``), used in the error message.
+
+    Returns:
+        A ``(file_path, entry_name)`` tuple.
+
+    Raises:
+        click.ClickException: If the URI does not name an entry.
+    """
+    from metacooler.uri import parse_uri
+
+    file_path, group_path = parse_uri(uri)
+    entry_name = group_path.rstrip("/").rsplit("/", 1)[-1]
+    if group_path == "/" or not entry_name:
+        raise click.ClickException(
+            f"{role} must name an entry with URI syntax, e.g. "
+            f"'{file_path}::entries/<name>' (got {uri!r})."
+        )
+    return file_path, entry_name
 
 
 @cli.command(
@@ -19,7 +55,7 @@ from metacooler.cli.main import cli
 )
 @click.argument(
     "src",
-    type=str,
+    type=MetaCoolURI(require_entry=True),
     metavar="SRC",
 )
 @click.argument(
@@ -33,69 +69,59 @@ from metacooler.cli.main import cli
     is_flag=True,
     help="Overwrite destination without confirmation.",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-def cmd_cp(src: str, dst: str, force: bool, verbose: bool) -> None:
+@verbose_option
+@quiet_option
+def cmd_cp(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
     """Copy an entry within or between mmetacool files."""
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import (
         copy_entry,
         copy_entry_cross_file,
+        init_mmetacool_attrs,
         list_entries,
     )
-    from metacooler.uri import parse_uri
 
-    setup_logging(verbose, command_name="metacooler cp")
+    setup_logging(verbose, command_name="metacooler cp", quiet=quiet)
 
-    src_path, src_group = parse_uri(src)
-    dst_path, dst_group = parse_uri(dst)
+    src_path, src_name = parse_entry_uri(src, "Source")
+    dst_path, dst_name = parse_entry_uri(dst, "Destination")
 
-    # Extract entry name from group path (last component)
-    src_name = src_group.rstrip("/").split("/")[-1]
-    dst_name = dst_group.rstrip("/").split("/")[-1]
+    # Source existence is guaranteed by MetaCoolURI; the entry inside it is not.
+    src_entries = list_entries(src_path)
+    if src_name not in src_entries:
+        raise click.ClickException(
+            f"Source entry {src_name!r} not found. Available: {src_entries}"
+        )
 
-    if not src_path.exists():
-        raise click.ClickException(f"Source file not found: {src_path}")
+    same_file = src_path.resolve() == dst_path.resolve()
 
-    if src_path == dst_path:
-        # Same-file copy — src_path was already confirmed to exist above
-        entries = list_entries(src_path)
-        if src_name not in entries:
-            raise click.ClickException(
-                f"Source entry {src_name!r} not found. Available: {entries}"
-            )
-        if (
-            dst_name in entries
-            and not force
-            and not click.confirm(
-                f"Destination entry {dst_name!r} already exists. Overwrite?"
-            )
-        ):
-            click.echo("Aborted.")
-            return
-        copy_entry(src_path, src_name, dst_name, overwrite=force)
+    if same_file:
+        dst_entries = src_entries
     else:
-        # Cross-file copy — initialise a new mmetacool if dst does not exist
+        # Only now that the source is known good may we touch the destination —
+        # creating it first left a stray empty .mmetacool behind on a typo.
         if not dst_path.exists():
-            import h5py as _h5py
+            import h5py
 
-            with _h5py.File(dst_path, "w") as _f:
-                from metacooler.io.mmetacool import _init_mmetacool_attrs
-
-                _init_mmetacool_attrs(_f)
+            with h5py.File(dst_path, "w") as f:
+                init_mmetacool_attrs(f)
             click.echo(f"Initialised new mmetacool file: {dst_path}")
-        entries = list_entries(dst_path)
-        if (
-            dst_name in entries
-            and not force
-            and not click.confirm(
-                f"Destination entry {dst_name!r} already exists in {dst_path}. Overwrite?"
-            )
-        ):
-            click.echo("Aborted.")
-            return
-        copy_entry_cross_file(src_path, src_name, dst_path, dst_name, overwrite=force)
+        dst_entries = list_entries(dst_path)
+
+    # Answering "y" must actually overwrite: the old code fell through with
+    # overwrite=force (still False) and the io layer raised anyway.
+    overwrite = force
+    if dst_name in dst_entries and not force:
+        where = "" if same_file else f" in {dst_path}"
+        click.confirm(
+            f"Destination entry {dst_name!r} already exists{where}. Overwrite?",
+            abort=True,
+        )
+        overwrite = True
+
+    if same_file:
+        copy_entry(src_path, src_name, dst_name, overwrite=overwrite)
+    else:
+        copy_entry_cross_file(
+            src_path, src_name, dst_path, dst_name, overwrite=overwrite
+        )

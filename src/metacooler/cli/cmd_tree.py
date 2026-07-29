@@ -2,35 +2,27 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import rich_click as click
-from rich.console import Console
-from rich.tree import Tree
 
-if TYPE_CHECKING:
-    pass
-
+from metacooler.cli._options import quiet_option, verbose_option
 from metacooler.cli.main import MetaCoolURI, cli
 
 
 @cli.command(name="tree", help="Display the data hierarchy.")
 @click.argument("metacool_path", type=MetaCoolURI())
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-def cmd_tree(metacool_path: str, verbose: bool) -> None:
+@verbose_option
+@quiet_option
+def cmd_tree(metacool_path: str, verbose: bool, quiet: bool) -> None:
     """Display the HDF5 hierarchy as a tree."""
     import h5py
+    from rich.console import Console
+    from rich.tree import Tree
 
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.schema import is_metacooler, is_mmetacooler
     from metacooler.uri import parse_uri
 
-    setup_logging(verbose, command_name="metacooler tree")
+    setup_logging(verbose, command_name="metacooler tree", quiet=quiet)
     console = Console()
 
     file_path, group_path = parse_uri(metacool_path)

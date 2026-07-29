@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 
 import rich_click as click
-from rich.console import Console
-from rich.table import Table
 
+from metacooler.cli._options import quiet_option, verbose_option
 from metacooler.cli.main import MetaCoolURI, cli
 
 # Exact order for JSON output as requested
@@ -33,20 +32,16 @@ _INFO_KEY_ORDER = [
 
 
 @cli.command(name="info", help="Display metadata and statistics.")
-@click.argument("metacool_path", type=MetaCoolURI())
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
     "--table",
     "table_out",
     is_flag=True,
     help="Output as a rich table instead of JSON.",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Increase verbosity (debug logging).",
-)
-def cmd_info(metacool_path: str, table_out: bool, verbose: bool) -> None:
+@verbose_option
+@quiet_option
+def cmd_info(metacool_path: str, table_out: bool, verbose: bool, quiet: bool) -> None:
     """Display metadata and statistics for a metacool or cooler file.
 
     Accepts ``.metacool`` files, mmetacool entries (via URI syntax), and
@@ -59,23 +54,16 @@ def cmd_info(metacool_path: str, table_out: bool, verbose: bool) -> None:
 
     from metacooler.api import MetaCooler
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.schema import is_metacooler, is_mmetacooler, list_metacoolers
+    from metacooler.schema import is_metacooler, is_mmetacooler
     from metacooler.uri import parse_uri
 
-    setup_logging(verbose, command_name="metacooler info")
+    setup_logging(verbose, command_name="metacooler info", quiet=quiet)
 
     raw = metacool_path
     file_path, group_path = parse_uri(raw)
 
-    # Check if this is an mmetacool without a group path
-    if is_mmetacooler(file_path) and group_path == "/":
-        entries = list_metacoolers(file_path)
-        entry_uris = [f"{file_path}::{e}" for e in entries]
-        raise click.ClickException(
-            f"This is an mmetacool file with {len(entries)} entries. "
-            f"Specify an entry with URI syntax:\n"
-            + "\n".join(f"  metacooler info {u}" for u in entry_uris)
-        )
+    # An mmetacool root is rejected up front by MetaCoolURI(require_entry=True),
+    # which lists the available entry URIs — no bespoke check needed here.
 
     # Check if this is an mcool without a resolution path
     if is_multires_file(str(file_path)) and group_path == "/":
@@ -110,6 +98,9 @@ def cmd_info(metacool_path: str, table_out: bool, verbose: bool) -> None:
             ordered_info[key] = info[key]
 
     if table_out:
+        from rich.console import Console
+        from rich.table import Table
+
         table = Table(
             title=f"MetaCooler Info: {Path(metacool_path.split('::')[0]).name}"
         )
