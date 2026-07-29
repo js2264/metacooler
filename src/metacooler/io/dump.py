@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 
 from metacooler.api import MetaCooler
-from metacooler.io._utils import _filter_by_genomes_and_contigs
+from metacooler.io._utils import (
+    _filter_by_genomes_and_contigs,
+    check_output_path,
+    chrom_codes,
+)
 from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
 
 if TYPE_CHECKING:
@@ -43,6 +47,7 @@ def dump_table(
     pixels_format: Literal["long", "wide"] = "long",
     weight: str = "count",
     join: bool = False,
+    force: bool = False,
 ) -> None:
     """Dump a metacooler table to TSV.
 
@@ -65,6 +70,14 @@ def dump_table(
             ``contig1/start1/end1``/``contig2/start2/end2`` (cooler ``--join``
             semantics); for ``"wide"`` it labels the matrix rows/columns with
             ``contig:start-end``.  Applied only when ``table="pixels"``.
+        force: Overwrite existing output file(s).  With ``table="all"`` every
+            ``<prefix>.<table>.tsv`` is guarded.
+
+    Raises:
+        FileExistsError: If an output file exists and *force* is False.
+        ValueError: If *table* is unknown, if ``table="all"`` is used without
+            *prefix*, or if the wide-format selection is too large to
+            materialise densely.
     """
     # Merge single/multi genome/contig filters
     genome_list = list(genomes) if genomes else []
@@ -76,7 +89,12 @@ def dump_table(
             raise ValueError("--prefix is required when --table all is specified.")
         # ``chroms`` is intentionally omitted: it is the cooler soft-link alias
         # of ``contigs[["name", "length"]]`` and would duplicate the contigs file.
-        for tbl in ("genomes", "contigs", "bins", "pixels", "indexes"):
+        tables = ("genomes", "contigs", "bins", "pixels", "indexes")
+        # Guard every destination up front so a clash on the last table does
+        # not leave the first four already overwritten.
+        for tbl in tables:
+            check_output_path(Path(f"{prefix}.{tbl}.tsv"), force)
+        for tbl in tables:
             out_path = Path(f"{prefix}.{tbl}.tsv")
             dump_table(
                 uri=uri,
@@ -90,8 +108,12 @@ def dump_table(
                 pixels_format=pixels_format,
                 weight=weight,
                 join=join,
+                force=True,
             )
         return
+
+    if out is not None:
+        check_output_path(out, force)
 
     # Resolve contig filter
     selected_contig_ids: set[int] | None = None
@@ -106,7 +128,7 @@ def dump_table(
     if table == "bins":
         df = mc.bins()
         if selected_contig_ids is not None:
-            bin_chrom_codes = df["chrom"].cat.codes.values
+            bin_chrom_codes = chrom_codes(df)
             mask = np.isin(bin_chrom_codes, list(selected_contig_ids))
             df = df[mask]
         df = df.copy()
@@ -137,7 +159,7 @@ def dump_table(
         valid_bin_ids: np.ndarray | None = None
         if selected_contig_ids is not None:
             bins = mc.bins()
-            bin_chrom_codes = bins["chrom"].cat.codes.values
+            bin_chrom_codes = chrom_codes(bins)
             valid_bin_ids = np.where(
                 np.isin(bin_chrom_codes, list(selected_contig_ids))
             )[0]
@@ -151,10 +173,44 @@ def dump_table(
             range_bounds = (i0, i1, j0, j1)
 
         if pixels_format == "wide":
-            # Wide format requires full materialisation for scatter operation
+            pixel_columns = list(mc._clr.pixels()[:0].columns)
+            if weight not in pixel_columns:
+                raise ValueError(
+                    f"Weight column {weight!r} not found. Available: {pixel_columns}"
+                )
+
+            # Resolve the *selected* bin set before touching the pixel table:
+            # the dense matrix is allocated over that set only, and the size
+            # guard must fire before anything is materialised.
+            n_bins = mc.shape[0]
+            selected_bins = np.arange(n_bins, dtype=np.int64)
+            if valid_bin_ids is not None:
+                selected_bins = np.asarray(valid_bin_ids, dtype=np.int64)
+            if range_bounds is not None:
+                i0, i1, j0, j1 = range_bounds
+                # A range selection keeps pixels in the row block, the column
+                # block, or their transpose, so the axis is the union of both.
+                in_range = np.union1d(
+                    np.arange(i0, i1, dtype=np.int64),
+                    np.arange(j0, j1, dtype=np.int64),
+                )
+                selected_bins = np.intersect1d(
+                    selected_bins, in_range, assume_unique=True
+                )
+            n_sel = int(selected_bins.size)
+            if n_sel > DENSE_MATRIX_BIN_LIMIT:
+                raise ValueError(
+                    f"Wide format refuses to allocate a {n_sel}\u00d7{n_sel} matrix "
+                    f"({n_sel**2 * 8 / 1e9:.1f} GB). Use --pixels-format long."
+                )
+
+            # Global bin id -> position along the selected axis (-1 = dropped).
+            local_of_bin = np.full(n_bins, -1, dtype=np.int64)
+            local_of_bin[selected_bins] = np.arange(n_sel, dtype=np.int64)
+
+            mat = np.zeros((n_sel, n_sel), dtype=np.float64)
             n_pix = len(mc._clr.pixels())
             chunksize = 1_000_000
-            chunks = []
             for lo in range(0, n_pix, chunksize):
                 chunk = mc._clr.pixels()[lo : lo + chunksize]
                 if valid_bin_ids is not None:
@@ -169,29 +225,19 @@ def dump_table(
                     in_row2 = chunk["bin1_id"].between(j0, j1 - 1)
                     in_col2 = chunk["bin2_id"].between(i0, i1 - 1)
                     chunk = chunk[(in_row & in_col) | (in_row2 & in_col2)]
-                if len(chunk):
-                    chunks.append(chunk)
-            df = (
-                pd.concat(chunks, ignore_index=True) if chunks else mc._clr.pixels()[:0]
-            )
-            if weight not in df.columns:
-                raise ValueError(
-                    f"Weight column {weight!r} not found. Available: {list(df.columns)}"
-                )
-            n_bins = mc.shape[0]
-            if n_bins > DENSE_MATRIX_BIN_LIMIT:
-                raise ValueError(
-                    f"Wide format refuses to allocate a {n_bins}\u00d7{n_bins} matrix "
-                    f"({n_bins**2 * 8 / 1e9:.1f} GB). Use --pixels-format long."
-                )
-            mat = np.zeros((n_bins, n_bins), dtype=np.float64)
-            b1 = df["bin1_id"].values.astype(int)
-            b2 = df["bin2_id"].values.astype(int)
-            vals = df[weight].values.astype(np.float64)
-            mat[b1, b2] = vals
-            mat[b2, b1] = vals
+                if not len(chunk):
+                    continue
+                b1 = local_of_bin[chunk["bin1_id"].values.astype(np.int64)]
+                b2 = local_of_bin[chunk["bin2_id"].values.astype(np.int64)]
+                keep = (b1 >= 0) & (b2 >= 0)
+                if not keep.any():
+                    continue
+                b1, b2 = b1[keep], b2[keep]
+                vals = chunk[weight].values[keep].astype(np.float64)
+                mat[b1, b2] = vals
+                mat[b2, b1] = vals
             if join:
-                bdf = mc.bins()
+                bdf = mc.bins()[["chrom", "start", "end"]].iloc[selected_bins]
                 chrom = _decode_chrom(bdf["chrom"]).astype(str).to_numpy()
                 labels = [
                     f"{c}:{s}-{e}"

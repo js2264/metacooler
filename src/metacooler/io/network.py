@@ -8,12 +8,80 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
+
+from metacooler.io._utils import check_output_path, chrom_codes
 
 if TYPE_CHECKING:
     from typing import Literal
 
 logger = logging.getLogger("metacooler")
+
+#: Number of per-chunk groupby frames buffered before they are folded into the
+#: running aggregate.  Keeps peak memory at O(FOLD_EVERY x chunk edges) instead
+#: of growing one frame per chunk for the whole pixel table.
+_FOLD_EVERY = 32
+
+
+def _fold(frames: list[pd.DataFrame], *, sort: bool = False) -> pd.DataFrame:
+    """Concatenate per-chunk edge frames and re-sum duplicated node pairs.
+
+    Args:
+        frames: Non-empty list of frames with ``node1``/``node2``/``value``.
+        sort: Sort the output by node pair (only worth paying once, at the end).
+
+    Returns:
+        One frame with a single row per ``(node1, node2)`` pair.
+    """
+    combined = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    return combined.groupby(["node1", "node2"], sort=sort, as_index=False)[
+        "value"
+    ].sum()
+
+
+def _aggregate_pairs(
+    mc,
+    bin_to_node: np.ndarray,
+    weight: str,
+    n_pix: int,
+    chunksize: int,
+) -> pd.DataFrame | None:
+    """Sum pixel weights per node pair, folding partial results as we go.
+
+    Args:
+        mc: Open :class:`~metacooler.api.MetaCooler`.
+        bin_to_node: Array mapping each bin ID to its node ID (contig or genome).
+        weight: Pixels column used as the edge weight.
+        n_pix: Total number of pixels in the source table.
+        chunksize: Number of pixels read per chunk.
+
+    Returns:
+        A frame with columns ``node1``/``node2``/``value`` sorted by node pair,
+        where ``node1 <= node2``, or ``None`` if the pixel table is empty.
+    """
+    pending: list[pd.DataFrame] = []
+    running: pd.DataFrame | None = None
+
+    for lo in range(0, n_pix, chunksize):
+        chunk = mc._clr.pixels()[lo : lo + chunksize]
+        n1 = bin_to_node[chunk["bin1_id"].values].copy()
+        n2 = bin_to_node[chunk["bin2_id"].values].copy()
+
+        swap = n1 > n2
+        n1[swap], n2[swap] = n2[swap].copy(), n1[swap].copy()
+
+        df = pd.DataFrame({"node1": n1, "node2": n2, "value": chunk[weight].values})
+        pending.append(
+            df.groupby(["node1", "node2"], sort=False, as_index=False)["value"].sum()
+        )
+        if len(pending) >= _FOLD_EVERY:
+            running = _fold(pending if running is None else [running, *pending])
+            pending = []
+
+    if running is None and not pending:
+        return None
+    return _fold(pending if running is None else [running, *pending], sort=True)
 
 
 def network(
@@ -23,6 +91,7 @@ def network(
     out: str | Path | None = None,
     header: bool = False,
     chunksize: int = 1_000_000,
+    force: bool = False,
 ) -> None:
     """Export a network edge list from a metacool file.
 
@@ -33,9 +102,12 @@ def network(
         out: Output file path. If None, writes to stdout.
         header: If ``True``, write a ``node1\\tnode2\\tvalue`` header line.
         chunksize: Number of pixels to process per chunk.
+        force: Overwrite *out* if it already exists.
 
     Raises:
-        ValueError: If *weight* column does not exist in the pixels table.
+        ValueError: If *weight* column does not exist in the pixels table, or
+            if *level* is not one of ``bin``/``contig``/``genome``.
+        FileExistsError: If *out* exists and *force* is False.
     """
     from metacooler.api import MetaCooler
 
@@ -49,6 +121,11 @@ def network(
             f"Weight column {weight!r} not found in pixels table. "
             f"Available columns: {pixel_cols}"
         )
+    if level not in ("bin", "contig", "genome"):
+        raise ValueError(f"level must be 'bin', 'contig', or 'genome', got {level!r}")
+
+    if out is not None:
+        check_output_path(out, force)
 
     n_pix = len(mc._clr.pixels())
 
@@ -72,86 +149,27 @@ def network(
                 fout.write(df.to_csv(sep="\t", index=False, header=False))
         return
 
-    elif level == "contig":
-        bins = mc.bins()
-        bin_to_contig = bins["chrom"].cat.codes.values
-
-        partial_frames: list[pd.DataFrame] = []
-        for lo in range(0, n_pix, chunksize):
-            chunk = mc._clr.pixels()[lo : lo + chunksize]
-            c1 = bin_to_contig[chunk["bin1_id"].values].copy()
-            c2 = bin_to_contig[chunk["bin2_id"].values].copy()
-            vals = chunk[weight].values
-
-            swap = c1 > c2
-            c1[swap], c2[swap] = c2[swap].copy(), c1[swap].copy()
-
-            df = pd.DataFrame({"node1": c1, "node2": c2, "value": vals})
-            partial_frames.append(
-                df.groupby(["node1", "node2"], sort=False, as_index=False)[
-                    "value"
-                ].sum()
-            )
-
-        if partial_frames:
-            combined = pd.concat(partial_frames, ignore_index=True)
-            agg = combined.groupby(["node1", "node2"], sort=True, as_index=False)[
-                "value"
-            ].sum()
-            contigs = mc.contigs
-            contig_names = contigs["name"].values
-            edges = pd.DataFrame(
-                {
-                    "node1": contig_names[agg["node1"].values],
-                    "node2": contig_names[agg["node2"].values],
-                    "value": agg["value"].values,
-                }
-            )
-        else:
-            edges = pd.DataFrame(columns=["node1", "node2", "value"])
-
-    elif level == "genome":
-        bins = mc.bins()
-        contigs = mc.contigs
-        bin_to_contig = bins["chrom"].cat.codes.values
-        contig_to_genome = contigs["genome_id"].values
-
-        partial_frames2: list[pd.DataFrame] = []
-        for lo in range(0, n_pix, chunksize):
-            chunk = mc._clr.pixels()[lo : lo + chunksize]
-            g1 = contig_to_genome[bin_to_contig[chunk["bin1_id"].values]].copy()
-            g2 = contig_to_genome[bin_to_contig[chunk["bin2_id"].values]].copy()
-            vals = chunk[weight].values
-
-            swap = g1 > g2
-            g1[swap], g2[swap] = g2[swap].copy(), g1[swap].copy()
-
-            df = pd.DataFrame({"node1": g1, "node2": g2, "value": vals})
-            partial_frames2.append(
-                df.groupby(["node1", "node2"], sort=False, as_index=False)[
-                    "value"
-                ].sum()
-            )
-
-        if partial_frames2:
-            combined2 = pd.concat(partial_frames2, ignore_index=True)
-            agg2 = combined2.groupby(["node1", "node2"], sort=True, as_index=False)[
-                "value"
-            ].sum()
-            genomes = mc.genomes
-            genome_names = genomes["name"].values
-            edges = pd.DataFrame(
-                {
-                    "node1": genome_names[agg2["node1"].values],
-                    "node2": genome_names[agg2["node2"].values],
-                    "value": agg2["value"].values,
-                }
-            )
-        else:
-            edges = pd.DataFrame(columns=["node1", "node2", "value"])
-
+    # Contig and genome levels: map every bin to its node, then reduce.
+    bin_to_contig = chrom_codes(mc.bins())
+    if level == "contig":
+        bin_to_node = bin_to_contig
+        node_names = mc.contigs["name"].values
     else:
-        raise ValueError(f"level must be 'bin', 'contig', or 'genome', got {level!r}")
+        contig_to_genome = mc.contigs["genome_id"].values
+        bin_to_node = contig_to_genome[bin_to_contig]
+        node_names = mc.genomes["name"].values
+
+    agg = _aggregate_pairs(mc, bin_to_node, weight, n_pix, chunksize)
+    if agg is None:
+        edges = pd.DataFrame(columns=["node1", "node2", "value"])
+    else:
+        edges = pd.DataFrame(
+            {
+                "node1": node_names[agg["node1"].values],
+                "node2": node_names[agg["node2"].values],
+                "value": agg["value"].values,
+            }
+        )
 
     logger.info("Generated %d edges at %s level", len(edges), level)
 
