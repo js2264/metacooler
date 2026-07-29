@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import gzip
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -28,7 +29,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from typing import Literal
 
 
@@ -709,20 +710,36 @@ def _tile_bins(
     Returns:
         DataFrame with columns ``chrom`` (int32 contig ID), ``start``
         (int32, 0-based), and ``end`` (int32, clamped to contig length).
+
+    Raises:
+        ValueError: If *binsize* is not positive, or if a contig is longer than
+            the int32 bin-coordinate storage range.
     """
+    if binsize <= 0:
+        raise ValueError(f"binsize must be a positive integer, got {binsize!r}.")
+    i32_max = int(np.iinfo(np.int32).max)
     parts = []
     for contig in contig_order:
         cid = contig_name_to_id[contig]
-        length = contig_lengths[contig]
-        starts = np.arange(0, length, binsize, dtype=np.int32)
-        ends = np.minimum(starts + binsize, length).astype(np.int32)
+        length = int(contig_lengths[contig])
+        # Build in int64 and range-check *before* narrowing: an int32 ``arange``
+        # silently wraps to negative starts on a contig longer than ~2.1 Gbp,
+        # and schema.validate() does not catch negative bin coordinates.
+        if length > i32_max:
+            raise ValueError(
+                f"Contig {contig!r} is {length} bp, which exceeds the int32 bin "
+                f"coordinate range ({i32_max} bp); contigs larger than ~2.1 Gbp "
+                "are not supported."
+            )
+        starts = np.arange(0, length, binsize, dtype=np.int64)
+        ends = np.minimum(starts + binsize, length)
         parts.append(pd.DataFrame({"chrom": cid, "start": starts, "end": ends}))
     df = pd.concat(parts, ignore_index=True)
     return df.astype({"chrom": np.int32, "start": np.int32, "end": np.int32})
 
 
-def _count_pairs_header(path: Path) -> int:
-    """Count the number of ``#``-prefixed header lines at the top of a pairs file.
+def _scan_pairs_header(path: Path) -> tuple[int, bool]:
+    """Scan the top of a pairs file for its header size and whether data follows.
 
     Reads lines sequentially until the first non-comment line is found.
     Handles plain text, ``.gz``/``.bgz`` (gzip), and ``.bz2`` compressed
@@ -1642,9 +1659,9 @@ def from_pairs(
         pixel_source = raw_pixels
         ordered = False
     pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
-    try:
+    with _staged_output(uri) as staged:
         cooler.create_cooler(
-            str(uri),
+            str(staged),
             bins=bins_df,
             pixels=pixel_source,
             ordered=ordered,
@@ -1657,7 +1674,7 @@ def from_pairs(
         # --- Post-process: add metacooler-specific groups and attrs ---
         logger.info("Post-processing cooler file to add metacool structure")
         _finalize_metacool_file(
-            uri,
+            staged,
             genomes_df,
             contigs_df,
             chrom_offset,
@@ -1668,12 +1685,7 @@ def from_pairs(
 
         # --- Validate ---
         logger.info("Validating created metacool file")
-        validate(uri)
-    except BaseException:
-        # Never leave a half-written file on disk that could be mistaken for a
-        # valid output.
-        Path(uri).unlink(missing_ok=True)
-        raise
+        validate(staged)
     with h5py.File(uri, "r") as f:
         nnz = int(f.attrs.get("nnz"))
         total = int(f.attrs.get("sum", 0))
@@ -1832,9 +1844,9 @@ def from_cool(
         pixel_source: Iterable[pd.DataFrame] = raw_pixels
         ordered = False
     pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
-    try:
+    with _staged_output(output_path) as staged:
         cooler.create_cooler(
-            str(output_path),
+            str(staged),
             bins=bins_remapped,
             pixels=pixel_source,
             dtypes={"count": count_dtype},
@@ -1847,7 +1859,7 @@ def from_cool(
         # --- Add metacooler-specific groups and attributes ---
         logger.info("Post-processing cooler file to add metacool structure")
         _finalize_metacool_file(
-            output_path,
+            staged,
             genomes,
             contigs,
             chrom_offset,
@@ -1858,10 +1870,7 @@ def from_cool(
 
         # --- Validate ---
         logger.info("Validating created metacool file")
-        validate(str(output_path))
-    except BaseException:
-        Path(output_path).unlink(missing_ok=True)
-        raise
+        validate(staged)
     with h5py.File(output_path, "r") as f:
         nnz = int(f.attrs.get("nnz"))
         total = int(f.attrs.get("sum"))
