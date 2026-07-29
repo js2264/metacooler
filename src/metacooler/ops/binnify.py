@@ -9,10 +9,23 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from metacooler.io._utils import (
+    check_output_path,
+    chrom_codes,
+    resolve_count_dtype,
+    to_upper_triangle,
+)
+
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from typing import Literal
 
+    from metacooler.api import MetaCooler
+
 logger = logging.getLogger("metacooler")
+
+# Default on-disk dtype for the aggregated ``pixels/count`` column.
+_DEFAULT_COUNT_DTYPE = np.dtype(np.int64)
 
 
 def binnify(
@@ -20,12 +33,24 @@ def binnify(
     output: str | Path,
     binsize: int,
     level: Literal["contig", "genome"] = "contig",
+    chunksize: int = 1_000_000,
+    force: bool = False,
 ) -> None:
-    """Re-bin a metacool file to a new fixed bin size.
+    """Re-bin a metacool file to a new, coarser fixed bin size.
 
-    Supports both fixed-width and variable-width (custom) source binnings;
-    the new *binsize* is applied uniformly across contigs or genomes
-    regardless of how the source was originally binned.
+    The target *binsize* must be **strictly coarser** than the source binning:
+
+    - for a fixed-bin source, *binsize* must be a strict, **exact multiple** of
+      the source bin size.  A non-multiple target is rejected: the midpoint
+      rule would pack an oscillating number of source bins into each output bin
+      (e.g. 1 kb → 3.5 kb alternates 3 and 4 source bins, a built-in ±14 %
+      checkerboard) while the file would advertise a uniform bin size;
+    - for a variable-bin source (fragment-level files, contig-level files) there
+      is no exact multiple, so the *median* source bin width is used as the
+      effective source resolution and *binsize* must be strictly larger than it.
+      A target that is larger than the median but smaller than the widest source
+      bin is accepted with a warning (those widest bins each collapse into a
+      single output bin, so the local resolution is uneven).
 
     Args:
         uri: Path to the source ``.metacool`` file.
@@ -37,44 +62,41 @@ def binnify(
             length) into one sequence and tiles that uniformly; the output's
             contigs become the ligated genomes (one per genome), so bins may
             span the original contig boundaries.
+        chunksize: Number of source pixels loaded, remapped and aggregated per
+            chunk.  Pixels are never fully materialised in memory.
+        force: Overwrite *output* if it already exists.
 
     Raises:
-        ValueError: If the input has a fixed binsize that is >= *binsize*
-            (new binsize must be *strictly* larger).
+        ValueError: If *binsize* is not strictly coarser than the source
+            resolution, if it is not an exact multiple of a fixed source bin
+            size, or if *level* is unknown.
+        FileExistsError: If *output* exists and *force* is False.
     """
     from metacooler.api import MetaCooler
 
-    mc = MetaCooler(uri)
+    output = Path(output)
+    check_output_path(output, force=force)
 
-    # Validate binsize
-    current_binsize = mc.binsize
-    if current_binsize is not None and binsize <= current_binsize:
-        raise ValueError(
-            f"New binsize ({binsize}) must be strictly larger than current binsize ({current_binsize})."
-        )
+    if binsize <= 0:
+        raise ValueError(f"binsize must be a positive integer, got {binsize}.")
+
+    mc = MetaCooler(uri)
 
     contigs = mc.contigs
     genomes = mc.genomes
     old_bins = mc.bins()
 
+    _check_target_binsize(mc.binsize, old_bins, binsize)
+
     # Get contig codes for each bin
-    bin_chrom_codes = old_bins["chrom"].cat.codes.values
+    bin_chrom_codes = chrom_codes(old_bins)
 
     if level == "contig":
-        # Tile each contig independently.
-        new_bins_rows = []
-        for cid in range(len(contigs)):
-            contig_length = int(contigs.iloc[cid]["length"])
-            for start in range(0, contig_length, binsize):
-                end = min(start + binsize, contig_length)
-                new_bins_rows.append({"chrom": cid, "start": start, "end": end})
-        new_bins = pd.DataFrame(new_bins_rows)
+        # Tile each contig independently. Built vectorised and already in
+        # canonical (contig-id, start) order, so bin rows match /contigs.
+        new_bins = _tile_uniform(contigs["length"].values, binsize)
         if new_bins.empty:
             raise ValueError("No bins generated. Check input data.")
-        # Canonical (contig-id, start) order so bin rows match the /contigs table.
-        new_bins = new_bins.sort_values(["chrom", "start"], kind="stable").reset_index(
-            drop=True
-        )
         old_to_new = _map_old_bins_per_contig(
             old_bins, bin_chrom_codes, len(contigs), new_bins
         )
@@ -94,61 +116,6 @@ def binnify(
     # Filter out unmapped bins
     valid_mask = old_to_new >= 0
 
-    # Remap pixels in chunks and accumulate into a dict to handle the many-to-one
-    # bin mapping: multiple source pixels can land on the same coarser output pair.
-    def _remap_pixel_chunks(
-        chunksize: int = 1_000_000,
-    ):
-        """Remap old bin IDs to new bin IDs and accumulate counts.
-
-        Streams pixels from the source file in chunks, remaps each
-        ``bin1_id`` / ``bin2_id`` via *old_to_new*, enforces the upper
-        triangle, and accumulates pixel counts in a dict.  Yields a
-        single sorted DataFrame at the end.
-
-        Args:
-            chunksize: Number of pixels to load per chunk.
-
-        Yields:
-            One ``pd.DataFrame`` with columns ``bin1_id``, ``bin2_id``,
-            ``count`` containing all remapped pixels.
-        """
-        partial_frames: list[pd.DataFrame] = []
-        n_pix = len(mc._clr.pixels())
-        for lo in range(0, n_pix, chunksize):
-            chunk = mc._clr.pixels()[lo : lo + chunksize]
-            b1 = chunk["bin1_id"].values
-            b2 = chunk["bin2_id"].values
-            # int64 so the per-chunk and cross-chunk count sums cannot overflow int32
-            counts = chunk["count"].values.astype(np.int64)
-
-            pixel_mask = valid_mask[b1] & valid_mask[b2]
-            if not pixel_mask.any():
-                continue
-            new_b1 = old_to_new[b1[pixel_mask]]
-            new_b2 = old_to_new[b2[pixel_mask]]
-            new_counts = counts[pixel_mask]
-
-            # Enforce upper triangle
-            swap = new_b1 > new_b2
-            new_b1[swap], new_b2[swap] = new_b2[swap].copy(), new_b1[swap].copy()
-
-            chunk_df = pd.DataFrame(
-                {"bin1_id": new_b1, "bin2_id": new_b2, "count": new_counts}
-            )
-            partial_frames.append(
-                chunk_df.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)[
-                    "count"
-                ].sum()
-            )
-
-        if partial_frames:
-            combined = pd.concat(partial_frames, ignore_index=True)
-            result = combined.groupby(
-                ["bin1_id", "bin2_id"], sort=True, as_index=False
-            )["count"].sum()
-            yield result
-
     # Build output bins with contig names
     contig_names = contigs["name"].values
     new_bins_out = pd.DataFrame(
@@ -159,14 +126,6 @@ def binnify(
         }
     )
 
-    logger.info(
-        "Re-binned %s → %s: binsize=%d, %d bins",
-        uri,
-        output,
-        binsize,
-        len(new_bins_out),
-    )
-
     # Recompute n_bins per genome from the new bins
     new_bin_genome_ids = contigs["genome_id"].values[
         pd.Categorical(new_bins_out["chrom"], categories=contigs["name"].values).codes
@@ -175,24 +134,207 @@ def binnify(
         new_bin_genome_ids.astype(np.int64), minlength=len(genomes)
     ).astype(np.int64)
     genomes = genomes.copy()
-    if "n_bins" in genomes.columns:
-        genomes["n_bins"] = new_genome_bin_counts
-    else:
-        genomes.insert(3, "n_bins", new_genome_bin_counts)
+    genomes["n_bins"] = new_genome_bin_counts
 
-    # Write as a new metacool file using a temporary pairs approach
-    # We'll write directly using cooler + h5py to preserve metacooler structure
+    # A coarse bin pair sums many source pixels, so integer counts are always
+    # widened to int64; float counts (e.g. balanced values) stay float64.
+    src_count_dtype = resolve_count_dtype(
+        mc._clr.pixels()[:0]["count"].dtype, context="binnify"
+    )
+    count_dtype = (
+        _DEFAULT_COUNT_DTYPE if src_count_dtype.kind == "i" else src_count_dtype
+    )
+
+    # Write as a new metacool file using cooler + h5py so the metacooler
+    # structure is preserved.
     _write_rebinned_metacool(
-        output=Path(output),
+        output=output,
         bins=new_bins_out,
-        pixels=_remap_pixel_chunks(),
+        pixels=_remap_pixel_chunks(
+            mc, old_to_new, valid_mask, chunksize=chunksize, count_dtype=count_dtype
+        ),
         genomes=genomes,
         contigs=contigs,
         binsize=binsize,
+        level=level,
         source_uri=uri,
+        source_metadata=mc.metadata,
+        count_dtype=count_dtype,
         assembly_name=mc.info.get("assembly"),
-        contig_ordering=mc.info.get("ordering", "genome-then-alpha"),
+        # api.info always inserts "ordering" (possibly None), so .get()'s
+        # default never fires; `or` is what actually supplies the fallback.
+        contig_ordering=mc.info.get("ordering") or "genome-then-alpha",
     )
+
+    logger.info(
+        "Re-binned %s → %s: binsize=%d, %d bins",
+        uri,
+        output,
+        binsize,
+        len(new_bins_out),
+    )
+
+
+def _check_target_binsize(
+    source_binsize: int | None, old_bins: pd.DataFrame, binsize: int
+) -> None:
+    """Refuse a target bin size that is not strictly coarser than the source.
+
+    Args:
+        source_binsize: Fixed source bin size, or ``None`` for a variable-bin
+            source.
+        old_bins: Source bins table (used to derive an effective resolution for
+            variable-bin sources).
+        binsize: Requested target bin size in base pairs.
+
+    Raises:
+        ValueError: If *binsize* is finer than (or equal to) the source
+            resolution, or is not an exact multiple of a fixed *source_binsize*.
+    """
+    if source_binsize is not None:
+        if binsize <= source_binsize:
+            raise ValueError(
+                f"New binsize ({binsize}) must be strictly larger than current "
+                f"binsize ({source_binsize})."
+            )
+        remainder = binsize % source_binsize
+        if remainder:
+            lower = (binsize // source_binsize) * source_binsize
+            upper = lower + source_binsize
+            raise ValueError(
+                f"New binsize ({binsize}) must be an exact multiple of the source "
+                f"binsize ({source_binsize}) — {binsize} % {source_binsize} = "
+                f"{remainder}. A non-multiple target puts an oscillating number of "
+                "source bins into each output bin (a systematic checkerboard) while "
+                f"the file would advertise a uniform {binsize} bp bin size. Nearest "
+                f"valid multiples: {lower} and {upper}."
+            )
+        return
+
+    # Variable-bin source: there is no exact multiple to check, so use the
+    # median bin width as the effective source resolution.
+    widths = old_bins["end"].values.astype(np.int64) - old_bins["start"].values.astype(
+        np.int64
+    )
+    if widths.size == 0:
+        raise ValueError("Source file contains no bins.")
+    median_width = float(np.median(widths))
+    max_width = int(widths.max())
+    if binsize <= median_width:
+        raise ValueError(
+            f"New binsize ({binsize}) must be strictly larger than the effective "
+            f"resolution of this variable-bin source (median bin width "
+            f"{median_width:g} bp; widest bin {max_width} bp). Re-binning to a "
+            "finer size would leave most output bins empty."
+        )
+    if binsize < max_width:
+        logger.warning(
+            "Target binsize %d is coarser than the median source bin width (%g bp) "
+            "but finer than the widest source bin (%d bp): those widest bins each "
+            "collapse into a single output bin, so the effective resolution is "
+            "uneven across the file.",
+            binsize,
+            median_width,
+            max_width,
+        )
+
+
+def _tile_uniform(lengths: np.ndarray, binsize: int) -> pd.DataFrame:
+    """Tile each sequence of *lengths* with fixed-width bins, vectorised.
+
+    Args:
+        lengths: Sequence lengths in base pairs (one entry per contig/genome).
+        binsize: Bin width in base pairs.
+
+    Returns:
+        DataFrame with columns ``chrom`` (0-based sequence index), ``start`` and
+        ``end``, already in canonical ``(chrom, start)`` order with a
+        ``RangeIndex`` giving the bin id.  The last bin of each sequence is
+        truncated to its length.
+    """
+    lengths = np.asarray(lengths).astype(np.int64)
+    counts = -(-lengths // binsize)  # ceil division, 0 for zero-length entries
+    total = int(counts.sum())
+    if total == 0:
+        return pd.DataFrame(
+            {
+                "chrom": np.array([], dtype=np.int64),
+                "start": np.array([], dtype=np.int64),
+                "end": np.array([], dtype=np.int64),
+            }
+        )
+    chrom = np.repeat(np.arange(len(lengths), dtype=np.int64), counts)
+    first_bin = np.cumsum(counts) - counts
+    within = np.arange(total, dtype=np.int64) - np.repeat(first_bin, counts)
+    start = within * binsize
+    end = np.minimum(start + binsize, np.repeat(lengths, counts))
+    return pd.DataFrame({"chrom": chrom, "start": start, "end": end})
+
+
+def _remap_pixel_chunks(
+    mc: MetaCooler,
+    old_to_new: np.ndarray,
+    valid_mask: np.ndarray,
+    chunksize: int = 1_000_000,
+    count_dtype: np.dtype = _DEFAULT_COUNT_DTYPE,
+) -> Generator[pd.DataFrame, None, None]:
+    """Stream source pixels, remap their bin ids and aggregate per chunk.
+
+    Each chunk is remapped through *old_to_new*, folded into the upper triangle
+    and aggregated on ``(bin1_id, bin2_id)`` before being yielded, so no more
+    than one chunk of pixels is ever resident.  Cross-chunk duplicates are
+    resolved by ``cooler.create_cooler(..., ordered=False)``, whose merge pass
+    (``cooler._reduce.CoolerMerger``) sums duplicate bin pairs.
+
+    Args:
+        mc: Open source MetaCooler.
+        old_to_new: Map from source bin id to output bin id (``-1`` = drop).
+        valid_mask: Boolean mask of source bins that map to an output bin.
+        chunksize: Number of source pixels loaded per chunk.
+        count_dtype: dtype for the accumulated ``count`` column.
+
+    Yields:
+        One ``pd.DataFrame`` per chunk with columns ``bin1_id``, ``bin2_id``,
+        ``count``, sorted by ``(bin1_id, bin2_id)`` and free of duplicate pairs.
+    """
+    n_pix = len(mc._clr.pixels())
+    emitted = False
+    for lo in range(0, n_pix, chunksize):
+        chunk = mc._clr.pixels()[lo : lo + chunksize]
+        b1 = chunk["bin1_id"].values
+        b2 = chunk["bin2_id"].values
+        # Widened up front so the per-chunk and cross-chunk sums cannot overflow
+        # the source's (typically int32) count dtype.
+        counts = chunk["count"].values.astype(count_dtype)
+
+        pixel_mask = valid_mask[b1] & valid_mask[b2]
+        if not pixel_mask.any():
+            continue
+        new_b1 = old_to_new[b1[pixel_mask]]
+        new_b2 = old_to_new[b2[pixel_mask]]
+        new_counts = counts[pixel_mask]
+
+        # Enforce upper triangle
+        new_b1, new_b2 = to_upper_triangle(new_b1, new_b2)
+
+        chunk_df = pd.DataFrame(
+            {"bin1_id": new_b1, "bin2_id": new_b2, "count": new_counts}
+        )
+        # sort=True: cooler requires each chunk sorted and duplicate-free.
+        emitted = True
+        yield chunk_df.groupby(["bin1_id", "bin2_id"], sort=True, as_index=False)[
+            "count"
+        ].sum()
+
+    if not emitted:
+        # cooler's unordered path needs at least one chunk to merge.
+        yield pd.DataFrame(
+            {
+                "bin1_id": np.array([], dtype=np.int64),
+                "bin2_id": np.array([], dtype=np.int64),
+                "count": np.array([], dtype=count_dtype),
+            }
+        )
 
 
 def _map_old_bins_per_contig(
@@ -201,7 +343,12 @@ def _map_old_bins_per_contig(
     n_contigs: int,
     new_bins: pd.DataFrame,
 ) -> np.ndarray:
-    """Map each old bin to a new bin within the SAME contig (midpoint rule)."""
+    """Map each old bin to a new bin within the SAME contig (midpoint rule).
+
+    The target bin size is guaranteed (by :func:`_check_target_binsize`) to be
+    an exact multiple of a fixed source bin size, so every output bin receives
+    the same number of source bins.
+    """
     old_midpoints = (old_bins["start"].values + old_bins["end"].values) / 2
     new_bin_lookup: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     for cid, grp in new_bins.groupby("chrom", sort=False):
@@ -221,11 +368,45 @@ def _map_old_bins_per_contig(
         if len(new_starts) == 0:
             continue
         mids = old_midpoints[old_mask]
+        # searchsorted is bounded by the contig's own new bins, so a midpoint
+        # past a stale /contigs/length still lands on that contig's last bin.
         idx = np.searchsorted(new_starts, mids, side="right") - 1
         valid = idx >= 0
         positions = np.where(old_mask)[0]
         old_to_new[positions[valid]] = new_indices[idx[valid]]
     return old_to_new
+
+
+def _ligated_contig_offsets(
+    contig_len: np.ndarray, contig_gid: np.ndarray, n_genomes: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Lay out each genome's contigs end-to-end, longest first.
+
+    Args:
+        contig_len: Contig lengths.
+        contig_gid: Genome id of each contig.
+        n_genomes: Total number of genomes.
+
+    Returns:
+        ``(contig_offset, genome_length)``: the start position of each contig
+        inside its ligated genome, and the total ligated length per genome.
+    """
+    genome_length = np.bincount(
+        contig_gid, weights=contig_len, minlength=n_genomes
+    ).astype(np.int64)
+    # Sort by (genome, decreasing length, contig id) — deterministic ties.
+    order = np.lexsort(
+        (np.arange(len(contig_len), dtype=np.int64), -contig_len, contig_gid)
+    )
+    sorted_len = contig_len[order]
+    sorted_gid = contig_gid[order]
+    # Exclusive cumulative sum, made genome-local by subtracting the cumulative
+    # length of all preceding genomes (the sort keeps each genome contiguous).
+    genome_start = np.concatenate([[0], np.cumsum(genome_length)])
+    within = (np.cumsum(sorted_len) - sorted_len) - genome_start[sorted_gid]
+    contig_offset = np.empty(len(contig_len), dtype=np.int64)
+    contig_offset[order] = within
+    return contig_offset, genome_length
 
 
 def _tile_per_genome_ligated(
@@ -237,41 +418,49 @@ def _tile_per_genome_ligated(
 ) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, pd.DataFrame]:
     """Ligate contigs per genome (decreasing length) and tile at genome level.
 
+    Genomes with no contigs are dropped (a zero-length contig is rejected by
+    :func:`metacooler.schema.validate`) and the remaining genome ids are
+    renumbered.  Extra ``/genomes`` columns are carried onto the output contigs,
+    which are the ligated genomes themselves.
+
     Returns ``(new_bins, old_to_new, out_contigs, out_genomes)`` where the
     output contigs are the ligated genomes (one per genome, named after the
     genome) so that a re-binned bin can span the original contig boundaries.
     """
+    from metacooler.schema import CONTIGS_DTYPE, GENOMES_DTYPE
+
     n_genomes = len(genomes)
     contig_len = contigs["length"].values.astype(np.int64)
     contig_gid = contigs["genome_id"].values.astype(np.int64)
 
-    # Ligated offset of each original contig within its genome. Contigs are
-    # laid out by DECREASING length (ties broken by contig id for determinism).
-    contig_offset = np.zeros(len(contigs), dtype=np.int64)
-    genome_length = np.zeros(n_genomes, dtype=np.int64)
-    for gid in range(n_genomes):
-        cids = np.where(contig_gid == gid)[0]
-        order = sorted(cids.tolist(), key=lambda c: (-int(contig_len[c]), int(c)))
-        off = 0
-        for c in order:
-            contig_offset[c] = off
-            off += int(contig_len[c])
-        genome_length[gid] = off
+    contig_offset, genome_length = _ligated_contig_offsets(
+        contig_len, contig_gid, n_genomes
+    )
+
+    # Drop genomes with no contigs: they would become a zero-length contig,
+    # which schema.validate rejects ("contig lengths must be positive").
+    keep = np.flatnonzero(genome_length > 0)
+    if len(keep) < n_genomes:
+        dropped = genomes["name"].values[
+            np.setdiff1d(np.arange(n_genomes, dtype=np.int64), keep)
+        ]
+        logger.warning(
+            "Dropping %d genome(s) with no contigs at --level genome: %s",
+            n_genomes - len(keep),
+            ", ".join(str(name) for name in dropped),
+        )
+    new_gid = np.full(n_genomes, -1, dtype=np.int64)
+    new_gid[keep] = np.arange(len(keep), dtype=np.int64)
+    kept_length = genome_length[keep]
 
     # Uniform tiling of each ligated genome (already in (gid, start) order).
-    rows = []
-    genome_bin_start = np.zeros(n_genomes + 1, dtype=np.int64)
-    for gid in range(n_genomes):
-        glen = int(genome_length[gid])
-        n_new = 0
-        for start in range(0, glen, binsize):
-            end = min(start + binsize, glen)
-            rows.append({"chrom": gid, "start": start, "end": end})
-            n_new += 1
-        genome_bin_start[gid + 1] = genome_bin_start[gid] + n_new
-    new_bins = pd.DataFrame(rows)
+    new_bins = _tile_uniform(kept_length, binsize)
     if new_bins.empty:
         return new_bins, np.array([], dtype=np.int64), contigs, genomes
+    n_new_per_genome = -(-kept_length // binsize)
+    genome_bin_start = np.concatenate([[0], np.cumsum(n_new_per_genome)]).astype(
+        np.int64
+    )
 
     # Map each old bin to the ligated-genome bin containing its midpoint.
     old_chrom = bin_chrom_codes.astype(np.int64)
@@ -280,21 +469,60 @@ def _tile_per_genome_ligated(
         + old_bins["end"].values.astype(np.int64)
     ) // 2
     ligated_pos = contig_offset[old_chrom] + old_mid
-    gid_of_old = contig_gid[old_chrom]
-    old_to_new = genome_bin_start[gid_of_old] + (ligated_pos // binsize)
+    gid_of_old = new_gid[contig_gid[old_chrom]]
+    raw = genome_bin_start[gid_of_old] + (ligated_pos // binsize)
+    # Clamp inside the genome's own bin range: a stale /contigs/length (never
+    # checked by validate) would otherwise attribute pixels to the NEXT
+    # genome's first bin.
+    upper = genome_bin_start[gid_of_old + 1] - 1
+    old_to_new = np.clip(raw, genome_bin_start[gid_of_old], upper)
+    n_clamped = int((raw > upper).sum())
+    if n_clamped:
+        logger.warning(
+            "%d source bin(s) fell past the end of their genome (stale contig "
+            "lengths?); clamped to the genome's last bin.",
+            n_clamped,
+        )
 
     # Output "contigs" are the ligated genomes (one contig per genome).
+    reserved = {"name", "length", "n_contigs", "n_bins"}
     out_contigs = pd.DataFrame(
         {
-            "name": genomes["name"].values,
-            "length": genome_length,
-            "genome_id": np.arange(n_genomes, dtype=np.int32),
+            "name": genomes["name"].values[keep],
+            "length": _to_contig_length(kept_length),
+            "genome_id": np.arange(len(keep), dtype=CONTIGS_DTYPE["genome_id"]),
         }
     )
-    out_genomes = genomes.copy()
-    out_genomes["length"] = genome_length
-    out_genomes["n_contigs"] = 1
+    # Extra /genomes columns describe the ligated sequences too; keep them so
+    # this branch does not silently drop columns the contig branch preserves.
+    for col in genomes.columns:
+        if col not in reserved:
+            out_contigs[col] = genomes[col].values[keep]
+
+    out_genomes = genomes.iloc[keep].copy().reset_index(drop=True)
+    out_genomes["length"] = kept_length.astype(GENOMES_DTYPE["length"])
+    out_genomes["n_contigs"] = np.ones(len(keep), dtype=GENOMES_DTYPE["n_contigs"])
     return new_bins, old_to_new, out_contigs, out_genomes
+
+
+def _to_contig_length(lengths: np.ndarray) -> np.ndarray:
+    """Cast ligated genome lengths to the ``/contigs/length`` dtype.
+
+    Raises:
+        ValueError: If a ligated length overflows the declared dtype (casting
+            silently would write a negative contig length).
+    """
+    from metacooler.schema import CONTIGS_DTYPE
+
+    dtype = np.dtype(CONTIGS_DTYPE["length"])
+    limit = int(np.iinfo(str(CONTIGS_DTYPE["length"])).max)
+    if lengths.size and int(lengths.max()) > limit:
+        raise ValueError(
+            f"A ligated genome is {int(lengths.max())} bp, which exceeds the "
+            f"maximum contig length representable in the metacooler format "
+            f"({limit} bp). Use --level contig for this file."
+        )
+    return lengths.astype(dtype)
 
 
 def _write_rebinned_metacool(
@@ -304,7 +532,10 @@ def _write_rebinned_metacool(
     genomes: pd.DataFrame,
     contigs: pd.DataFrame,
     binsize: int,
-    source_uri: str | Path,
+    level: str = "contig",
+    source_uri: str | Path = "",
+    source_metadata: dict | None = None,
+    count_dtype: np.dtype = _DEFAULT_COUNT_DTYPE,
     assembly_name: str | None = None,
     contig_ordering: str = "genome-then-alpha",
 ) -> None:
@@ -313,15 +544,23 @@ def _write_rebinned_metacool(
     Args:
         output: Destination path for the output ``.metacool`` file.
         bins: Bins DataFrame with contig names in the ``chrom`` column.
-        pixels: Iterable of pixel DataFrames (streamed; never fully in RAM).
+        pixels: Iterable of pixel DataFrames, consumed one chunk at a time.
         genomes: Genomes DataFrame.
         contigs: Contigs DataFrame.
-        binsize: New bin size in base pairs.
-        source_uri: Source file URI (used for logging only).
+        binsize: New bin size in base pairs.  Written explicitly to the output's
+            ``bin-size``/``bin-type`` attributes: cooler infers ``None`` (hence
+            ``bin-type="variable"``) as soon as every contig collapses to a
+            single bin, which would then let a later ``binnify`` to a *finer*
+            size slip past the resolution guard.
+        level: Tiling level used, recorded in the provenance metadata.
+        source_uri: Source file URI, recorded in the provenance metadata.
+        source_metadata: Metadata of the source file, propagated to the output.
+        count_dtype: On-disk dtype of the ``pixels/count`` column.
         assembly_name: Optional assembly name to propagate from source file.
         contig_ordering: Contig ordering string to propagate from source file.
     """
     import cooler
+    import h5py
 
     from metacooler.io._utils import _finalize_metacool_file
     from metacooler.schema import validate
@@ -343,16 +582,24 @@ def _write_rebinned_metacool(
     )
     genome_offset = np.concatenate([[0], np.cumsum(genome_counts)]).astype(np.int64)
 
-    # Create the cooler first; the generator yields one pre-sorted, aggregated DataFrame.
-    # int64 count so a coarse bin-pair summing >2**31 source contacts is not
-    # saturated by cooler's default int32.
+    # Provenance: keep the source file's metadata and append this re-binning.
+    metadata = dict(source_metadata or {})
+    history = list(metadata.get("binnify", []))
+    history.append({"source": str(source_uri), "binsize": int(binsize), "level": level})
+    metadata["binnify"] = history
+
+    # Pixel chunks arrive sorted and de-duplicated but the chunk sequence is not
+    # globally ordered, so ordered=False (cooler's merge pass sums duplicate bin
+    # pairs across chunks). int64/float64 counts so a coarse bin pair summing
+    # >2**31 source contacts is not saturated by cooler's default int32.
     cooler.create_cooler(
         str(output),
         bins=bins,
         pixels=pixels,
-        dtypes={"count": np.int64},
-        ordered=True,
+        dtypes={"count": count_dtype},
+        ordered=False,
         symmetric_upper=True,
+        metadata=metadata,
     )
 
     _finalize_metacool_file(
@@ -364,6 +611,12 @@ def _write_rebinned_metacool(
         contig_ordering=contig_ordering,
         assembly_name=assembly_name,
     )
+
+    # Record the REQUESTED resolution: cooler's get_binsize() returns None when
+    # a contig holds a single (truncated) bin, which would write bin-size=null.
+    with h5py.File(output, "r+") as f:
+        f.attrs["bin-type"] = "fixed"
+        f.attrs["bin-size"] = int(binsize)
 
     validate(output)
     logger.info("Written rebinned metacool to %s", output)
