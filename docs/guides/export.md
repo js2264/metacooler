@@ -23,9 +23,23 @@ metacooler dump sample.metacool -t pixels -o pixels.tsv
 # Pixel table in wide (matrix) format — use with caution on large files
 metacooler dump sample.metacool -t pixels --pixels-format wide -o matrix.tsv
 
-# All tables at once (writes sample.{genomes,contigs,bins,pixels}.tsv)
+# All tables at once (writes sample.{genomes,contigs,bins,pixels,indexes}.tsv)
 metacooler dump sample.metacool -t all --prefix sample
+
+# Re-run over an existing file: dump refuses to clobber -o without --force
+metacooler dump sample.metacool -t pixels -o pixels.tsv --force
+
+# Quiet mode: drop the INFO log lines, keep warnings and errors
+metacooler dump sample.metacool -t genomes -H -q
 ```
+
+!!! note "Options that do not apply to the chosen table are now errors"
+    `--weight`/`--join` with a non-pixels table, `--genomes`/`--contigs` with
+    `-t indexes`, `-o` with `-t all`, and `--prefix` with any other table all
+    used to be accepted and silently ignored. They now fail with a usage error.
+    An explicitly empty filter (`--genomes ''`) is rejected too, instead of
+    quietly dumping everything. See the
+    [`dump` reference](../cli.md#dump).
 
 ### Range queries on pixels
 
@@ -91,7 +105,14 @@ metacooler network sample.metacool --level contig -o contig_network.tsv
 
 # Raw bin-level network
 metacooler network sample.metacool --level bin -o bin_network.tsv
+
+# Overwrite an existing edge list (network no longer clobbers silently)
+metacooler network sample.metacool --level genome -o genome_network.tsv --force
 ```
+
+The `--level` values are singular: `bin`, `contig`, `genome`. `--chunksize`
+(default `1000000`) controls how many pixels are folded into the running
+aggregate at a time.
 
 ## Flattening to a standard cool file (`flatten`)
 
@@ -109,35 +130,56 @@ cooler but where genome-level information is not needed.
 
 Render a PNG heatmap directly from the command line:
 
-`show` reads its input from `-f/--file` and writes to `-o/--output`; both are
-required (see the [`show` reference](../cli.md#show)).
+`show` takes its input as a **positional** path (like every other command) and
+writes to the required `-o/--output`. `-f` is `--force`, not `--file`: pre-0.2
+invocations of the form `metacooler show -f sample.metacool …` are no longer
+valid (see the [`show` reference](../cli.md#show)).
 
 ```bash
 # Genome-level (default)
-metacooler show -f sample.metacool --level genome -o genome_heatmap.png
+metacooler show sample.metacool --level genome -o genome_heatmap.png
 
 # Contig-level
-metacooler show -f sample.metacool --level contig -o contig_heatmap.png
+metacooler show sample.metacool --level contig -o contig_heatmap.png
+
+# Contig-level, restricted to one MAG (--genome is honoured at every level)
+metacooler show sample.metacool --level contig --genome MAG_01 -o MAG_01_contigs.png
 
 # Bin-level: intra-genome view
-metacooler show -f sample.metacool --level bin --genome MAG_01 -o MAG_01.png
+metacooler show sample.metacool --level bin --genome MAG_01 -o MAG_01.png
 
 # Bin-level: inter-genome view
-metacooler show -f sample.metacool --level bin --genomes MAG_01 MAG_02 -o inter.png
+metacooler show sample.metacool --level bin --genomes MAG_01 MAG_02 -o inter.png
 
 # Bin-level: genomic range
-metacooler show -f sample.metacool -r contig_0_0:0-100000 -o range.png
+metacooler show sample.metacool -r contig_0_0:0-100000 -o range.png
 
-# Custom colormap and transform
-metacooler show -f sample.metacool --cmap Reds --transform none -o raw.png
+# Custom colormap and transform, overwriting an existing image
+metacooler show sample.metacool --cmap Reds --transform none -f -o raw.png
 ```
 
+A dense-matrix size guard applies at every level, including `--level bin` and
+range queries: a selection too large to materialise is refused with an error
+instead of attempting the allocation.
+
 ## Python API for export
+
+Every export operation is also a top-level function — `metacooler.extract`,
+`.flatten`, `.merge`, `.binnify`, `.zoomify`, `.aggregate`, `.network`,
+`.dump_table`, `.validate`, and `.validate_mmetacooler` are all exported from
+the package root (previously only the creation and collection helpers were).
 
 ```python
 import metacooler
 
 mc = metacooler.MetaCooler("sample.metacool")
+
+# Same operations as the CLI, straight from Python
+metacooler.extract("sample.metacool", output="MAG_01.cool", genomes=["MAG_01"])
+metacooler.flatten("sample.metacool", output="flat.cool")
+metacooler.aggregate("sample.metacool", output="genome_level.cool", level="genome")
+metacooler.network("sample.metacool", out="genome_network.tsv", level="genome")
+metacooler.dump_table("sample.metacool", table="genomes", out="genomes.tsv")
 
 # Dump tables as DataFrames
 print(mc.genomes)

@@ -42,9 +42,13 @@ metacooler create pairs \
 
 metacooler info output.metacool
 metacooler dump -t genomes output.metacool
-metacooler aggregate --level genome output.metacool genome.cool
-metacooler show output.metacool --level genome --out heatmap.png
+metacooler aggregate --level genome output.metacool -o genome.cool
+metacooler show output.metacool --level genome -o heatmap.png
 ```
+
+Every command takes its input as a positional path (or an
+`file.mmetacool::entries/<name>` URI), and shares `-o/--output`, `-f/--force`,
+`-v/--verbose`, and `-q/--quiet`.
 
 ```{python}
 #| echo: false
@@ -77,7 +81,7 @@ display(Markdown(f"```txt\n{content}\n```"))
 **Contig-genome map**: TSV file mapping contigs to genomes (MAGs). This is used to populate the `contigs` table and map contigs to genomes. Must be either:
 
   - A two-column file with NO HEADER: first column is treated as contig name, second column as genome/MAG name.
-  - A TSV file with header, with at least `contig_name` and `genome_id` columns. Additional metadata columns will be stored in the `contigs/` table.
+  - A TSV file with header, whose first column is `contig_name` and second column `genome_name`. Additional metadata columns will be stored in the `contigs/` table.
 
 ```{python}
 #| echo: false
@@ -143,9 +147,10 @@ display(Markdown(f"```yaml\n{content}\n```"))
 
 ## Design
 
-- **Metacool identity**: `metacool-format="MetaCool::1.0"` attribute + `genomes/` group
-- **Implement genomes table**: `genome_id`, `genome_name`, optional metadata columns
-- **Support multi-contigs and multi-genomes visualization**: `show` command at `--level contig/genome`
+- **Metacool identity**: `metacooler-format="HDF5::MetaCooler"` attribute + `genomes/` group
+- **Implement genomes table**: `name`, `length`, `n_contigs`, `n_bins`, plus optional metadata columns
+- **Support multi-contigs and multi-genomes visualization**: `show` command at `--level bin/contig/genome`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
-- **Canonical contig ordering**: configurable (`genome-then-length`, `fasta`, `alpha`)
+- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
 - **Unassigned contigs**: default to `__unbinned__` genome
+- **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection

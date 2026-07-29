@@ -55,6 +55,11 @@ One row per genome / MAG.
 | `n_bins` | `int64` | Number of bins across all contigs of this genome. |
 | *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`). Stored as fixed-length bytes or numeric arrays. |
 
+The row *set* is derived from the contig-to-genome assignments: one row per
+distinct genome name in `/contigs`. A `--genomes` metadata table only supplies
+the extra columns, left-joined on `name`; it cannot add a genome that owns no
+contig, nor suppress one that does.
+
 Row order: `__unbinned__` first (index 0), then remaining genomes sorted
 alphabetically by name. This order defines the `genome_id` integers used in
 `/contigs`. For genome-grouped orderings (`genome-then-length`,
@@ -97,7 +102,7 @@ One row per non-zero contact, stored in upper-triangular form
 |---------|-------|-------------|
 | `bin1_id` | `int64` | Row bin index (upper-triangular: always ≤ `bin2_id`). |
 | `bin2_id` | `int64` | Column bin index. |
-| `count` | `int32` | Number of contacts. |
+| `count` | `int32` or `int64` | Number of contacts. `int32` at base resolution; `int64` wherever counts are summed (`binnify`, `merge`), since aggregation readily exceeds the `int32` range. Readers must not assume `int32`. |
 
 Pixels are sorted by `(bin1_id, bin2_id)` to allow the `bin1_offset` index to
 work correctly.
@@ -109,6 +114,12 @@ work correctly.
 | `chrom_offset` | `int64` | `n_contigs + 1` | `chrom_offset[i]` is the index of the first bin belonging to contig `i`. |
 | `bin1_offset` | `int64` | `n_bins + 1` | `bin1_offset[i]` is the index of the first pixel with `bin1_id == i`. Written by cooler. |
 | `genome_offset` | `int64` | `n_genomes + 1` | `genome_offset[i]` is the index of the first contig belonging to genome `i`. metacooler-specific. |
+
+`genome_offset` is written for every file, but it only *delimits* contiguous
+per-genome blocks under a genome-grouped `contig-ordering` (`genome-then-length`,
+`genome-then-alpha`, `genomeid-then-alpha`). Under `fasta`, `alpha` or `cool`
+ordering a genome's contigs may be scattered, so readers must fall back to
+filtering `/contigs/genome_id` rather than slicing with `genome_offset`.
 
 ### Identity check
 

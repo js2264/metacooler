@@ -55,7 +55,7 @@ metacooler info gut_T0.metacool
   "format-url": "https://github.com/js2264/metacooler",
   "format-version": 1,
   "generated-by": "metacooler-0.1.0",
-  "assembly": null,
+  "assembly": "unknown",
   "nbins": 48291,
   "ncontigs": 1203,
   "ngenomes": 47,
@@ -65,6 +65,9 @@ metacooler info gut_T0.metacool
   "ordering": "genome-then-length"
 }
 ```
+
+The `assembly` field is the standard cooler `genome-assembly` attribute; it
+reads `"unknown"` unless you passed `--assembly-name` at creation time.
 
 ```bash
 # Rich table format
@@ -87,14 +90,18 @@ metacooler dump gut_T0.metacool -t contigs --genomes MAG_01 -H
 ## Step 4 — Visualise the contact map
 
 ```bash
-# Genome-level heatmap (default level). Note: -f for input, -o for output.
-metacooler show -f gut_T0.metacool --level genome -o genome_heatmap.png
+# Genome-level heatmap (default level). The input path is positional, like
+# every other command; -o is the output image.
+metacooler show gut_T0.metacool --level genome -o genome_heatmap.png
 
 # Intra-genome heatmap at bin resolution
-metacooler show -f gut_T0.metacool --level bin --genome MAG_01 -o MAG_01_heatmap.png
+metacooler show gut_T0.metacool --level bin --genome MAG_01 -o MAG_01_heatmap.png
 
 # A specific genomic range (implies --level bin)
-metacooler show -f gut_T0.metacool -r contig_0_0:0-50000 -o range.png
+metacooler show gut_T0.metacool -r contig_0_0:0-50000 -o range.png
+
+# Re-render over an existing image: -f is --force (it used to mean --file)
+metacooler show gut_T0.metacool --level genome -f -o genome_heatmap.png
 ```
 
 ## Step 5 — Export for downstream tools
@@ -139,4 +146,17 @@ mc.to_cooler("genome_level.cool", level="genome")
 
 # Bins for a specific MAG
 bins = mc.bins_for_genome("MAG_01")
+
+# Every operation is also a top-level function
+metacooler.extract("gut_T0.metacool", output="MAG_01.cool", genomes=["MAG_01"])
+metacooler.network("gut_T0.metacool", out="genome_network.tsv", level="genome")
 ```
+
+!!! tip "Skipping validation on very large files"
+    `MetaCooler()` validates the file structure on every construction. On a
+    file with hundreds of millions of bins that rescan is noticeable, so there
+    is a fast path — use it only on a file you know to be well-formed:
+
+    ```python
+    mc = metacooler.MetaCooler("huge.metacool", validate=False)
+    ```

@@ -66,7 +66,7 @@ metacooler create pairs \
 metacooler info gut_T0.metacool
 
 # Genome-level heatmap
-metacooler show -f gut_T0.metacool --level genome -o heatmap.png
+metacooler show gut_T0.metacool --level genome -o heatmap.png
 
 # Export one MAG as a standard cool file
 metacooler extract gut_T0.metacool --genomes MAG_01 -o MAG_01.cool

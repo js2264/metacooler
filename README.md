@@ -35,9 +35,11 @@ metacooler create pairs \
 
 metacooler info output.metacool
 metacooler dump -t genomes output.metacool
-metacooler aggregate --level genome output.metacool genome.cool
-metacooler show output.metacool --level genome --out heatmap.png
+metacooler aggregate --level genome output.metacool -o genome.cool
+metacooler show output.metacool --level genome -o heatmap.png
 ```
+
+Every command takes its input as a positional path (or an `file.mmetacool::entries/<name>` URI), and shares `-o/--output`, `-f/--force`, `-v/--verbose`, and `-q/--quiet`.
 
                                                                                     
      Usage: metacooler create pairs [OPTIONS]                                       
@@ -76,6 +78,8 @@ metacooler show output.metacool --level genome --out heatmap.png
     │                           ingest into the file.                              │
     │    --force            -f  Overwrite output file if it already exists.        │
     │    --verbose          -v  Increase verbosity (debug logging).                │
+    │    --quiet            -q  Suppress informational logging (warnings and       │
+    │                           errors still shown).                               │
     │    --contig-order         Strategy for ordering contigs in the output        │
     │                           metacool file.                                     │
     │                           - genome-then-length: group by genome,             │
@@ -91,13 +95,15 @@ metacooler show output.metacool --level genome --out heatmap.png
     │                           absent from the pairs header.                      │
     │    --assembly-name        Name for this assembly / metagenome.               │
     │    --drop-unassigned      Drop contigs not assigned to any genome.           │
-    │    --chunksize            Number of pairs to process per chunk. [default:    │
-    │                           1000000]                                           │
-    │    --sort-strategy        Pixel sorting strategy. 'auto': detect based on    │
-    │                           pairs file size (threshold: 2 GiB). 'memory':      │
-    │                           collect all pixels in RAM and sort before writing  │
-    │                           (fast for small files). 'external': stream         │
-    │                           unsorted pixels to cooler's external sort          │
+    │    --chunksize            Number of pairs to process per chunk. Under        │
+    │                           'external' sorting each chunk is written as a      │
+    │                           temporary cooler, so smaller chunks cost more.     │
+    │                           [default: 15000000]                                │
+    │    --sort-strategy        Pixel sorting strategy. 'auto': use 'memory'       │
+    │                           unless the binned pixels exceed 100 M rows.        │
+    │                           'memory': collect all pixels in RAM and sort       │
+    │                           before writing (fast for small files). 'external': │
+    │                           stream unsorted pixels to cooler's external sort   │
     │                           (scalable for large files). [default: auto]        │
     │    --help             -h  Show this message and exit.                        │
     ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -124,7 +130,7 @@ contig_1_043    8959    9000
 **Contig-genome map**: TSV file mapping contigs to genomes (MAGs). This is used to populate the `contigs` table and map contigs to genomes. Must be either:
 
 - A two-column file with NO HEADER: first column is treated as contig name, second column as genome/MAG name.
-- A TSV file with header, with at least `contig_name` and `genome_id` columns. Additional metadata columns will be stored in the `contigs/` table.
+- A TSV file with header, whose first column is `contig_name` and second column `genome_name`. Additional metadata columns will be stored in the `contigs/` table.
 
 ``` txt
 contig_name genome_name gc_content  coverage
@@ -198,9 +204,10 @@ assembly:
 
 ## Design
 
-- **Metacool identity**: `metacool-format="MetaCool::1.0"` attribute + `genomes/` group
-- **Implement genomes table**: `genome_id`, `genome_name`, optional metadata columns
-- **Support multi-contigs and multi-genomes visualization**: `show` command at `--level contig/genome`
+- **Metacool identity**: `metacooler-format="HDF5::MetaCooler"` attribute + `genomes/` group
+- **Implement genomes table**: `name`, `length`, `n_contigs`, `n_bins`, plus optional metadata columns
+- **Support multi-contigs and multi-genomes visualization**: `show` command at `--level bin/contig/genome`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
-- **Canonical contig ordering**: configurable (`genome-then-length`, `fasta`, `alpha`)
+- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
 - **Unassigned contigs**: default to `__unbinned__` genome
+- **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection

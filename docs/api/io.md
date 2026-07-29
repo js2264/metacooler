@@ -1,10 +1,26 @@
 # I/O functions
 
-Functions that read and write metacooler files. The creation entry points
-`from_pairs` and `from_cool`, and the collection helpers (`create_mmetacool`,
-`add_entry`, `remove_entry`, `copy_entry`, `move_entry`, `list_entries`), are
-re-exported at the top level — so `metacooler.from_pairs(...)` and
-`metacooler.io.create.from_pairs(...)` are equivalent.
+Functions that read and write metacooler files. All of the entry points below
+are re-exported at the top level, so `metacooler.from_pairs(...)` and
+`metacooler.io.create.from_pairs(...)` are equivalent:
+
+| Top-level name | Defined in |
+|----------------|------------|
+| `from_pairs`, `from_cool` | `metacooler.io.create` |
+| `extract` | `metacooler.io.extract` |
+| `flatten` | `metacooler.io.flatten` |
+| `merge` | `metacooler.io.merge` |
+| `network` | `metacooler.io.network` |
+| `dump_table` | `metacooler.io.dump` |
+| `create_mmetacool`, `add_entry`, `remove_entry`, `copy_entry`, `copy_entry_cross_file`, `move_entry`, `list_entries` | `metacooler.io.mmetacool` |
+| `is_metacooler`, `is_mmetacooler`, `validate`, `validate_mmetacooler` | `metacooler.schema` |
+| `parse_uri` | `metacooler.uri` |
+
+`extract`, `flatten`, `merge`, `network`, `dump_table`, `validate`, and
+`validate_mmetacooler` were previously reachable only through their submodules.
+
+Note that `network` and `dump_table` name their output parameter `out`, not
+`output`.
 
 ::: metacooler.io.create
     options:

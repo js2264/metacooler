@@ -36,6 +36,14 @@ original contig order from the cool file:
 --contig-order cool
 ```
 
+`cool` is the only ordering under which a `cool → metacool → cool` round trip
+preserves row order exactly; every other ordering regroups contigs by genome.
+Note there is no `fasta` ordering here (and no `--fasta` option): contig lengths
+and order come from the input cool file's own bins table.
+
+A `--metadata` file may not contain a `commands` key — it is reserved for
+metacooler's provenance record.
+
 !!! note "Pixel remapping"
     When the output contig order differs from the input cooler's, metacooler
     remaps every bin ID in the pixel table. This is streamed in chunks with an

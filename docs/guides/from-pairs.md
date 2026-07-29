@@ -135,6 +135,31 @@ MAG_02       Bacteroidetes  0.74          0.011          medium
 --genomes mag_quality.tsv
 ```
 
+!!! important "The contigs table decides which genomes exist"
+
+    `/genomes` has one row per distinct genome name in the **contigs** table.
+    `--genomes` only *decorates* those rows with extra columns, left-joined on
+    the genome name — it neither adds nor removes genomes. So:
+
+    - A genome named in the contigs table but missing from `--genomes` still
+      gets a row, with `length`/`n_contigs`/`n_bins` computed from its contigs
+      and empty metadata columns. This is common with MetaTOR output, where
+      `Final_bin` also holds `MetaTOR_MGE_*` bins that a MAG-only genome table
+      does not list.
+    - A genome listed in `--genomes` with no contigs assigned to it has nothing
+      to derive a row from, and is absent from the output.
+
+    Both cases are reported as warnings naming the genomes involved, so a
+    `/genomes` table larger or smaller than the input can be accounted for.
+
+Both this table and the contigs table must have exactly as many fields on every
+data row as their header has names. A header that declares more columns than
+the rows carry is **rejected**: pandas would pad the trailing columns and store
+every value under the name of a column to its left (turning, say, a genome's GC
+content into its `Size`), and there is no way to tell from the file whether the
+absent fields belong at the start or the end of each row. A trailing tab on the
+header line is tolerated and ignored.
+
 ### File-level metadata (optional)
 
 A JSON or YAML file with arbitrary metadata stored in the file's `metadata`
@@ -154,6 +179,12 @@ sequencing:
 --metadata sample_meta.yaml
 ```
 
+!!! warning "`commands` is reserved"
+    A `--metadata` file may **not** contain a top-level `commands` key — that
+    name holds metacooler's own provenance record (the exact command line used
+    to produce each file). Supplying it is an error; the file used to overwrite
+    the provenance silently.
+
 ## Contig ordering
 
 Control how contigs are ordered in the output with `--contig-order`:
@@ -162,12 +193,27 @@ Control how contigs are ordered in the output with `--contig-order`:
 # Default: longest contig first within each genome (good for visual clarity)
 --contig-order genome-then-length
 
+# Group by genome, alphabetical within each genome
+--contig-order genome-then-alpha
+
 # Preserve order from FASTA / pairs header
 --contig-order fasta
 
 # Pure alphabetical
 --contig-order alpha
 ```
+
+!!! warning "`fasta` requires a FASTA or a `#chromsize:` pairs header"
+    `--contig-order fasta` means "preserve the order of the input assembly", so
+    there has to be one: pass `--fasta assembly.fa`, or use a pairs file whose
+    header carries `#chromsize:` lines. Without either, the command now fails
+    instead of quietly falling back to alphabetical order while still recording
+    `contig-ordering="fasta"` in the file — a mismatch that made two files with
+    different layouts claim the same ordering, which `merge` would then
+    scramble.
+
+Only `--contig-order cool` (available in [`create cool`](from-cool.md)) round-trips
+the input row order exactly; the default regroups contigs by genome.
 
 ## Handling unassigned contigs
 
@@ -183,15 +229,32 @@ metacooler create pairs ... --drop-unassigned
 Creation streams the pairs file in chunks, so memory stays bounded regardless of
 file size. Two options tune this:
 
-- `--chunksize` (default `15000000`) — pairs processed per chunk. Under
+- `--chunksize` (default `50000000`) — pairs processed per chunk. Under
   `external` sorting each chunk is written as a temporary cooler, and that write
   carries a fixed cost proportional to the contig count, so small chunks are
   expensive on metagenomic assemblies.
 - `--sort-strategy` (default `auto`) — how pixels are sorted before writing.
   `auto` buffers the binned pixels and picks `memory` (sort in RAM, fastest —
-  the cooler is written in a single pass) unless they exceed 100 M rows, at
-  which point it falls back to `external` (cooler's on-disk sort). Force either
-  explicitly if you know your machine's limits.
+  the cooler is written in a single pass) unless the **deduplicated** pixel
+  count exceeds 100 M, at which point it falls back to `external` (cooler's
+  on-disk sort). Force either explicitly if you know your machine's limits.
+
+!!! note "Why deduplicated, and why it matters at depth"
+
+    The buffer is periodically re-aggregated as it fills, so the threshold is
+    compared against the pixel table actually being built rather than the sum of
+    per-chunk row counts. The two diverge sharply on deep libraries: Hi-C pixel
+    counts *saturate* on a fixed bin grid, so sequencing 20x deeper yields well
+    under 2x more distinct pixels. A 1 B-pair library on a typical metagenomic
+    grid can stream a few hundred million raw rows that collapse to under 10 M
+    pixels — roughly 250 MB, and easily sorted in RAM. Counting raw rows would
+    have spilled that to the external sort and paid one `cooler.create` call per
+    chunk for nothing.
+
+    Peak memory for the in-memory path is roughly `3 x nnz x 24` bytes, so ~7 GB
+    at the 100 M-pixel limit. To estimate `nnz` for your own data before
+    committing, create from a ~5% subsample and read off the reported pixel
+    count — saturation means the full run will not be far above it.
 
 ```bash
 metacooler create pairs ... --sort-strategy external --chunksize 5000000
@@ -213,7 +276,7 @@ metacooler.from_pairs(
     contig_ordering="genome-then-length",
     drop_unassigned=False,
     metadata={"sample": "gut_T0"},  # optional
-    chunksize=15_000_000,           # default; lower it to cap peak memory
+    chunksize=50_000_000,           # default; lower it to cap peak memory
 )
 ```
 

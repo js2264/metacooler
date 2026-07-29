@@ -2,7 +2,91 @@
 
 ## Unreleased
 
+### Breaking
+
+- **`show` takes a positional input path.** The required `-f/--file` option is
+  gone; `metacooler show FILE.metacool -o out.png` replaces
+  `metacooler show -f FILE.metacool -o out.png`. `-f` now means `--force`, as in
+  every other command.
+- **`binnify` rejects a target bin size that is not an exact multiple of the
+  source bin size.** A non-multiple target produced a systematic ±14 %
+  checkerboard while advertising a uniform bin size. For variable-bin sources
+  the median source bin width is used as the effective resolution and a target
+  at or below it is refused.
+- **`zoomify` rejects a resolution ladder that is not divisible by the base bin
+  size**, and stops early instead of emitting duplicate levels.
+- **`dump` errors instead of silently ignoring incompatible combinations**:
+  `--weight`/`--join` with a non-pixels table, `--genomes`/`--contigs` with
+  `-t indexes`, `-o` with `-t all`, `--prefix` with a non-`all` table.
+- **An explicitly empty `--genomes ''` / `--contigs ''` is rejected** rather
+  than silently disabling the filter.
+- **A bare `.mmetacool` path is rejected** by every command that needs a single
+  map, with a message listing the entry URIs. `ls`, `tree`, and `attrs` still
+  accept a collection.
+- **`metadata add/get/remove/load` on a collection root is rejected**; they used
+  to write to the root, invisibly from every entry.
+- **`create pairs --contig-order fasta` requires a FASTA or a `#chromsize:`
+  pairs header.** It used to fall back to alphabetical order while still
+  recording `contig-ordering="fasta"`.
+- **`--metadata` files may not contain a `commands` key** (reserved for the
+  provenance record).
+- **The assembly name is stored in the standard `genome-assembly` HDF5
+  attribute**, not `assembly-name`. `info` now reports it, so `assembly` reads
+  `"unknown"` where it previously read `null`.
+- **Declining a `cp`/`mv`/`rm` confirmation prompt exits non-zero** (it used to
+  exit 0).
+- **`attrs` rejects a group given twice** (URI group *and* `GROUP_PATH`); the
+  URI group used to be silently discarded.
+- **A `--contigs` or `--genomes` table whose header and data rows disagree on
+  the number of fields is rejected.** `pandas.read_csv` used to resolve the
+  mismatch silently, and in opposite directions depending on which side was
+  wider — a wider header pads the trailing columns, wider rows absorb the
+  surplus leading fields into the row index — so in both cases every value was
+  stored under the name of a neighbouring column. A trailing tab on the header
+  line is still accepted, and no longer becomes an empty `Unnamed: N` column in
+  `/genomes` or `/contigs`.
+
+### Added
+
+- `-q/--quiet` on every command: suppresses INFO logging, keeps warnings and
+  errors.
+- `-f/--force` on `dump`, `network`, and `show`, which previously clobbered
+  their output silently.
+- `binnify --chunksize` to bound peak memory during pixel remapping.
+- `zoomify --temp-dir` for the intermediate per-level files; peak scratch use is
+  now one level rather than a second copy of the pyramid.
+- `MetaCooler(..., validate=False)` fast path for very large, known-good files.
+- Top-level exports: `metacooler.extract`, `.flatten`, `.merge`, `.binnify`,
+  `.zoomify`, `.aggregate`, `.network`, `.dump_table`, `.validate`, and
+  `.validate_mmetacooler`.
+- `stack` accepts entry URIs and rejects duplicate `--names`.
+
 ### Fixed
+
+- Answering `y` to a `cp`/`mv` overwrite prompt now actually overwrites; `-f`
+  used to be the only way through.
+- `show --genome`/`--genomes` are honoured at every `--level`, and the
+  dense-matrix size guard applies at `--level bin` too.
+- Counts are preserved as `int64` through `extract`, `flatten`, and `merge`, so
+  re-binned sources no longer truncate.
+- `.bgz` pairs files are decompressed correctly instead of being parsed as raw
+  binary into an empty file; pairs dropped for an unknown contig or a missing
+  position are now counted and reported.
+- `mv` renames the HDF5 link in place instead of copying and deleting.
+- A `--bins` BED with more than three columns (BED4/BED6) is read correctly
+  instead of shifting `chrom`/`start`/`end` one column to the left. Because
+  contig lengths are derived from the bins frame itself, the shifted table was
+  self-consistent and creation went ahead with contigs named after coordinates.
+- `create` reports when the `--contigs` and `--genomes` tables cover different
+  sets of genomes: names assigned contigs but absent from the genomes table
+  (kept, with derived `length`/`n_contigs`/`n_bins` and empty metadata) and
+  names listed in the genomes table with no contigs (absent from `/genomes`).
+  Both used to be silent, which made a `/genomes` table larger than the input
+  look as though genomes had been invented.
+
+### Documentation
+
+- `COMMANDS.md` removed; [`docs/cli.md`](cli.md) is the single CLI reference.
 - `_write_rebinned_metacool`: wrong `chrom_offset` caused by calling
   `np.searchsorted` on an unsorted `contig_names` array. Replaced with an
   explicit contig-name → index mapping.
