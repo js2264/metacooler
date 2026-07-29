@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import gzip
 import logging
 import shutil
@@ -560,7 +561,11 @@ def _count_pairs_header(path: Path) -> int:
         path: Path to the pairs file.
 
     Returns:
-        Integer count of consecutive header lines starting with ``#``.
+        ``(n_header, has_data_rows)`` — the count of consecutive leading ``#``
+        lines, and whether at least one non-empty data row follows them.  The
+        second element lets the caller recognise a header-only file *before*
+        handing the stream to pyarrow, instead of pattern-matching pyarrow's
+        error message (which would also swallow genuine parse failures).
     """
     import bz2 as _bz2
     import gzip as _gzip
@@ -572,13 +577,18 @@ def _count_pairs_header(path: Path) -> int:
     else:
         open_fn = open
     n = 0
+    has_data = False
     with open_fn(str(path), "rt") as fh:
         for line in fh:
             if line.startswith("#"):
                 n += 1
-            else:
-                break
-    return n
+                continue
+            if not line.strip():
+                # Tolerate stray blank lines between the header and the body.
+                continue
+            has_data = True
+            break
+    return n, has_data
 
 
 def _stream_pairs(
@@ -601,8 +611,16 @@ def _stream_pairs(
 
     path = Path(pairs_path)
 
-    # Count header comment lines; pyarrow has no native comment-skip support
-    n_header = _count_pairs_header(path)
+    # Count header comment lines; pyarrow has no native comment-skip support.
+    # The same scan tells us whether any data row follows at all.
+    n_header, has_data = _scan_pairs_header(path)
+    if not has_data:
+        # A header-only pairs file (no data rows) is a legitimate input — a
+        # sample with no surviving contacts. Detect it structurally here rather
+        # than by pattern-matching pyarrow's error message, which would also
+        # swallow a genuine parse failure and write a silently empty map.
+        logger.warning("Pairs file %s has no data rows; writing empty map.", path)
+        return
 
     # Column indices are 1-based; convert to 0-based.
     # pyarrow auto-generates column names "f0", "f1", ... when
@@ -629,27 +647,116 @@ def _stream_pairs(
         },
     )
 
-    # pa.input_stream auto-decompresses .gz/.bgz via native C++ gzip
-    src = pa.input_stream(str(path))
-    try:
+    # pa.input_stream auto-detects a codec from the file extension, but its codec
+    # table has no ``.bgz`` entry: a bgzipped file would be handed to the CSV
+    # parser as raw binary, yielding zero recognisable contigs and a structurally
+    # valid but empty map. bgzf is gzip-compatible, so name the codec explicitly.
+    if path.suffix == ".bgz":
+        logger.info("Reading %s as gzip (bgzf is gzip-compatible).", path)
+        src = pa.input_stream(str(path), compression="gzip")
+    else:
+        src = pa.input_stream(str(path))
+    with contextlib.closing(src):
         reader = pa_csv.open_csv(
             src,
             read_options=read_opts,
             parse_options=parse_opts,
             convert_options=convert_opts,
         )
-    except pa.lib.ArrowInvalid as exc:
-        # A header-only pairs file (no data rows) is a legitimate input — a
-        # sample with no surviving contacts. pyarrow cannot infer a schema from
-        # an empty body; treat it as zero pixels rather than crashing.
-        if "empty" in str(exc).lower():
-            logger.warning("Pairs file %s has no data rows; writing empty map.", path)
+        for batch in reader:
+            df = batch.to_pandas()
+            df.columns = final_col_names
+            yield df
+
+
+@dataclasses.dataclass
+class _PairsDropStats:
+    """Running tally of pairs discarded while binning, for an end-of-run report.
+
+    Silently dropping pairs is the failure mode that hurts most in practice: a
+    contig-name-format mismatch between the pairs file and the contig table
+    discards 100 % of contacts, and without this tally the run still reports
+    ``NNZ=0`` as if nothing were wrong.
+    """
+
+    total: int = 0
+    unknown_contig: int = 0
+    null_position: int = 0
+    unknown_names: set[str] = dataclasses.field(default_factory=set)
+
+    def note_unknown_names(self, names: Iterable[str]) -> None:
+        """Remember up to a handful of example unrecognised contig names."""
+        for name in names:
+            if len(self.unknown_names) >= _MAX_REPORTED_UNKNOWN_CONTIGS:
+                return
+            self.unknown_names.add(str(name))
+
+    def report(self) -> None:
+        """Log a WARNING summary of everything that was dropped (if anything)."""
+        dropped = self.unknown_contig + self.null_position
+        if dropped == 0:
             return
-        raise
-    for batch in reader:
-        df = batch.to_pandas()
-        df.columns = final_col_names
-        yield df
+        examples = sorted(self.unknown_names)
+        if dropped == self.total:
+            logger.warning(
+                "ALL %d pair(s) were discarded (%d on unrecognised contigs, %d with "
+                "a missing position) — the resulting map is empty. Do the contig "
+                "names in the pairs file match the FASTA / contig table? "
+                "Unrecognised names seen: %s",
+                self.total,
+                self.unknown_contig,
+                self.null_position,
+                examples,
+            )
+            return
+        logger.warning(
+            "Discarded %d of %d pair(s) (%.2f%%): %d on unrecognised contigs "
+            "(e.g. %s), %d with a missing position.",
+            dropped,
+            self.total,
+            100.0 * dropped / max(self.total, 1),
+            self.unknown_contig,
+            examples,
+            self.null_position,
+        )
+
+
+def _positions_to_int64(values: np.ndarray, column: str) -> np.ndarray:
+    """Return *values* as int64, refusing silently-lossy inputs.
+
+    An empty ``pos`` field makes pyarrow produce a null, which pandas surfaces as
+    a float64 ``NaN``; casting that straight to int64 yields ``INT64_MIN`` and a
+    wildly out-of-range bin id.  Null rows are filtered out before this call, so
+    anything non-integral reaching it is a genuinely malformed file.
+
+    Args:
+        values: Position array taken from the pairs chunk.
+        column: Column name, used in the error message.
+
+    Returns:
+        int64 view/copy of *values*.
+
+    Raises:
+        ValueError: If *values* is neither integer nor an exactly-integral float.
+    """
+    if values.dtype.kind in ("i", "u"):
+        return values.astype(np.int64, copy=False)
+    if values.dtype.kind == "f":
+        if values.size and not np.all(np.isfinite(values) & (np.mod(values, 1) == 0)):
+            raise ValueError(f"Pairs column {column!r} contains non-integer positions.")
+        return values.astype(np.int64)
+    raise ValueError(
+        f"Pairs column {column!r} has non-numeric dtype {values.dtype}; "
+        "check the --pairs column indices."
+    )
+
+
+def _finite_position_mask(col: pd.Series) -> np.ndarray:
+    """Boolean mask of rows whose position value is present (not null/NaN)."""
+    arr = col.to_numpy()
+    if arr.dtype.kind in ("i", "u"):
+        return np.ones(len(arr), dtype=bool)
+    return col.notna().to_numpy()
 
 
 def _bin_pairs_chunk(
@@ -658,6 +765,7 @@ def _bin_pairs_chunk(
     chrom_offset: np.ndarray,
     binsize: int | None,
     bin_starts: np.ndarray | None,
+    stats: _PairsDropStats | None = None,
 ) -> pd.DataFrame | None:
     """Bin a single pairs chunk into aggregated ``(bin1_id, bin2_id, count)`` pixels.
 
@@ -673,6 +781,8 @@ def _bin_pairs_chunk(
         binsize: Fixed bin size, or ``None`` for fragment-level bins.
         bin_starts: Flattened array of bin start positions; required when
             ``binsize`` is ``None``.
+        stats: Optional accumulator updated with the number of pairs seen and
+            dropped, so the caller can report them once at end of stream.
 
     Returns:
         Aggregated pixel DataFrame or ``None`` if the chunk is empty after
@@ -683,16 +793,36 @@ def _bin_pairs_chunk(
     c1_codes = chunk["chrom1"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
     c2_codes = chunk["chrom2"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
 
-    # Drop pairs referencing unknown contigs in one boolean mask
-    valid = (c1_codes >= 0) & (c2_codes >= 0)
+    # Drop pairs referencing unknown contigs, and pairs whose position field was
+    # empty (pyarrow null → float NaN → INT64_MIN bin id if left alone).
+    contig_ok = (c1_codes >= 0) & (c2_codes >= 0)
+    pos_ok = _finite_position_mask(chunk["pos1"]) & _finite_position_mask(chunk["pos2"])
+    valid = contig_ok & pos_ok
+    if stats is not None:
+        stats.total += len(chunk)
+        n_unknown = int((~contig_ok).sum())
+        stats.unknown_contig += n_unknown
+        stats.null_position += int((contig_ok & ~pos_ok).sum())
+        if n_unknown and len(stats.unknown_names) < _MAX_REPORTED_UNKNOWN_CONTIGS:
+            bad = ~contig_ok
+            stats.note_unknown_names(
+                pd.unique(
+                    pd.concat(
+                        [
+                            chunk["chrom1"][bad & (c1_codes < 0)],
+                            chunk["chrom2"][bad & (c2_codes < 0)],
+                        ]
+                    )
+                )
+            )
     if not valid.any():
         return None
 
     c1 = c1_codes[valid].astype(np.int32)
     c2 = c2_codes[valid].astype(np.int32)
     # Convert 1-based pairs positions to 0-based, clamp at 0
-    raw_p1 = chunk["pos1"].values[valid] - 1
-    raw_p2 = chunk["pos2"].values[valid] - 1
+    raw_p1 = _positions_to_int64(chunk["pos1"].to_numpy()[valid], "pos1") - 1
+    raw_p2 = _positions_to_int64(chunk["pos2"].to_numpy()[valid], "pos2") - 1
     neg_mask = (raw_p1 < 0) | (raw_p2 < 0)
     if neg_mask.any():
         logger.warning(
