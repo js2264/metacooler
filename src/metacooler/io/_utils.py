@@ -376,6 +376,7 @@ def _finalize_metacool_file(
     *,
     contig_ordering: str = "genome-then-alpha",
     assembly_name: str | None = None,
+    binsize: int | None = None,
 ) -> None:
     """Add metacooler-specific groups and attributes to a cooler file.
 
@@ -406,8 +407,18 @@ def _finalize_metacool_file(
         contig_ordering: Value written to the ``contig-ordering`` HDF5
             attribute.  Typically ``"genome-then-alpha"``,
             ``"pairs-header"``, or ``"genomeid-then-alpha"``.
-        assembly_name: Optional assembly name written to the
-            ``assembly-name`` attribute.  Omitted if ``None``.
+        assembly_name: Optional assembly name.  Written to cooler's
+            standard ``genome-assembly`` attribute (the only attribute
+            metacooler uses for this), and only when ``cooler.create``
+            has not already stored a real value there.  Ignored if
+            ``None``.
+        binsize: The bin size that was *requested*, when the file was tiled at
+            a fixed resolution.  Written explicitly because cooler infers
+            ``bin-size`` from the bin table and returns ``None`` whenever every
+            contig holds a single bin — which would leave a genuinely
+            fixed-resolution file recorded as ``bin-type="variable"``,
+            ``bin-size=null``, and let a later ``binnify`` to a *finer* size
+            slip past the "target must be coarser" guard.  Ignored if ``None``.
     """
     with h5py.File(path, "a") as f:
         # Recreate chroms as a soft link to contigs (cooler compat)
@@ -462,8 +473,22 @@ def _finalize_metacool_file(
         f.attrs["generated-by"] = f"metacooler-{__version__}"
         f.attrs["ngenomes"] = len(genomes)
         f.attrs["contig-ordering"] = contig_ordering
+        if binsize is not None:
+            # Assert the requested resolution rather than trusting cooler's
+            # inference; see the *binsize* docstring entry.
+            f.attrs["bin-size"] = int(binsize)
+            f.attrs["bin-type"] = "fixed"
+        # One attribute for the assembly name, and it is cooler's:
+        # "genome-assembly".  cooler.create already writes it (defaulting to
+        # "unknown"), so only fill it in when it carries no real value —
+        # writing a second "assembly-name" attribute here is what made
+        # `metacooler info` disagree with `cooler info` on the same file.
         if assembly_name is not None:
-            f.attrs["assembly-name"] = assembly_name
+            existing = f.attrs.get("genome-assembly")
+            if isinstance(existing, bytes):
+                existing = existing.decode("utf-8")
+            if existing in (None, "", "unknown"):
+                f.attrs["genome-assembly"] = assembly_name
 
 
 def _filter_by_genomes_and_contigs(

@@ -1807,6 +1807,7 @@ def from_pairs(
             genome_offset,
             contig_ordering=contig_ordering,
             assembly_name=assembly_name,
+            binsize=binsize,
         )
 
         # --- Validate ---
