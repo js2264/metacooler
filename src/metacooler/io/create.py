@@ -112,6 +112,62 @@ def _read_contig_lengths(
     )
 
 
+def _apply_reference_order(
+    contig_lengths: dict[str, int],
+    fasta: str | Path | None = None,
+    pairs: str | Path | None = None,
+) -> dict[str, int]:
+    """Reorder *contig_lengths* to follow the FASTA / pairs-header contig order.
+
+    ``contig_ordering="fasta"`` simply preserves the insertion order of
+    *contig_lengths*.  When those lengths were derived from a bins table, that
+    order is whatever ``groupby("chrom")`` produced — i.e. alphabetical — yet the
+    file would still record ``contig-ordering="fasta"``.  Two files could then
+    advertise the same ordering with different physical layouts, which
+    ``merge`` would happily scramble.
+
+    Args:
+        contig_lengths: Mapping of contig name to length, in arbitrary order.
+        fasta: Assembly FASTA whose record order defines the reference order.
+        pairs: Pairs file whose ``#chromsize:`` header defines the reference
+            order when no *fasta* is available.
+
+    Returns:
+        The same mapping, reordered to follow the reference order.  Contigs
+        absent from the reference are appended (with a warning).
+
+    Raises:
+        ValueError: If neither a FASTA nor a pairs header can supply an order.
+    """
+    reference: list[str] | None = None
+    if fasta is not None:
+        reference = list(_read_contig_lengths(fasta=fasta))
+    elif pairs is not None:
+        header = _parse_pairs_header(pairs)
+        if header:
+            reference = list(header)
+    if reference is None:
+        raise ValueError(
+            "contig_ordering='fasta' needs a reference contig order, but no FASTA "
+            "was given and the pairs file has no '#chromsize:' header lines. "
+            "Contig lengths came from the bins table, whose order is alphabetical "
+            "— writing it as 'fasta' would mislabel the file. Provide a FASTA, add "
+            "'#chromsize:' lines to the pairs header, or choose another ordering "
+            "(genome-then-length, genome-then-alpha, alpha)."
+        )
+    ordered = {c: contig_lengths[c] for c in reference if c in contig_lengths}
+    leftover = [c for c in contig_lengths if c not in ordered]
+    if leftover:
+        logger.warning(
+            "%d contig(s) are absent from the reference (FASTA / pairs header) "
+            "order and were appended at the end: %s",
+            len(leftover),
+            leftover[:10],
+        )
+        ordered.update({c: contig_lengths[c] for c in leftover})
+    return ordered
+
+
 def _drop_nonpositive_contigs(
     contig_lengths: dict[str, int],
     bins_df: pd.DataFrame | None = None,
@@ -1451,6 +1507,14 @@ def from_pairs(
         raise ValueError("pairs file path required")
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
+    if bins is not None and binsize is not None:
+        # Passing both silently binned every contact arithmetically against a bin
+        # table that was never tiled at *binsize*, scattering contacts across
+        # unrelated fragments while still passing validate().
+        raise ValueError(
+            "binsize and bins are mutually exclusive: pass binsize to tile "
+            "fixed-size bins, or bins to use a pre-defined bin table."
+        )
     timer = time.perf_counter()
 
     # --- Parse contig map and optional genomes metadata table ---
@@ -1478,6 +1542,14 @@ def from_pairs(
         raise TypeError("bins must be a path, DataFrame, or None")
     contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
     logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
+
+    # --- Resolve the reference ("fasta") contig order, if one is requested ---
+    # When lengths come from a bins table their dict order is whatever
+    # groupby("chrom") produced (alphabetical), not the FASTA order.
+    if contig_ordering == "fasta" and bins_df is not None:
+        contig_lengths = _apply_reference_order(
+            contig_lengths, fasta=fasta, pairs=pairs
+        )
 
     # --- Filter unassigned contigs ---
     if drop_unassigned:
