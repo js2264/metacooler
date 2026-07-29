@@ -13,9 +13,25 @@ class MetaCoolURI(click.ParamType):
     Accepts the ``file.metacool`` or ``file.mmetacool::entries/entry`` URI
     syntax, validates that the file portion exists, and returns the raw
     URI string (so downstream code can call ``parse_uri()`` on it).
+
+    This is the single place where the "what does a bare ``.mmetacool`` path
+    mean?" policy lives.  Commands that operate on one map (most of them) pass
+    ``require_entry=True`` so a bare collection path is rejected up front with
+    the list of available entries, instead of each command hand-rolling its own
+    check — or, worse, silently operating on the collection root.
+
+    Args:
+        require_entry: If True, reject a URI that resolves to the root of an
+            ``.mmetacool`` collection.
+        exists: If False, do not require the file to exist (used for
+            destinations).
     """
 
     name = "METACOOL_URI"
+
+    def __init__(self, require_entry: bool = False, exists: bool = True) -> None:
+        self.require_entry = require_entry
+        self.exists = exists
 
     def convert(self, value: str, param, ctx) -> str:
         """Validate a metacool URI argument and return the string value.
@@ -33,15 +49,18 @@ class MetaCoolURI(click.ParamType):
             The original *value* string unchanged if the file exists.
 
         Raises:
-            click.exceptions.BadParameter: If the file portion of the URI
-                does not exist on disk.
+            click.exceptions.BadParameter: If the file portion of the URI does
+                not exist, the group is absent, or ``require_entry`` is set and
+                the URI addresses a collection root.
         """
 
         from metacooler.uri import parse_uri
 
         file_path, group_path = parse_uri(value)
         if not file_path.exists():
-            self.fail(f"Path '{file_path}' does not exist.", param, ctx)
+            if self.exists:
+                self.fail(f"Path '{file_path}' does not exist.", param, ctx)
+            return str(value)
         if group_path != "/":
             import h5py
 
@@ -55,22 +74,50 @@ class MetaCoolURI(click.ParamType):
                         )
             except OSError as exc:
                 self.fail(f"Cannot open '{file_path}': {exc}", param, ctx)
+        elif self.require_entry:
+            self._fail_on_collection_root(file_path, param, ctx)
         return str(value)
+
+    def _fail_on_collection_root(self, file_path, param, ctx) -> None:
+        """Fail with the available entry URIs if *file_path* is an mmetacool.
+
+        Args:
+            file_path: Path portion of the URI, known to exist.
+            param: The Click ``Parameter`` object.
+            ctx: The Click ``Context`` object.
+        """
+        from metacooler.schema import is_mmetacooler, list_metacoolers
+
+        try:
+            if not is_mmetacooler(file_path):
+                return
+        except OSError:
+            return
+        entries = list_metacoolers(file_path)
+        listing = "\n".join(f"  {file_path}::{e}" for e in entries)
+        self.fail(
+            f"'{file_path}' is an mmetacool collection with {len(entries)} "
+            "entries; this command needs a single map. Specify an entry with "
+            f"URI syntax:\n{listing}",
+            param,
+            ctx,
+        )
 
 
 # Domain exceptions the io/ops layer raises for bad user input. These are turned
 # into clean ``Error: <message>`` output instead of a Python traceback. Anything
-# NOT listed here (e.g. RuntimeError, AttributeError) still surfaces as a
-# traceback, since those indicate bugs rather than user mistakes.
+# NOT listed here (e.g. RuntimeError, AttributeError, TypeError) still surfaces
+# as a traceback, since those indicate bugs rather than user mistakes.
+#
+# ``OSError`` covers the whole filesystem family (FileNotFoundError,
+# FileExistsError, IsADirectoryError, PermissionError) *and* h5py's "not an
+# HDF5 file" error, which previously reached the user as a raw traceback in
+# every command that opens a file without pre-checking it.
 _USER_ERRORS = (
     ValueError,
     KeyError,
-    FileNotFoundError,
-    FileExistsError,
-    IsADirectoryError,
-    PermissionError,
+    OSError,
     NotImplementedError,
-    TypeError,
 )
 
 

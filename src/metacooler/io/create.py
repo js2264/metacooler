@@ -19,7 +19,11 @@ import numpy as np
 import pandas as pd
 from pyfaidx import Fasta
 
-from metacooler.io._utils import _finalize_metacool_file, resolve_count_dtype
+from metacooler.io._utils import (
+    _finalize_metacool_file,
+    check_output_path,
+    resolve_count_dtype,
+)
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
 from metacooler.schema import (

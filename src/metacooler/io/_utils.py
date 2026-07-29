@@ -162,14 +162,14 @@ def read_user_table(
     if not counts:
         raise ValueError(f"{kind} has no non-blank lines: {path}")
 
-    # keep_default_na=False so that a genome or contig literally named "NA",
-    # "nan" or "None" is not turned into a missing value.
-    read_kwargs = {"sep": "\t", "dtype": str, "keep_default_na": False}
-
+    # Every read below passes keep_default_na=False so that a genome or contig
+    # literally named "NA", "nan" or "None" is not turned into a missing value.
     if not header:
         widest = max(counts)
         _warn_ragged_rows(counts, widest, kind, path, first_line=1)
-        return pd.read_csv(path, header=None, **read_kwargs)  # type: ignore[arg-type]
+        return pd.read_csv(
+            path, sep="\t", header=None, dtype=str, keep_default_na=False
+        )
 
     n_header, data_counts = counts[0], counts[1:]
     widest = max(data_counts, default=0)
@@ -184,7 +184,7 @@ def read_user_table(
         )
 
     df = _drop_trailing_unnamed_columns(
-        pd.read_csv(path, header=0, **read_kwargs),  # type: ignore[arg-type]
+        pd.read_csv(path, sep="\t", header=0, dtype=str, keep_default_na=False),
         kind,
     )
     n_named = df.shape[1]
@@ -193,7 +193,7 @@ def read_user_table(
         raise ValueError(
             f"{kind} is misaligned: {path}\n"
             f"  The header names {n_named} column(s), but no data row has more "
-            f"than {widest} field(s), so {unfilled} is/are unfilled on every "
+            f"than {widest} field(s), leaving {unfilled} unfilled on every "
             f"row. metacooler will not guess whether the absent fields belong "
             f"at the start or at the end of each row: assuming the end (what "
             f"pandas does) would store every value under the name of the "
@@ -230,69 +230,6 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
         max_len = max((len(b) for b in encoded), default=1)
         return np.array(encoded, dtype=f"S{max_len}")
     return np.asarray(arr)
-
-
-def check_output_path(path: str | Path, force: bool = False) -> None:
-    """Refuse to overwrite an existing output file unless *force* is set.
-
-    Single home for the "output exists" guard shared by the CLI commands and
-    the ops layer, so every command reports the same message and every command
-    that accepts ``--force`` actually honours it.
-
-    Args:
-        path: Output path about to be written.
-        force: If True, remove an existing file instead of raising.
-
-    Raises:
-        FileExistsError: If *path* exists and *force* is False.
-        IsADirectoryError: If *path* exists and is a directory.
-    """
-    path = Path(path)
-    if not path.exists():
-        return
-    if path.is_dir():
-        raise IsADirectoryError(f"Output path {str(path)!r} is a directory.")
-    if not force:
-        raise FileExistsError(
-            f"Output file {str(path)!r} already exists. Use --force to overwrite."
-        )
-    path.unlink()
-
-
-def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:
-    """Pick a lossless on-disk dtype for a ``pixels/count`` column being copied.
-
-    Blindly casting to ``int32`` silently wraps counts written by
-    :mod:`metacooler.ops.binnify` (which deliberately writes ``int64``) and
-    floors float counts towards zero.  This preserves the source width instead.
-
-    Args:
-        dtype: dtype of the source ``count`` column.
-        context: Short description of the caller, used in the float warning.
-
-    Returns:
-        ``int32`` for narrow integer sources, ``int64`` for wide or unsigned
-        ones, and ``float64`` for float sources (with a warning).
-
-    Raises:
-        ValueError: If *dtype* is neither integer, boolean, nor float.
-    """
-    dtype = np.dtype(dtype)
-    if dtype.kind == "f":
-        logger.warning(
-            "%s: source 'count' column is %s; keeping float64 to avoid "
-            "truncating fractional counts.",
-            context,
-            dtype,
-        )
-        return np.dtype(np.float64)
-    if dtype.kind == "b":
-        return np.dtype(np.int32)
-    if dtype.kind not in ("i", "u"):
-        raise ValueError(f"Unsupported 'count' dtype {dtype!r} in {context}.")
-    if dtype.itemsize >= 8 or (dtype.kind == "u" and dtype.itemsize >= 4):
-        return np.dtype(np.int64)
-    return np.dtype(np.int32)
 
 
 def to_upper_triangle(
@@ -365,6 +302,69 @@ def chrom_codes(bins: pd.DataFrame) -> np.ndarray:
     if isinstance(col.dtype, pd.CategoricalDtype):
         return col.cat.codes.to_numpy(dtype=np.int64)
     return col.to_numpy(dtype=np.int64)
+
+
+def check_output_path(path: str | Path, force: bool = False) -> None:
+    """Refuse to overwrite an existing output file unless *force* is set.
+
+    Single home for the "output exists" guard shared by the CLI commands and
+    the ops layer, so every command reports the same message and every command
+    that accepts ``--force`` actually honours it.
+
+    Args:
+        path: Output path about to be written.
+        force: If True, remove an existing file instead of raising.
+
+    Raises:
+        FileExistsError: If *path* exists and *force* is False.
+        IsADirectoryError: If *path* exists and is a directory.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    if path.is_dir():
+        raise IsADirectoryError(f"Output path {str(path)!r} is a directory.")
+    if not force:
+        raise FileExistsError(
+            f"Output file {str(path)!r} already exists. Use --force to overwrite."
+        )
+    path.unlink()
+
+
+def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:
+    """Pick a lossless on-disk dtype for a ``pixels/count`` column being copied.
+
+    Blindly casting to ``int32`` silently wraps counts written by
+    :mod:`metacooler.ops.binnify` (which deliberately writes ``int64``) and
+    floors float counts towards zero.  This preserves the source width instead.
+
+    Args:
+        dtype: dtype of the source ``count`` column.
+        context: Short description of the caller, used in the float warning.
+
+    Returns:
+        ``int32`` for narrow integer sources, ``int64`` for wide or unsigned
+        ones, and ``float64`` for float sources (with a warning).
+
+    Raises:
+        ValueError: If *dtype* is neither integer, boolean, nor float.
+    """
+    dtype = np.dtype(dtype)
+    if dtype.kind == "f":
+        logger.warning(
+            "%s: source 'count' column is %s; keeping float64 to avoid "
+            "truncating fractional counts.",
+            context,
+            dtype,
+        )
+        return np.dtype(np.float64)
+    if dtype.kind == "b":
+        return np.dtype(np.int32)
+    if dtype.kind not in ("i", "u"):
+        raise ValueError(f"Unsupported 'count' dtype {dtype!r} in {context}.")
+    if dtype.itemsize >= 8 or (dtype.kind == "u" and dtype.itemsize >= 4):
+        return np.dtype(np.int64)
+    return np.dtype(np.int32)
 
 
 def _finalize_metacool_file(
