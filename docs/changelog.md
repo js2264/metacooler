@@ -63,6 +63,13 @@
 
 ### Fixed
 
+- **`dump … | head` no longer reports a failure.** Closing the pipe early is the
+  normal end of a pipeline, but the resulting `BrokenPipeError` is an `OSError`
+  and so was rendered in the same red `Error: [Errno 32] Broken pipe` box as a
+  bad input — *after* the rows had already been printed, which read as though the
+  dump had failed. Every command now exits silently on a closed stdout with
+  status `141` (`128 + SIGPIPE`), the same as `yes | head`, and no longer leaks an
+  `Exception ignored in: …` from the interpreter's final flush.
 - Answering `y` to a `cp`/`mv` overwrite prompt now actually overwrites; `-f`
   used to be the only way through.
 - `show --genome`/`--genomes` are honoured at every `--level`, and the

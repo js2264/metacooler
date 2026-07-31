@@ -27,6 +27,8 @@ from metacooler.schema import METACOOLER_FORMAT, METACOOLER_FORMAT_VERSION
 # Helpers
 # ---------------------------------------------------------------------------
 
+DATA_DIR = Path(__file__).parent / "data"
+
 _runner = CliRunner()
 
 
@@ -621,6 +623,50 @@ class TestDumpCLI:
         r = _run(["dump", "--help"])
         assert r.exit_code == 0
         assert "--table" in r.output
+
+    # --- `dump … | head` is a normal end of pipeline, not a failure ---
+
+    def test_dump_into_a_closed_pipe_reports_nothing(self):
+        """``dump … | head`` used to print ``Error: [Errno 32] Broken pipe``.
+
+        Needs a real pipe (CliRunner writes into a buffer, which never breaks)
+        and an output larger than the ~64 KiB pipe buffer, or the writer
+        finishes before ``head`` closes its end and no EPIPE is ever raised.
+        The shipped fixture dumps ~340 kB of pixels.
+        """
+        import subprocess
+        import sys
+
+        source = DATA_DIR / "assembly_1_1kb.metacool"
+        dump = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from metacooler.cli.main import cli; cli()",
+                "dump",
+                "-t",
+                "pixels",
+                str(source),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert dump.stdout is not None
+        head = subprocess.Popen(
+            ["head", "-n", "5"], stdin=dump.stdout, stdout=subprocess.PIPE
+        )
+        dump.stdout.close()  # only head holds the read end now
+        rows = head.communicate()[0]
+        stderr = dump.stderr.read() if dump.stderr else b""
+        dump.wait()
+
+        assert len(rows.splitlines()) == 5
+        assert b"Broken pipe" not in stderr
+        assert b"Traceback" not in stderr
+        assert b"Exception ignored" not in stderr
+        # 128 + SIGPIPE, i.e. what a C tool in the same position reports; a
+        # bare pipeline still exits on head's status, which is 0.
+        assert dump.returncode == 141
 
     # --- failure: non-existent input ---
 

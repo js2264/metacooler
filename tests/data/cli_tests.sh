@@ -231,6 +231,18 @@ metacooler dump -t bins --genomes '' assembly_1_rep1_1kb_from_cool.metacool || e
 metacooler dump -t genomes assembly_1kb.mmetacool || echo "  (expected: mmetacool collection, specify an entry URI)"
 metacooler info assembly_1kb.mmetacool || echo "  (expected: mmetacool collection, specify an entry URI)"
 
+## Piping into a reader that stops early closes the pipe under dump. That used to
+## print `Error: [Errno 32] Broken pipe` AFTER the rows, reading as a failure; it
+## is now silent, like any other Unix tool. Nothing should appear on stderr here.
+metacooler dump -t pixels assembly_1_rep1_1kb_from_cool.metacool 2> dump_head_stderr | head -n 3
+if [ -s dump_head_stderr ]; then
+    printf '  FAIL  dump | head wrote to stderr:\n'
+    sed 's/^/        /' dump_head_stderr
+    FAILURES=$((FAILURES + 1))
+else
+    printf '  OK    dump | head: no error reported\n'
+fi
+
 cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_1_000:5000-15000 > dump_pixels_range_cool_original
 metacooler dump -t pixels -r contig_1_000:5000-15000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range_metacool
 cooler dump -t pixels assembly_1_rep1_1kb_from_cool_flat.cool -r contig_1_000:5000-15000 > dump_pixels_range_cool_round_trip

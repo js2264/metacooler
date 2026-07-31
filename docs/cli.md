@@ -383,6 +383,16 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
     | `--prefix` with any table other than `all` | Single-table dumps go to `-o/--output`. |
     | `--genomes ''` / `--contigs ''` | An explicitly empty filter is rejected rather than treated as "no filter". |
 
+!!! note "`dump … | head` is not an error"
+    Piping a dump into a program that stops reading early (`head`, `less`, a
+    `grep -m`) closes the pipe under `dump`. That used to surface as a red
+    `Error: [Errno 32] Broken pipe` box after the rows had already been printed,
+    which read as though the dump had failed. It is now silent, as in any other
+    Unix tool: nothing is written to stderr, and the exit status is `141`
+    (`128 + SIGPIPE`) — the same status `yes | head` gives. A plain pipeline
+    still reports the *last* command's status, so `metacooler dump … | head`
+    exits `0`; only `set -o pipefail` surfaces the `141`.
+
 ```bash
 # Genomes table with header
 metacooler dump gut_T0.metacool -t genomes -H

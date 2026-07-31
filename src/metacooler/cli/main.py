@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
+import sys
+from typing import NoReturn
+
 import rich_click as click
 
 from metacooler._version import __version__
+
+# Exit status for "the reader closed the pipe", following the shell convention
+# of 128 + the signal number a C program would have died from. Windows has no
+# SIGPIPE, so its number is spelled out as a fallback.
+_BROKEN_PIPE_EXIT_CODE = 128 + getattr(signal, "SIGPIPE", 13)
 
 
 class MetaCoolURI(click.ParamType):
@@ -121,6 +132,27 @@ _USER_ERRORS = (
 )
 
 
+def _exit_on_broken_pipe() -> NoReturn:
+    """Exit quietly after the reader of our stdout went away.
+
+    ``metacooler dump … | head`` closes the pipe as soon as ``head`` has its
+    lines; that is the normal end of a pipeline, not a failure, but the
+    resulting ``BrokenPipeError`` is an ``OSError`` and so used to be reported
+    in the same red ``Error: [Errno 32] Broken pipe`` box as a genuinely bad
+    input — which reads as "the dump failed".
+
+    Python's interpreter shutdown would flush ``sys.stdout`` one more time and
+    raise again, printing an unsuppressable ``Exception ignored in: …``, so
+    stdout is pointed at the null device before exiting.  The status follows the
+    shell convention for a SIGPIPE death, which is what a C tool in the same
+    position would report.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    raise SystemExit(_BROKEN_PIPE_EXIT_CODE)
+
+
 class MetaCoolerGroup(click.RichGroup):
     """Root group that reports expected domain errors as clean CLI messages.
 
@@ -131,7 +163,16 @@ class MetaCoolerGroup(click.RichGroup):
 
     def invoke(self, ctx):
         try:
-            return super().invoke(ctx)
+            result = super().invoke(ctx)
+            # Flush inside the ``try`` so a pipe that closed while the last
+            # buffered block was still pending is diagnosed here rather than
+            # during interpreter shutdown, where it cannot be handled.
+            sys.stdout.flush()
+            return result
+        except BrokenPipeError:
+            # Must precede the _USER_ERRORS clause: BrokenPipeError is an
+            # OSError, and this is not a user mistake to report.
+            _exit_on_broken_pipe()
         except (click.ClickException, click.Abort):
             raise  # already a clean CLI error / user abort
         except _USER_ERRORS as exc:
