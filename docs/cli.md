@@ -481,17 +481,53 @@ metacooler show METACOOL_PATH -o heatmap.png [OPTIONS]
 |--------|---------|-------------|
 | `-o, --output` | *required* | Output image path (`.png`, `.pdf`, `.svg`). |
 | `--level` | `genome` | `bin` (finest), `contig`, or `genome` (coarsest). |
-| `--genome` | — | Restrict to one genome (intra-genome view). Honoured at every level. |
-| `--genomes` | — | A pair of genomes (inter-genome view). Takes exactly **two space-separated** names (`--genomes MAG_01 MAG_02`) — not the comma list used elsewhere. Honoured at every level. |
+| `--genomes` | — | Genome names, **comma-separated or repeated** (`--genomes MAG_01,MAG_02`). Every name goes on **both** axes — see below. Honoured at every level. |
+| `--contigs` | — | Contig names, same syntax and same rule. Bare names only; for coordinates use `-r`. Upgrades `--level genome` to `contig`. |
 | `--transform` | `log1p` | Value transform: `log1p`, `log10`, or `none`. |
 | `--cmap` | `afmhot_r` | Matplotlib colormap name. |
-| `--vmax` | — | Upper colormap bound (default: 99th percentile of non-zero values). |
+| `--vmax` | — | Upper colormap bound (default: 99th percentile of the non-zero values). |
 | `--separators / --no-separators` | on | Draw lines at genome/contig boundaries. |
 | `--dpi` | `500` | Output image resolution. |
 | `-r, --range` | — | Row range (implies `--level bin`): genome, contig, or `contig:start-end`. |
 | `-r2, --range2` | — | Column range; defaults to `--range`. |
 | `-f, --force` | off | Overwrite the output image if it already exists (`show` used to clobber it silently). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+#### Two ways to choose the axes
+
+There are exactly two, and they cannot be combined:
+
+| Selector | Shape | Meaning |
+|----------|-------|---------|
+| `--genomes` / `--contigs` | **symmetric** | Every name goes on **both** axes, so the figure holds all the intra- *and* inter-block contacts between them. Uniform in the number of names: one name is that genome against itself, N names are all N against all N. Blocks appear in the order the names were given — you control the layout — with a heavier boundary line between them. |
+| `-r/--range` + `-r2/--range2` | **asymmetric** | A different region per axis, at bin level. This is the only way to get a rectangular image. |
+
+`--genomes` and `--contigs` are mutually exclusive: both put their names on
+*both* axes, so combining them would have no single meaning. `--contigs` takes
+bare names — a coordinate range is `-r`'s job.
+
+!!! note "There is no `--genome` (singular)"
+    It was removed: `--genomes MAG_01` with one name is exactly the same thing,
+    and the near-identical pair of flags meant `--genome MAG_01,MAG_02` looked
+    for a genome literally named `MAG_01,MAG_02`. `show` was also the only
+    command in the CLI with a singular form.
+
+#### Titles and axes
+
+Every figure is titled with what it shows and at which resolution —
+`MAG_01 — contig level`, `contig_0_0:0-100000 — bin level`, `All genomes — genome
+level`. A multi-name selection lists the names, truncating past four:
+`5 genomes: MAG_01, MAG_02, MAG_03, MAG_04 (+1 more) — contig level`.
+
+Axis labels name the selection and its size (`MAG_01 (12 contigs)`,
+`5 genomes (19 contigs)`), and at `--level bin` the ticks are **base-pair
+coordinates**, not bin indices:
+
+- a selection inside one contig is ticked in bp at its true position, so
+  `-r contig_0_0:20000-50000` reads `20 kb … 50 kb` rather than starting at 0;
+- a selection spanning several contigs has no single coordinate system, so the
+  ticks name the contigs instead, one at the first bin of each (lined up with
+  the separators) — or the selected genomes, when there are several.
 
 A dense-matrix size guard applies at **every** level, including `--level bin`
 and range queries: a selection too large to materialise is refused with an error
@@ -502,7 +538,22 @@ rather than attempting a multi-hundred-gigabyte allocation.
 metacooler show gut_T0.metacool --level genome -o genome_heatmap.png
 
 # Intra-genome view at bin resolution
-metacooler show gut_T0.metacool --level bin --genome MAG_01 -o MAG_01.png
+metacooler show gut_T0.metacool --level bin --genomes MAG_01 -o MAG_01.png
+
+# Two genomes: both on both axes, so the image holds both intra blocks and the
+# inter block between them
+metacooler show gut_T0.metacool --level contig --genomes MAG_01,MAG_02 -o pair.png
+
+# Four genomes, all against all, blocked in this order (repeats accumulate)
+metacooler show gut_T0.metacool --level contig \
+    --genomes MAG_01,MAG_02 --genomes MAG_03,MAG_04 -o panel.png
+
+# A handful of contigs of interest, against each other
+metacooler show gut_T0.metacool --level bin \
+    --contigs contig_0_0,contig_3_7,contig_11_2 -o contigs.png
+
+# Rectangular: a different region per axis (the only asymmetric form)
+metacooler show gut_T0.metacool -r MAG_01 -r2 MAG_02 -o inter.png
 
 # A specific genomic range, raw counts, custom colormap, overwriting an old image
 metacooler show gut_T0.metacool -r contig_0_0:0-100000 \

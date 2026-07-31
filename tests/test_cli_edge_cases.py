@@ -1150,13 +1150,13 @@ class TestShowCLI:
 
     def test_show_bin_level_to_file(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_bin.png"
-        # bin level requires --genome (otherwise matrix would be impossibly large)
+        # bin level needs a selection (otherwise the matrix is impossibly large)
         r = _run(
             [
                 "show",
                 "--level",
                 "bin",
-                "--genome",
+                "--genomes",
                 "MAG_1",
                 "-o",
                 str(out),
@@ -1168,12 +1168,31 @@ class TestShowCLI:
 
     def test_show_single_genome_view(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_intra.png"
-        r = _run(["show", "--genome", "MAG_1", "-o", str(out), str(tiny_metacooler)])
+        r = _run(["show", "--genomes", "MAG_1", "-o", str(out), str(tiny_metacooler)])
         assert r.exit_code == 0, r.output
         assert out.exists()
 
-    def test_show_inter_genome_view(self, tiny_metacooler, tmp_path):
+    @pytest.mark.parametrize(
+        "genomes_args",
+        [
+            ["--genomes", "MAG_1,MAG_2"],
+            ["--genomes", "MAG_1", "--genomes", "MAG_2"],
+            ["--genomes", "MAG_1,", "--genomes", "MAG_2"],
+        ],
+        ids=["comma-list", "repeated", "mixed"],
+    )
+    def test_show_two_genome_view(self, tiny_metacooler, tmp_path, genomes_args):
+        """``--genomes`` is a comma-separated/repeatable list, not ``nargs=2``."""
         out = tmp_path / "show_inter.png"
+        r = _run(
+            ["show", *genomes_args, "--dpi", "50", "-o", str(out), str(tiny_metacooler)]
+        )
+        assert r.exit_code == 0, r.output
+        assert out.exists()
+
+    def test_show_space_separated_genomes_is_rejected(self, tiny_metacooler, tmp_path):
+        """The old ``--genomes A B`` form: B would land on the positional slot."""
+        out = tmp_path / "show_space.png"
         r = _run(
             [
                 "show",
@@ -1185,8 +1204,106 @@ class TestShowCLI:
                 str(tiny_metacooler),
             ]
         )
+        assert r.exit_code == 2, r.output
+        assert not out.exists()
+
+    def test_show_more_than_two_genomes(self, tiny_metacooler, tmp_path):
+        out = tmp_path / "show_multi.png"
+        r = _run(
+            [
+                "show",
+                "--genomes",
+                "MAG_1,MAG_2,__unbinned__",
+                "--level",
+                "contig",
+                "--dpi",
+                "50",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+            ]
+        )
         assert r.exit_code == 0, r.output
         assert out.exists()
+
+    @pytest.mark.parametrize(
+        "contigs_args",
+        [
+            ["--contigs", "contig_A,contig_C"],
+            ["--contigs", "contig_A", "--contigs", "contig_C"],
+        ],
+        ids=["comma-list", "repeated"],
+    )
+    def test_show_contigs_selection(self, tiny_metacooler, tmp_path, contigs_args):
+        out = tmp_path / "show_contigs.png"
+        r = _run(
+            [
+                "show",
+                *contigs_args,
+                "--level",
+                "bin",
+                "--dpi",
+                "50",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+            ]
+        )
+        assert r.exit_code == 0, r.output
+        assert out.exists()
+
+    def test_show_contigs_upgrades_genome_level(self, tiny_metacooler, tmp_path):
+        """A contig has no row of its own at genome level, so the level moves."""
+        out = tmp_path / "show_contigs_up.png"
+        r = _run(
+            [
+                "show",
+                "--contigs",
+                "contig_A,contig_C",
+                "--level",
+                "genome",
+                "--dpi",
+                "50",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+            ]
+        )
+        assert r.exit_code == 0, r.output
+        assert out.exists()
+
+    def test_show_genomes_and_contigs_are_mutually_exclusive(
+        self, tiny_metacooler, tmp_path
+    ):
+        out = tmp_path / "show_both.png"
+        r = _run(
+            [
+                "show",
+                "--genomes",
+                "MAG_1",
+                "--contigs",
+                "contig_C",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+            ]
+        )
+        assert r.exit_code == 1, r.output
+        assert "mutually exclusive" in _flat(r.output)
+        assert not out.exists()
+
+    def test_show_empty_contigs_is_rejected(self, tiny_metacooler, tmp_path):
+        out = tmp_path / "show_empty_c.png"
+        r = _run(["show", "--contigs", "", "-o", str(out), str(tiny_metacooler)])
+        assert r.exit_code == 2, r.output
+        assert "is empty" in _flat(r.output)
+
+    def test_show_empty_genomes_is_rejected(self, tiny_metacooler, tmp_path):
+        """Matches the shared ``--genomes ''`` policy of every other command."""
+        out = tmp_path / "show_empty.png"
+        r = _run(["show", "--genomes", "", "-o", str(out), str(tiny_metacooler)])
+        assert r.exit_code == 2, r.output
+        assert "is empty" in _flat(r.output)
 
     def test_show_transform_none(self, tiny_metacooler, tmp_path):
         out = tmp_path / "show_raw.png"
@@ -1293,7 +1410,7 @@ class TestShowCLI:
         """An unknown genome reaches the command body and errors there (exit 1)."""
         out = tmp_path / "show.png"
         r = _run(
-            ["show", "--genome", "NONEXISTENT", "-o", str(out), str(tiny_metacooler)]
+            ["show", "--genomes", "NONEXISTENT", "-o", str(out), str(tiny_metacooler)]
         )
         assert r.exit_code == 1, r.output
         flat = _flat(r.output)

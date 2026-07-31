@@ -383,17 +383,73 @@ metacooler dump -t contigs -H assembly_1_rep1_genome5kb.metacool | head -5
 ## -f used to mean --file; it now means --force.
 metacooler show assembly_1_rep1_1kb.metacool --level genome -o show_genome.png
 metacooler show assembly_1_rep1_1kb.metacool --level contig -o show_contig.png
-metacooler show assembly_1_rep1_1kb.metacool --level bin --genome MAG_05 -o show_bin_MAG_05.png
-## --genomes takes exactly TWO space-separated names (nargs=2), not a comma list.
-metacooler show assembly_1_rep1_1kb.metacool --level bin --genomes MAG_05 MAG_06 -o show_pair.png
+## There is no singular --genome any more: a one-name --genomes IS that.
+metacooler show assembly_1_rep1_1kb.metacool --level bin --genomes MAG_05 -o show_bin_MAG_05.png
+metacooler show assembly_1_rep1_1kb.metacool --level genome --genome MAG_05 -o show_singular.png || echo "  (expected: no such option --genome)"
+## --genomes is a comma-separated / repeatable list, and it is SYMMETRIC for any
+## number of names: every name goes on BOTH axes, so the image holds all the
+## intra- and inter-genome blocks between them, in the order given.
+metacooler show assembly_1_rep1_1kb.metacool --level bin --genomes MAG_05,MAG_06 -o show_pair.png
+metacooler show assembly_1_rep1_1kb.metacool --level contig --genomes MAG_05 --genomes MAG_06 -o show_pair_contig.png
+metacooler show assembly_1_rep1_1kb.metacool --level contig --genomes MAG_05,MAG_06,MAG_07,MAG_08 -o show_multi.png
+metacooler show assembly_1_rep1_1kb.metacool --level bin --genomes MAG_05,MAG_06,MAG_07 --dpi 100 -o show_multi_bin.png
+metacooler show assembly_1_rep1_1kb.metacool --level genome --genomes MAG_05,MAG_06,MAG_07 -o show_multi_genome.png
+## The block order follows the order the names were given, so these two differ.
+metacooler show assembly_1_rep1_1kb.metacool --level contig --genomes MAG_05,MAG_06,MAG_07 --dpi 100 -o show_multi_order_a.png
+metacooler show assembly_1_rep1_1kb.metacool --level contig --genomes MAG_07,MAG_05,MAG_06 --dpi 100 -o show_multi_order_b.png
+assert_differs "show --genomes block order" show_multi_order_a.png show_multi_order_b.png
+## --contigs is the same selector in contig space -- the one thing -r cannot do
+## is put SEVERAL contigs on the same axis.
+metacooler show assembly_1_rep1_1kb.metacool --level bin --contigs contig_1_000,contig_1_010 --dpi 100 -o show_contigs_bin.png
+metacooler show assembly_1_rep1_1kb.metacool --level contig --contigs contig_1_000 --contigs contig_1_010,contig_1_023 -o show_contigs_contig.png
+## A contig has no row of its own at --level genome, so the level is upgraded.
+metacooler show assembly_1_rep1_1kb.metacool --level genome --contigs contig_1_000,contig_1_010 -v -o show_contigs_upgraded.png
+## ...but the two selectors may not be combined: both put their names on BOTH
+## axes, so together they have no single meaning (expected error).
+metacooler show assembly_1_rep1_1kb.metacool --genomes MAG_05 --contigs contig_1_000 -o show_both.png || echo "  (expected: --genomes and --contigs are mutually exclusive)"
+## A name may only appear once, and an empty value is rejected (expected errors).
+metacooler show assembly_1_rep1_1kb.metacool --level contig --genomes MAG_05,MAG_06,MAG_05 -o show_dup.png || echo "  (expected: MAG_05 listed more than once)"
+metacooler show assembly_1_rep1_1kb.metacool --level contig --contigs '' -o show_empty_contigs.png || echo "  (expected: empty --contigs value)"
+## The old space-separated form is now a usage error: the second name would fall
+## through to the positional METACOOL_PATH slot (expected error).
+metacooler show assembly_1_rep1_1kb.metacool --level bin --genomes MAG_05 MAG_06 -o show_spaced.png || echo "  (expected: --genomes is a comma list, not nargs=2)"
+## -r/-r2 is the ONLY asymmetric form (a different region per axis), and it ticks
+## the axes in BASE PAIRS, not bin indices (a bin index starts at 0 even when the
+## range does not).
 metacooler show assembly_1_rep1_1kb.metacool -r contig_1_000:0-10000 --transform none --cmap Reds --dpi 100 -o show_range.png
-## --genome / --genomes are honoured at EVERY level (they used to be validated
+metacooler show assembly_1_rep1_1kb.metacool -r contig_1_010:3000-9000 --dpi 100 -o show_range_offset.png
+metacooler show assembly_1_rep1_1kb.metacool -r MAG_05 -r2 MAG_06 --dpi 100 -o show_range_rect.png
+## --genomes / --contigs are honoured at EVERY level (they used to be validated
 ## then ignored at the default --level genome).
-metacooler show assembly_1_rep1_1kb.metacool --level contig --genome MAG_05 -q -o show_contig_MAG_05.png
+metacooler show assembly_1_rep1_1kb.metacool --level contig --genomes MAG_05 -q -o show_contig_MAG_05.png
 ## Re-rendering over an existing image needs -f/--force.
 metacooler show assembly_1_rep1_1kb.metacool --level genome -o show_genome.png || echo "  (expected: output exists, use --force)"
 metacooler show assembly_1_rep1_1kb.metacool --level genome -f -o show_genome.png
 ls -1 show_*.png
+
+# ================================================================================
+## check
+# ================================================================================
+
+## The integrity report over the existing validators: one line per check instead
+## of raising on the first problem.
+metacooler check assembly_1_rep1_1kb.metacool
+## --deep additionally scans the WHOLE pixel table and reconciles attrs['sum'].
+metacooler check --deep assembly_1_rep1_1kb.metacool
+## A bare collection path is accepted: the per-map checks repeat for each entry.
+metacooler check assembly_1kb.mmetacool
+metacooler check assembly_1kb.mmetacool::entries/assembly_1_rep1_1kb
+## A plain .cool is reported as such rather than as a broken metacool, and exits
+## non-zero (expected error).
+metacooler check ../assembly_1_rep1_1kb.cool || echo "  (expected: not a metacool file)"
+## Corrupting a declared count is caught by the structure check (expected error).
+cp assembly_1_rep1_1kb.metacool check_broken.metacool
+python -c "
+import h5py
+with h5py.File('check_broken.metacool', 'r+') as f:
+    f.attrs['nnz'] = int(f.attrs['nnz']) + 1
+"
+metacooler check check_broken.metacool || echo "  (expected: nnz disagrees with /pixels)"
 
 # ================================================================================
 ## Summary

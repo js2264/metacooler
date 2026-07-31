@@ -551,14 +551,18 @@ class TestAssemblyName:
 
 
 class TestShowSelection:
-    """``--genome``/``--genomes`` at ``--level genome``."""
+    """``--genomes``/``--contigs``/``--range`` never silently ignore each other.
+
+    The original bug was ``--genome``, since removed in favour of a one-name
+    ``--genomes``; these keep the invariants it was about.
+    """
 
     def test_genome_filter_is_honoured_at_genome_level(
         self, tmp_path: Path, tiny_metacooler: Path, caplog
     ) -> None:
         """#11 — the filter was validated and then ignored.
 
-        Before: ``show --level genome --genome MAG_1`` rendered the *whole*
+        Before: ``show --level genome --genomes MAG_1`` rendered the *whole*
         genome-by-genome matrix and exited 0, so the user got a picture of
         something they did not ask for.  A single-genome selection is now a 1×1
         block, which the code says so out loud.
@@ -567,36 +571,36 @@ class TestShowSelection:
         from metacooler.ops.show import show
 
         with caplog.at_level(logging.WARNING, logger="metacooler"):
-            show(tiny_metacooler, level="genome", genome="MAG_1", out=out)
+            show(tiny_metacooler, level="genome", genomes=["MAG_1"], out=out)
         assert out.exists()
-        assert "single genome pair" in caplog.text
+        assert "single genome" in caplog.text
 
-    def test_genome_and_genomes_together_are_refused(
+    def test_genomes_and_contigs_together_are_refused(
         self, tmp_path: Path, tiny_metacooler: Path
     ) -> None:
-        """#11 — the two selectors used to be silently combined."""
+        """#11 — two selectors for the same axes must not be silently combined."""
         from metacooler.ops.show import show
 
         with pytest.raises(ValueError, match="mutually exclusive"):
             show(
                 tiny_metacooler,
-                level="genome",
-                genome="MAG_1",
-                genomes=("MAG_1", "MAG_2"),
+                level="contig",
+                genomes=["MAG_1"],
+                contigs=["contig_C"],
                 out=tmp_path / "x.png",
             )
 
-    def test_range_cannot_be_combined_with_genome(
+    def test_range_cannot_be_combined_with_genomes(
         self, tmp_path: Path, tiny_metacooler: Path
     ) -> None:
-        """#11 — ``--range`` and ``--genome`` select the same axes two ways."""
+        """#11 — ``--range`` and ``--genomes`` select the same axes two ways."""
         from metacooler.ops.show import show
 
         with pytest.raises(ValueError, match="cannot be combined"):
             show(
                 tiny_metacooler,
                 level="bin",
-                genome="MAG_1",
+                genomes=["MAG_1"],
                 range1="contig_A",
                 out=tmp_path / "x.png",
             )

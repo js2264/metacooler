@@ -10,6 +10,7 @@ import rich_click as click
 from metacooler.cli._options import (
     check_output,
     force_option,
+    parse_comma_list,
     quiet_option,
     verbose_option,
 )
@@ -38,15 +39,28 @@ from metacooler.cli.main import MetaCoolURI, cli
     ),
 )
 @click.option(
-    "--genome",
+    "--genomes",
     type=str,
-    help="Show only this genome (intra-genome view).",
+    multiple=True,
+    callback=parse_comma_list,
+    help=(
+        "Genome name(s) to show (comma-separated or repeated). Every name goes "
+        "on [b]both[/b] axes, so the figure holds all the intra- and "
+        "inter-genome contacts between them, blocked in the order given. "
+        "Use [cyan]--range/--range2[/cyan] for a different selection per axis."
+    ),
 )
 @click.option(
-    "--genomes",
-    nargs=2,
+    "--contigs",
     type=str,
-    help="Show a pair of genomes (inter-genome view).",
+    multiple=True,
+    callback=parse_comma_list,
+    help=(
+        "Contig name(s) to show (comma-separated or repeated), on both axes "
+        "like [cyan]--genomes[/cyan]. Bare names only — for coordinates use "
+        "[cyan]--range[/cyan]. Upgrades [cyan]--level genome[/cyan] to "
+        "[cyan]contig[/cyan]."
+    ),
 )
 @click.option(
     "--transform",
@@ -111,8 +125,8 @@ from metacooler.cli.main import MetaCoolURI, cli
 def cmd_show(
     metacool_path: str,
     level: str,
-    genome: str | None,
-    genomes: tuple[str, str] | None,
+    genomes: list[str],
+    contigs: list[str],
     transform: str,
     cmap: str,
     vmax: float | None,
@@ -133,15 +147,13 @@ def cmd_show(
 
     check_output(output, force)
 
-    # --range implies bin-level rendering for any non-bin level
-    if range1 is not None and level != "bin":
-        level = "bin"
-
+    # ``show`` upgrades the level for --range/--contigs itself, so the Python
+    # API and the CLI cannot drift apart.
     show(
         uri=metacool_path,
         level=cast(Literal["bin", "contig", "genome"], level),
-        genome=genome,
-        genomes=genomes,
+        genomes=genomes or None,
+        contigs=contigs or None,
         range1=range1,
         range2=range2,
         transform=cast(Literal["log1p", "log10", "none"], transform),

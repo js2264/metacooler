@@ -37,6 +37,21 @@
   exit 0).
 - **`attrs` rejects a group given twice** (URI group *and* `GROUP_PATH`); the
   URI group used to be silently discarded.
+- **`show --genomes` is a comma-separated/repeatable list, not `nargs=2`.**
+  `--genomes MAG_01,MAG_02` (or `--genomes MAG_01 --genomes MAG_02`) replaces
+  `--genomes MAG_01 MAG_02`, bringing it in line with `--genomes` everywhere
+  else. The old space-separated form now fails with a usage error, because the
+  second name would fall through to the positional `METACOOL_PATH` slot. An
+  explicitly empty `--genomes ''` is rejected, as on every other command.
+- **`show --genomes` is symmetric for *any* number of names**, including two:
+  every name goes on **both** axes, so the figure holds all the intra- *and*
+  inter-genome blocks between them. `--genomes A,B` used to mean "A on the rows,
+  B on the columns" — for that, use `-r A -r2 B`, now the only asymmetric form.
+- **`show --genome` (singular) is gone.** `--genomes MAG_01` with one name is
+  exactly the same thing, and the near-identical pair meant
+  `--genome MAG_01,MAG_02` looked for a genome literally named
+  `MAG_01,MAG_02`. `show` was also the only command in the CLI with a singular
+  form.
 - **A `--contigs` or `--genomes` table whose header and data rows disagree on
   the number of fields is rejected.** `pandas.read_csv` used to resolve the
   mismatch silently, and in opposite directions depending on which side was

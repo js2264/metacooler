@@ -142,21 +142,38 @@ metacooler show sample.metacool --level genome -o genome_heatmap.png
 # Contig-level
 metacooler show sample.metacool --level contig -o contig_heatmap.png
 
-# Contig-level, restricted to one MAG (--genome is honoured at every level)
-metacooler show sample.metacool --level contig --genome MAG_01 -o MAG_01_contigs.png
+# Contig-level, restricted to one MAG (--genomes is honoured at every level)
+metacooler show sample.metacool --level contig --genomes MAG_01 -o MAG_01_contigs.png
 
 # Bin-level: intra-genome view
-metacooler show sample.metacool --level bin --genome MAG_01 -o MAG_01.png
+metacooler show sample.metacool --level bin --genomes MAG_01 -o MAG_01.png
 
-# Bin-level: inter-genome view
-metacooler show sample.metacool --level bin --genomes MAG_01 MAG_02 -o inter.png
+# Any number of genomes: every name goes on BOTH axes, so you get all the intra-
+# and inter-genome blocks between them, in the order you listed them
+metacooler show sample.metacool --level contig --genomes MAG_01,MAG_02,MAG_03 -o panel.png
 
-# Bin-level: genomic range
+# The same rule for contigs — a handful of contigs of interest against each other
+metacooler show sample.metacool --level bin --contigs contig_0_0,contig_3_7 -o contigs.png
+
+# Bin-level: genomic range. The axes are ticked in bp, at their true position
 metacooler show sample.metacool -r contig_0_0:0-100000 -o range.png
+
+# -r/-r2 is the only asymmetric form: a different region per axis
+metacooler show sample.metacool -r MAG_01 -r2 MAG_02 -o inter.png
 
 # Custom colormap and transform, overwriting an existing image
 metacooler show sample.metacool --cmap Reds --transform none -f -o raw.png
 ```
+
+`--genomes` and `--contigs` are **symmetric** selectors — every name lands on
+both axes — and they are mutually exclusive with each other and with `-r`. There
+is no singular `--genome`: a one-name `--genomes` is the same thing.
+
+Every figure is titled with the selection and the level it shows, and the axes
+are labelled with the selection and its size. At `--level bin` the ticks are
+base-pair coordinates rather than bin indices — a bin index starts at 0 even when
+the requested range does not — except across a multi-contig selection, where they
+name the contigs (or the selected genomes) instead.
 
 A dense-matrix size guard applies at every level, including `--level bin` and
 range queries: a selection too large to materialise is refused with an error
@@ -179,8 +196,9 @@ See the [`check` reference](../cli.md#check) for what each check establishes.
 
 Every export operation is also a top-level function — `metacooler.extract`,
 `.flatten`, `.merge`, `.binnify`, `.zoomify`, `.aggregate`, `.network`,
-`.dump_table`, `.validate`, and `.validate_mmetacooler` are all exported from
-the package root (previously only the creation and collection helpers were).
+`.dump_table`, `.validate`, `.validate_mmetacooler`, and `.check` are all
+exported from the package root (previously only the creation and collection
+helpers were).
 
 ```python
 import metacooler

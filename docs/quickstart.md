@@ -95,7 +95,11 @@ metacooler dump gut_T0.metacool -t contigs --genomes MAG_01 -H
 metacooler show gut_T0.metacool --level genome -o genome_heatmap.png
 
 # Intra-genome heatmap at bin resolution
-metacooler show gut_T0.metacool --level bin --genome MAG_01 -o MAG_01_heatmap.png
+metacooler show gut_T0.metacool --level bin --genomes MAG_01 -o MAG_01_heatmap.png
+
+# Several genomes: every name goes on both axes, so you get all the intra- and
+# inter-genome blocks between them
+metacooler show gut_T0.metacool --level contig --genomes MAG_01,MAG_02 -o pair.png
 
 # A specific genomic range (implies --level bin)
 metacooler show gut_T0.metacool -r contig_0_0:0-50000 -o range.png
