@@ -19,6 +19,9 @@ from metacooler.schema import (
     METACOOLER_FORMAT,
     METACOOLER_FORMAT_URL,
     METACOOLER_FORMAT_VERSION,
+    MetaCoolerFormatError,
+    ascii_violations,
+    format_ascii_violations,
 )
 
 if TYPE_CHECKING:
@@ -367,6 +370,31 @@ def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np
     return np.dtype(np.int32)
 
 
+def check_ascii_names(genomes: pd.DataFrame, contigs: pd.DataFrame) -> None:
+    """Refuse to write name tables that cooler would not be able to read.
+
+    The one hard rule metacooler places on the text it stores.  Everything
+    else about a ``.metacool`` file is metacooler's business, but ``/contigs``
+    doubles as cooler's ``/chroms``, and cooler assumes ASCII there — see
+    :func:`metacooler.schema.ascii_violations` for exactly which columns that
+    reaches and why.
+
+    Callers run this twice: once as soon as the tables exist, so a bad name
+    costs seconds rather than a whole binning pass, and once inside
+    :func:`_finalize_metacool_file`, so that no writer — present or future —
+    can put an unreadable file on disk.
+
+    Raises:
+        MetaCoolerFormatError: If any checked column holds non-ASCII text.
+    """
+    violations = ascii_violations(genomes, contigs)
+    if violations:
+        raise MetaCoolerFormatError(
+            "Refusing to write a metacool file that cooler could not open — "
+            "these names are not ASCII:\n" + format_ascii_violations(violations)
+        )
+
+
 def _finalize_metacool_file(
     path: Path,
     genomes: pd.DataFrame,
@@ -419,7 +447,13 @@ def _finalize_metacool_file(
             fixed-resolution file recorded as ``bin-type="variable"``,
             ``bin-size=null``, and let a later ``binnify`` to a *finer* size
             slip past the "target must be coarser" guard.  Ignored if ``None``.
+
+    Raises:
+        MetaCoolerFormatError: If *genomes* or *contigs* hold non-ASCII names
+            (see :func:`check_ascii_names`).  Checked before the first write,
+            so a refused file is never left half-finalized.
     """
+    check_ascii_names(genomes, contigs)
     with h5py.File(path, "a") as f:
         # Recreate chroms as a soft link to contigs (cooler compat)
         if "chroms" in f:

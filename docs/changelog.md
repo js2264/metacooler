@@ -52,6 +52,20 @@
   `--genome MAG_01,MAG_02` looked for a genome literally named
   `MAG_01,MAG_02`. `show` was also the only command in the CLI with a singular
   form.
+- **Contig and genome names must be ASCII.** `create` refuses a non-ASCII name
+  before it bins anything, `validate()` refuses one on read, and `check`
+  reports it. `/contigs` is cooler's `/chroms`, and cooler decodes those columns
+  with an ASCII `.astype("U")`, so an accented contig name — or an accented
+  value in any *extra* `/contigs` column, which cooler reads just the same —
+  produced a file that passed every metacooler check and then raised
+  `UnicodeDecodeError` in `cooler.Cooler()`, and therefore in `MetaCooler()`.
+  Genome names hit the mirror image of the same assumption on the way out,
+  where `aggregate --level genome` writes them into a `.cool` as chrom names
+  (`UnicodeEncodeError`). Extra `/genomes` metadata columns are unaffected and
+  still take any UTF-8: cooler never reads that group. The limitation is
+  upstream, but writing a file metacooler itself cannot open breaks the one
+  invariant the format is built on, so it is now a named refusal instead of a
+  crash three commands later.
 - **A `--contigs` or `--genomes` table whose header and data rows disagree on
   the number of fields is rejected.** `pandas.read_csv` used to resolve the
   mismatch silently, and in opposite directions depending on which side was

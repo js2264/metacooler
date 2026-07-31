@@ -49,7 +49,7 @@ One row per genome / MAG.
 
 | Dataset | dtype | Description |
 |---------|-------|-------------|
-| `name` | `S<n>` (fixed bytes) | Genome name. `__unbinned__` is reserved for unassigned contigs. |
+| `name` | `S<n>` (fixed bytes) | Genome name, ASCII only (see [Names must be ASCII](#names-must-be-ascii)). `__unbinned__` is reserved for unassigned contigs. |
 | `length` | `int64` | Total length in bp (sum of assigned contig lengths). |
 | `n_contigs` | `int32` | Number of contigs assigned to this genome. |
 | `n_bins` | `int64` | Number of bins across all contigs of this genome. |
@@ -73,10 +73,10 @@ link `/chroms → /contigs` makes it transparent to the cooler ecosystem.
 
 | Dataset | dtype | Description |
 |---------|-------|-------------|
-| `name` | `S<n>` (fixed bytes) | Contig name, unique within the file. |
+| `name` | `S<n>` (fixed bytes) | Contig name, unique within the file, ASCII only (see [Names must be ASCII](#names-must-be-ascii)). |
 | `length` | `int32` | Contig length in bp. |
 | `genome_id` | `int32` | Zero-based index into `/genomes`. |
-| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`). |
+| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`). ASCII only: cooler reads every column of this group. |
 
 Row order is determined by the `--contig-order` strategy chosen at creation time
 and stored in the `contig-ordering` attribute.
@@ -223,3 +223,29 @@ creation time:
 The consequence is that `cooler.Cooler("gut_T0.metacool").chroms()[:]` returns
 the contigs table, and all cooler range queries work at contig resolution.
 The genome hierarchy is invisible to cooler.
+
+### Names must be ASCII
+
+Because `/contigs` *is* cooler's `/chroms`, it inherits cooler's assumption
+about the text it holds: cooler decodes those byte columns with an ASCII
+`.astype("U")`. A single non-ASCII byte anywhere in the group — in `name` or in
+any extra metadata column — therefore yields a file that satisfies every
+structural rule above and still raises `UnicodeDecodeError` in
+`cooler.Cooler()`, and so in `MetaCooler()`, which opens through it. Genome
+names are subject to the same rule for the opposite reason: cooler never reads
+`/genomes`, but `aggregate --level genome` writes those names into a `.cool` as
+chrom names, where the encode fails instead of the decode.
+
+So, in both directions:
+
+| Where | Rule |
+|-------|------|
+| `/contigs`, every string column | ASCII only |
+| `/genomes/name` | ASCII only |
+| `/genomes`, extra metadata columns | any UTF-8 — cooler never sees them |
+| HDF5 attributes, metadata JSON | any UTF-8 |
+
+`create` refuses non-ASCII names before it bins anything, `validate()` refuses
+them on read, and `check` reports them; the limitation is upstream, in cooler,
+but a file that breaks it is one metacooler can write and then not open, which
+is the one thing this format promises never to do.

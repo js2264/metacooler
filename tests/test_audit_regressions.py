@@ -50,11 +50,13 @@ def _build(
     binsize: int = 100,
     contig_table: str | None = None,
     contig_table_format: str = "contigs",
+    genomes_table: Path | None = None,
 ) -> Path:
     """Build a small ``.metacool`` from an in-memory contig spec.
 
     *contigs* is a list of ``(name, length, genome_or_None)`` — ``None`` means
-    the contig is unassigned (``__unbinned__``).
+    the contig is unassigned (``__unbinned__``).  *genomes_table* is an
+    optional path to a ``--genomes`` metadata table.
     """
     fa = tmp_path / "a.fa"
     _write_fasta(fa, [(n, ln) for n, ln, _ in contigs])
@@ -78,6 +80,7 @@ def _build(
         pairs=str(pairs),
         contig_genome_map=str(ct),
         contig_table_format=contig_table_format,
+        genomes_table=genomes_table,
         fasta=str(fa),
         contig_ordering=ordering,  # ty: ignore[invalid-argument-type]
         chunksize=37,
@@ -326,18 +329,39 @@ class TestH3H6DuplicateNames:
 
 
 # ---------------------------------------------------------------------------
-# H5 — non-ASCII names round-trip (must not crash reads or collide)
+# H5 — non-ASCII text round-trips wherever it is still allowed
 # ---------------------------------------------------------------------------
 class TestH5Unicode:
-    def test_non_ascii_genome_name_roundtrips(self, tmp_path):
+    """H5 originally asked that non-ASCII *names* round-trip; they no longer do.
+
+    Byte-length sizing in ``_str_to_hdf5`` (the actual H5 fix) stored them
+    faithfully, but cooler decodes ``/chroms`` — and so ``/contigs`` — as
+    ASCII, and genome names reach cooler as chrom names via ``aggregate
+    --level genome``.  A file with such a name is therefore unopenable by
+    ``cooler.Cooler()``, which is the one thing the format guarantees, so both
+    name columns are now refused at write time (see
+    ``test_cooler_compat.TestNonAsciiNamesRefused``).  What H5 fixed still
+    holds everywhere cooler does not look: the metadata columns of
+    ``/genomes``.
+    """
+
+    def test_non_ascii_genome_metadata_roundtrips(self, tmp_path):
+        genomes_table = tmp_path / "genomes.tsv"
+        genomes_table.write_text(
+            "genome_name\tphylum\nMAG_1\tBacteroidètes\nMAG_2\tΩ_phylum\n"
+        )
         out = _build(
             tmp_path,
-            [("cA", 1000, "café"), ("cB", 800, "Ω_genome")],
+            [("cA", 1000, "MAG_1"), ("cB", 800, "MAG_2")],
+            genomes_table=genomes_table,
         )
         validate(out)
         mc = MetaCooler(out)  # reading /genomes must not raise UnicodeDecodeError
-        assert "café" in set(mc.genomes["name"])
-        assert "Ω_genome" in set(mc.genomes["name"])
+        assert set(mc.genomes["phylum"]) == {"Bacteroidètes", "Ω_phylum"}
+
+    def test_non_ascii_genome_name_is_refused(self, tmp_path):
+        with pytest.raises(MetaCoolerFormatError, match="not ASCII"):
+            _build(tmp_path, [("cA", 1000, "café"), ("cB", 800, "Ω_genome")])
 
     def test_str_to_hdf5_sizes_by_byte_length(self):
         from metacooler.io._utils import _str_to_hdf5

@@ -37,6 +37,25 @@ A few conventions hold across the whole CLI:
     Only `ls`, `tree`, and `attrs` — which describe the container itself —
     accept a bare `.mmetacool` path.
 
+!!! warning "Contig and genome names must be ASCII"
+    `create` refuses a non-ASCII name before it bins anything:
+
+    ```console
+    $ metacooler create pairs --pairs r.pairs --contigs mags.tsv -o out.metacool
+    Error: Refusing to write a metacool file that cooler could not open — these
+    names are not ASCII:
+      /contigs.name: 'contig_é'
+    ```
+
+    `/contigs` doubles as cooler's `/chroms`, and cooler decodes every column
+    of it as ASCII, so an accented contig name — or an accented value in any
+    extra `--contigs` metadata column — makes the finished file unopenable by
+    `cooler.Cooler()`, and therefore by `metacooler` itself. Genome names are
+    held to the same rule because `aggregate --level genome` writes them into a
+    `.cool` as chrom names. Extra `--genomes` metadata columns are exempt:
+    cooler never reads that group, so accented taxonomy is fine there. See
+    [Names must be ASCII](format.md#names-must-be-ascii).
+
 New to the tool? Start with the [Quickstart](quickstart.md); for the ideas
 behind genomes, contigs, bins, and levels, see [Concepts](concepts.md).
 

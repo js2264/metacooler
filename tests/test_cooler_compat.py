@@ -17,18 +17,23 @@ Coverage includes mmetacool files created via:
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import cooler
 import cooler.fileops
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat as _flat
 from click.testing import CliRunner
 
+from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
+from metacooler.io.create import from_cool, from_pairs
 from metacooler.io.mmetacool import (
     add_entry,
     copy_entry,
@@ -38,7 +43,8 @@ from metacooler.io.mmetacool import (
     move_entry,
     remove_entry,
 )
-from metacooler.schema import COOLER_FORMAT
+from metacooler.ops.aggregate import aggregate
+from metacooler.schema import COOLER_FORMAT, MetaCoolerFormatError, check, validate
 
 # External cooler binary — intentionally subprocess, NOT CliRunner.
 # These tests verify third-party cooler CLI compatibility.
@@ -170,6 +176,248 @@ class TestMetacoolCoolerCompat:
         dst_c = cooler.Cooler(f"{dst}::/")
         assert len(dst_c.bins()[:]) == len(src.bins()[:])
         assert len(dst_c.pixels()[:]) == len(src.pixels()[:])
+
+
+# ===========================================================================
+# .metacool — names cooler cannot decode
+# ===========================================================================
+
+
+def _write_pairs_inputs(
+    tmp_path: Path,
+    contigs: list[str],
+    genome_of: dict[str, str],
+    contig_extra: dict[str, str] | None = None,
+    genome_extra: dict[str, str] | None = None,
+) -> dict[str, Path]:
+    """Write a complete four-file input set for ``from_pairs``.
+
+    The contig names have to agree across the fasta, the bins BED, the pairs
+    and the contig→genome map, so the non-ASCII tests generate all four from
+    one list rather than patching a fixture.
+    """
+    length = 400
+    fasta = tmp_path / "t.fa"
+    fasta.write_text("".join(f">{c}\n{'ACGT' * 100}\n" for c in contigs))
+
+    header = "contig_name\tgenome_name" + ("\tnote\n" if contig_extra else "\n")
+    rows = [
+        f"{c}\t{genome_of[c]}" + (f"\t{contig_extra[c]}\n" if contig_extra else "\n")
+        for c in contigs
+    ]
+    contig_map = tmp_path / "map.tsv"
+    contig_map.write_text(header + "".join(rows))
+
+    bins_bed = tmp_path / "bins.bed"
+    bins_bed.write_text(
+        "".join(
+            f"{c}\t{s}\t{s + 100}\n" for c in contigs for s in range(0, length, 100)
+        )
+    )
+
+    rng = np.random.default_rng(0)
+    pair_rows = ["#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n"]
+    for i in range(50):
+        c1, c2 = rng.choice(contigs), rng.choice(contigs)
+        p1, p2 = rng.integers(1, length), rng.integers(1, length)
+        pair_rows.append(f"r{i}\t{c1}\t{p1}\t{c2}\t{p2}\t+\t+\n")
+    pairs = tmp_path / "p.pairs"
+    pairs.write_text("".join(pair_rows))
+
+    inputs = {
+        "fasta": fasta,
+        "contig_genome_map": contig_map,
+        "bins": bins_bed,
+        "pairs": pairs,
+    }
+    if genome_extra is not None:
+        genomes_table = tmp_path / "genomes.tsv"
+        genomes_table.write_text(
+            "genome_name\tphylum\n"
+            + "".join(f"{g}\t{v}\n" for g, v in genome_extra.items())
+        )
+        inputs["genomes_table"] = genomes_table
+    return inputs
+
+
+def _create_from_pairs(tmp_path: Path, **input_kwargs) -> Path:
+    out = tmp_path / "t.metacool"
+    inputs = _write_pairs_inputs(tmp_path, **input_kwargs)
+    from_pairs(
+        uri=out,
+        bins=inputs["bins"],
+        pairs=inputs["pairs"],
+        contig_genome_map=inputs["contig_genome_map"],
+        genomes_table=inputs.get("genomes_table"),
+        fasta=inputs["fasta"],
+        contig_table_format="contigs",
+        chunksize=1000,
+    )
+    return out
+
+
+class TestNonAsciiNamesRefused:
+    """Names cooler cannot decode are refused rather than written.
+
+    cooler reads ``/chroms`` — a soft link to ``/contigs`` — with an ASCII
+    ``.astype("U")``, so a single accented byte anywhere in that group yields a
+    file that satisfies every structural rule metacooler has and still cannot
+    be opened by ``cooler.Cooler()``, and therefore not by ``MetaCooler()``
+    either.  That would break the invariant the whole format is built around,
+    so it is refused at the point of writing.
+    """
+
+    def test_contig_name(self, tmp_path: Path):
+        with pytest.raises(MetaCoolerFormatError, match=r"/contigs\.name"):
+            _create_from_pairs(
+                tmp_path,
+                contigs=["contig_é", "contig_B"],
+                genome_of={"contig_é": "MAG_1", "contig_B": "MAG_1"},
+            )
+        assert not (tmp_path / "t.metacool").exists()
+
+    def test_genome_name(self, tmp_path: Path):
+        # Invisible to cooler on read — /genomes is not part of the cooler view
+        # — but `aggregate --level genome` writes these out as chrom names.
+        with pytest.raises(MetaCoolerFormatError, match=r"/genomes\.name"):
+            _create_from_pairs(
+                tmp_path,
+                contigs=["contig_A", "contig_B"],
+                genome_of={"contig_A": "MAG_é", "contig_B": "MAG_1"},
+            )
+
+    def test_extra_contig_column(self, tmp_path: Path):
+        # Not just the name column: cooler's chroms read decodes every column
+        # of the group, so an accented annotation is equally fatal.
+        with pytest.raises(MetaCoolerFormatError, match=r"/contigs\.note"):
+            _create_from_pairs(
+                tmp_path,
+                contigs=["contig_A", "contig_B"],
+                genome_of={"contig_A": "MAG_1", "contig_B": "MAG_2"},
+                contig_extra={"contig_A": "café", "contig_B": "plain"},
+            )
+
+    def test_error_names_the_offending_value(self, tmp_path: Path):
+        with pytest.raises(MetaCoolerFormatError) as excinfo:
+            _create_from_pairs(
+                tmp_path,
+                contigs=["contig_é", "contig_B"],
+                genome_of={"contig_é": "MAG_1", "contig_B": "MAG_1"},
+            )
+        message = str(excinfo.value)
+        assert "contig_é" in message
+        assert "cooler" in message
+
+    def test_extra_genome_column_is_allowed(self, tmp_path: Path):
+        # The deliberate limit of the rule: /genomes is metacooler-only
+        # metadata that cooler never reads, so accented taxonomy stays legal.
+        out = _create_from_pairs(
+            tmp_path,
+            contigs=["contig_A", "contig_B"],
+            genome_of={"contig_A": "MAG_1", "contig_B": "MAG_2"},
+            genome_extra={"MAG_1": "Bacteroidètes", "MAG_2": "Firmicutes"},
+        )
+        assert cooler.Cooler(str(out)).chroms()[:].shape[0] == 2
+        genomes = MetaCooler(out).genomes
+        assert set(genomes["phylum"]) == {"Bacteroidètes", "Firmicutes"}
+        aggregate(out, tmp_path / "genome.cool", level="genome")
+        assert cooler.Cooler(str(tmp_path / "genome.cool")).chromnames == [
+            "MAG_1",
+            "MAG_2",
+        ]
+
+    def test_create_cool_refuses(self, tiny_cool: Path, tmp_path: Path):
+        contig_map = tmp_path / "map.tsv"
+        contig_map.write_text(
+            "contig_name\tgenome_name\n"
+            "contig_A\tMAG_é\ncontig_B\tMAG_1\n"
+            "contig_C\tMAG_2\ncontig_D\tMAG_2\n"
+        )
+        with pytest.raises(MetaCoolerFormatError, match=r"/genomes\.name"):
+            from_cool(
+                cool_uri=tiny_cool,
+                output=tmp_path / "out.metacool",
+                contig_genome_map=contig_map,
+                contig_table_format="contigs",
+            )
+
+    def test_cli_reports_a_clean_error(self, tmp_path: Path):
+        inputs = _write_pairs_inputs(
+            tmp_path,
+            contigs=["contig_é", "contig_B"],
+            genome_of={"contig_é": "MAG_1", "contig_B": "MAG_1"},
+        )
+        result = CliRunner().invoke(
+            cli,
+            [
+                "create",
+                "pairs",
+                "--pairs",
+                str(inputs["pairs"]),
+                "-o",
+                str(tmp_path / "out.metacool"),
+                "--fasta",
+                str(inputs["fasta"]),
+                "--bins",
+                str(inputs["bins"]),
+                "--contigs",
+                str(inputs["contig_genome_map"]),
+                "--contigs-format",
+                "contigs",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "not ASCII" in _flat(result.output)
+
+
+class TestNonAsciiNamesOnDisk:
+    """A file that already holds such names is diagnosed, not vouched for."""
+
+    @staticmethod
+    def _break(source: Path, dest: Path, raw: bytes = "contig_é".encode()) -> Path:
+        """Copy *source* and overwrite one contig name with *raw*.
+
+        The dataset is widened first: assigning into the original ``S8`` would
+        truncate the multi-byte name rather than store it.
+        """
+        shutil.copy(source, dest)
+        with h5py.File(dest, "a") as f:
+            names = f["contigs"]["name"][:].astype("S16")
+            names[0] = raw
+            del f["contigs"]["name"]
+            f["contigs"].create_dataset("name", data=names)
+        return dest
+
+    def test_validate_refuses(self, tiny_metacooler: Path, tmp_path: Path):
+        broken = self._break(tiny_metacooler, tmp_path / "broken.metacool")
+        with pytest.raises(MetaCoolerFormatError, match=r"/contigs\.name"):
+            validate(broken)
+        # And the same named error, rather than cooler's UnicodeDecodeError,
+        # when the file is opened.
+        with pytest.raises(MetaCoolerFormatError):
+            MetaCooler(broken)
+
+    def test_check_reports_it(self, tiny_metacooler: Path, tmp_path: Path):
+        broken = self._break(tiny_metacooler, tmp_path / "broken.metacool")
+        results = {r.name: r for r in check(broken)}
+        assert results["structure"].ok is False
+        assert "contig_é" in results["structure"].detail
+        # The pre-existing empirical check agrees: cooler really cannot open it.
+        assert results["cooler-compat"].ok is False
+
+    def test_invalid_utf8_is_reported_not_raised(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        # A name that is not even valid UTF-8 must still produce the message:
+        # the reporting path decodes with "replace" precisely so that naming
+        # the offender cannot itself raise.
+        broken = self._break(tiny_metacooler, tmp_path / "raw.metacool", b"contig_\xff")
+        with pytest.raises(MetaCoolerFormatError, match=r"/contigs\.name"):
+            validate(broken)
+
+    def test_intact_file_still_validates(self, tiny_metacooler: Path):
+        validate(tiny_metacooler)
+        assert all(r.ok for r in check(tiny_metacooler))
 
 
 # ===========================================================================

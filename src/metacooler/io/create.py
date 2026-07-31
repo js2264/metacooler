@@ -21,6 +21,7 @@ from pyfaidx import Fasta
 
 from metacooler.io._utils import (
     _finalize_metacool_file,
+    check_ascii_names,
     check_output_path,
     resolve_count_dtype,
 )
@@ -1744,6 +1745,9 @@ def from_pairs(
     contigs_df = _build_contigs_table(
         contig_order, contig_lengths, cg_map, genomes_df, contig_df
     )
+    # Before the pairs are streamed: a name cooler cannot read costs a second
+    # here and an entire binning pass if it is only caught at write time.
+    check_ascii_names(genomes_df, contigs_df)
     logger.info(
         f"Built final genomes and contigs tables with {len(genomes_df)} genomes "
         f"and {len(contigs_df)} contigs"
@@ -1968,6 +1972,8 @@ def from_cool(
         genomes=genomes,
         contig_df=contig_df,
     )
+    # Fail before the pixel stream, not after it (see from_pairs).
+    check_ascii_names(genomes, contigs)
 
     # --- Remap bins to new contig IDs; compute offsets ---
     bins_remapped, old_to_new_bin = _remap_bins(bins, contig_order)

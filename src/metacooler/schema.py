@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import h5py
 import numpy as np
@@ -86,6 +86,9 @@ CORE_COLUMN_KINDS: dict[str, str] = {
 
 # Pixel rows read per iteration by the ``--deep`` scan.
 DEEP_PIXEL_CHUNK = 1_000_000
+
+# How many offending values to name per column when refusing non-ASCII text.
+_MAX_REPORTED_NON_ASCII = 5
 
 
 class MetaCoolerFormatError(ValueError):
@@ -217,6 +220,111 @@ def _check_offset_array(
             f"{name} is not non-decreasing: {name}[{bad}]={int(values[bad])} > "
             f"{name}[{bad + 1}]={int(values[bad + 1])}"
         )
+
+
+def _is_text_dtype(dtype: object) -> bool:
+    """Return ``True`` for a dtype that can hold text (NumPy, h5py, or pandas)."""
+    return getattr(dtype, "kind", "") in ("O", "S", "U") or str(dtype) == "string"
+
+
+def non_ascii_values(values: object) -> list[str]:
+    """Return the distinct values of *values* that are not pure ASCII, in order.
+
+    Sized for the hot path: :func:`validate` calls this on every string column
+    of ``/contigs`` on every ``MetaCooler`` construction, so an all-ASCII
+    fixed-width byte column is settled by a single vectorised pass over the raw
+    buffer and is never decoded value by value.  Only once a high byte turns up
+    do we pay for the per-value decode needed to name the offenders.
+    """
+    arr = np.asarray(values)
+    if arr.size == 0:
+        return []
+    if (
+        arr.dtype.kind == "S"
+        and arr.dtype.itemsize > 0
+        and int(np.ascontiguousarray(arr).view(np.uint8).max()) < 0x80
+    ):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in arr.tolist():
+        if value is None:
+            continue
+        # "replace" rather than "strict": this runs to *report* bad text, so a
+        # column that is not even valid UTF-8 must still produce a message.
+        text = (
+            value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+        )
+        if not text.isascii() and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def ascii_violations(genomes: Any, contigs: Any) -> list[tuple[str, str, list[str]]]:
+    """Find text that would break cooler compatibility in the two name tables.
+
+    *genomes* and *contigs* are anything that maps a column name to a sequence
+    of values — an ``h5py.Group`` or a ``pandas.DataFrame`` both qualify — so
+    the same rule serves the writers (which hold DataFrames) and
+    :func:`validate` (which holds the on-disk groups).
+
+    The two tables are checked to different depths on purpose:
+
+    - **Every** string column of ``/contigs``, because ``/chroms`` is a soft
+      link to it and cooler reads the whole group.
+    - Only ``name`` in ``/genomes``, because cooler never sees that group; the
+      names escape into cooler only as chrom names, when ``aggregate --level
+      genome`` writes them into a ``.cool``.  An accented ``phylum`` column
+      alongside them is metacooler-only metadata and stays legal.
+
+    Returns:
+        ``(group, column, offending values)`` triples, empty if the tables are
+        clean.
+    """
+
+    def _column(table: Any, name: str) -> Any | None:
+        try:
+            column = table[name]
+        except (KeyError, IndexError):
+            return None
+        return column if _is_text_dtype(getattr(column, "dtype", None)) else None
+
+    found: list[tuple[str, str, list[str]]] = []
+    for column_name in list(contigs):
+        column = _column(contigs, str(column_name))
+        if column is None:
+            continue
+        bad = non_ascii_values(column)
+        if bad:
+            found.append(("contigs", str(column_name), bad))
+    name_column = _column(genomes, "name")
+    if name_column is not None:
+        bad = non_ascii_values(name_column)
+        if bad:
+            found.append(("genomes", "name", bad))
+    return found
+
+
+def format_ascii_violations(violations: list[tuple[str, str, list[str]]]) -> str:
+    """Render :func:`ascii_violations` output as the body of an error message."""
+    lines = []
+    for group, column, values in violations:
+        shown = ", ".join(repr(v) for v in values[:_MAX_REPORTED_NON_ASCII])
+        extra = len(values) - _MAX_REPORTED_NON_ASCII
+        if extra > 0:
+            shown += f", ... (+{extra} more)"
+        lines.append(f"  /{group}.{column}: {shown}")
+    lines.append(
+        "cooler decodes /chroms — a soft link to /contigs — as ASCII "
+        '(`.astype("U")` in cooler/core/_tableops.py), so a non-ASCII byte in '
+        "any /contigs column makes cooler.Cooler(), and therefore MetaCooler() "
+        "which opens through it, raise UnicodeDecodeError on a file that is "
+        "otherwise perfectly well formed. Genome names meet the same assumption "
+        "on the way out, where `aggregate --level genome` writes them into a "
+        ".cool as chrom names. Rename to ASCII, or drop the offending column."
+    )
+    return "\n".join(lines)
 
 
 def is_metacooler(uri: str | Path) -> bool:
@@ -389,6 +497,17 @@ def validate(uri: str | Path) -> None:
             raise MetaCoolerFormatError("contig names are not unique")
         if len(np.unique(genome_names)) != n_genomes:
             raise MetaCoolerFormatError("genome names are not unique")
+
+        # --- names must be ASCII (cooler compatibility) ---
+        # Without this, a file with an accented contig name passes every other
+        # check here and then raises UnicodeDecodeError the moment cooler opens
+        # it — validate() vouching for a file that cannot be read.
+        violations = ascii_violations(g, c)
+        if violations:
+            raise MetaCoolerFormatError(
+                f"{file_path} holds names cooler cannot decode:\n"
+                + format_ascii_violations(violations)
+            )
 
         # --- attribute consistency ---
         # Every one of these is optional (docs/format.md allows a file written
