@@ -11,9 +11,9 @@ import numpy as np
 import pandas as pd
 
 from metacooler.io._utils import (
-    _filter_by_genomes_and_contigs,
     chrom_codes,
     enforce_upper_triangle,
+    resolve_contig_selection,
     resolve_count_dtype,
 )
 
@@ -24,6 +24,7 @@ def extract(
     uri: str | Path,
     genomes: list[str] | None = None,
     contigs: list[str] | None = None,
+    filters: list[str] | None = None,
     output: str | Path = "extracted.cool",
     split: bool = False,
     force: bool = False,
@@ -35,25 +36,32 @@ def extract(
     specified contigs is extracted.  In ``split`` mode only ``genomes`` is
     allowed (one file per genome); combining it with ``contigs`` is an error.
 
+    ``filters`` composes with both modes: it narrows whatever the names
+    selected (or the whole file, when no name is given), so ``--split
+    --filter 'genomes.length > 1Mb'`` writes one cool per genome above 1 Mb.
+
     Args:
         uri: Path to the source ``.metacool`` file.
         genomes: List of genome names to extract.
         contigs: List of contig names to extract (single-file mode only).
+        filters: ``--filter`` expressions (see :mod:`metacooler.filters`).
         output: Destination path. If *split* is True, treated as a
             filename prefix (one ``<prefix>_<genome>.cool`` per genome).
         split: If True, write one ``.cool`` per genome instead of a
-            single merged file. Requires ``genomes``; rejects ``contigs``.
+            single merged file. Rejects ``contigs``.
         force: Overwrite existing per-genome output files (split mode).
 
     Raises:
         KeyError: If any genome or contig is not found.
-        ValueError: If neither genomes nor contigs are specified, or if
-            ``split`` is combined with ``contigs`` / used without ``genomes``.
+        ValueError: If no selector at all is specified, or if ``split`` is
+            combined with ``contigs``.
     """
     from metacooler.api import MetaCooler
 
-    if not genomes and not contigs:
-        raise ValueError("At least one of --genomes or --contigs must be specified.")
+    if not genomes and not contigs and not filters:
+        raise ValueError(
+            "At least one of --genomes, --contigs or --filter must be specified."
+        )
     if split and contigs:
         raise ValueError(
             "--contigs cannot be combined with --split. Split writes one file per "
@@ -62,27 +70,31 @@ def extract(
         )
 
     mc = MetaCooler(uri)
+    selected_contig_ids = resolve_contig_selection(
+        mc, genomes=genomes, contigs=contigs, filters=filters
+    )
+    assert selected_contig_ids is not None  # a selector was required above
 
     if split:
-        # One cool per genome (contigs are excluded above; genomes is non-empty
-        # here because split+contigs and the empty-selection case both raised).
-        all_genomes_df = mc.genomes
+        # One cool per genome, over the selected contigs only: with --genomes
+        # that is exactly the named genomes, and with --filter it is whichever
+        # genomes still have a contig left.
         all_contigs = mc.contigs
+        genome_names = mc.genomes["name"]
         output_path = Path(output)
-        for g in genomes or []:
-            gid = int(all_genomes_df.loc[all_genomes_df["name"] == g].index[0])
-            cids = all_contigs.index[all_contigs["genome_id"] == gid].tolist()
+        by_genome: dict[int, list[int]] = {}
+        for cid in sorted(selected_contig_ids):
+            by_genome.setdefault(int(all_contigs.at[cid, "genome_id"]), []).append(cid)
+        for gid, cids in sorted(by_genome.items()):
+            g = str(genome_names[gid])
             out_file = output_path.parent / f"{output_path.stem}_{g}.cool"
             if out_file.exists() and not force:
                 raise FileExistsError(
                     f"Output file already exists: {out_file}. Use --force to overwrite."
                 )
-            _extract_contig_ids(mc, sorted(cids), out_file, assembly=g)
+            _extract_contig_ids(mc, cids, out_file, assembly=g)
     else:
         # Single output file with all selected contigs
-        selected_contig_ids = _filter_by_genomes_and_contigs(
-            mc, genomes=genomes, contigs=contigs
-        )
         _extract_contig_ids(
             mc, sorted(selected_contig_ids), Path(output), assembly="multi"
         )

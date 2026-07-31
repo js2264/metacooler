@@ -11,9 +11,9 @@ import pandas as pd
 
 from metacooler.api import MetaCooler
 from metacooler.io._utils import (
-    _filter_by_genomes_and_contigs,
     check_output_path,
     chrom_codes,
+    resolve_contig_selection,
 )
 from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
 
@@ -39,6 +39,7 @@ def dump_table(
     table: Literal["bins", "chroms", "contigs", "genomes", "pixels", "indexes", "all"],
     genomes: list[str] | None = None,
     contigs: list[str] | None = None,
+    filters: list[str] | None = None,
     range1: str | None = None,
     range2: str | None = None,
     header: bool = False,
@@ -56,6 +57,9 @@ def dump_table(
         table: Which table to dump. Use ``"all"`` to dump all tables.
         genomes: Multiple genome filter.
         contigs: Multiple contig filter.
+        filters: ``--filter`` expressions (see :mod:`metacooler.filters`), e.g.
+            ``["contigs.length >= 10kb"]``.  ANDed with each other and applied
+            *within* the *genomes*/*contigs* selection rather than beside it.
         range1: Row-dimension range selector (genome, contig, or
             ``contig:start-end``).  Applied only when ``table="pixels"``.
         range2: Column-dimension range selector.  Defaults to *range1* when
@@ -82,6 +86,7 @@ def dump_table(
     # Merge single/multi genome/contig filters
     genome_list = list(genomes) if genomes else []
     contig_list = list(contigs) if contigs else []
+    filter_list = list(filters) if filters else []
     mc = MetaCooler(uri)
 
     if table == "all":
@@ -101,6 +106,7 @@ def dump_table(
                 table=tbl,  # type: ignore[arg-type]
                 genomes=genome_list or None,
                 contigs=contig_list or None,
+                filters=filter_list or None,
                 range1=range1,
                 range2=range2,
                 header=header,
@@ -116,13 +122,12 @@ def dump_table(
         check_output_path(out, force)
 
     # Resolve contig filter
-    selected_contig_ids: set[int] | None = None
-    if genome_list or contig_list:
-        selected_contig_ids = _filter_by_genomes_and_contigs(
-            mc,
-            genomes=genome_list or None,
-            contigs=contig_list or None,
-        )
+    selected_contig_ids = resolve_contig_selection(
+        mc,
+        genomes=genome_list or None,
+        contigs=contig_list or None,
+        filters=filter_list or None,
+    )
 
     write_index = False
     if table == "bins":

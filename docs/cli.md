@@ -21,6 +21,7 @@ A few conventions hold across the whole CLI:
 | `-v, --verbose` | Enable debug logging. Available on every command. |
 | `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
+| `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `extract`, `dump`, and `show`. |
 
 !!! warning "A bare `.mmetacool` path is rejected"
     A `.mmetacool` file is a *collection*, not a single contact map. Every
@@ -59,6 +60,94 @@ A few conventions hold across the whole CLI:
 New to the tool? Start with the [Quickstart](quickstart.md); for the ideas
 behind genomes, contigs, bins, and levels, see [Concepts](concepts.md).
 
+## Filtering with `--filter` { #filter }
+
+`--genomes`/`--contigs` select by *name*. `--filter` selects by *property* —
+"every genome over 1 Mb", "every contig over 10 kb", "every MAG above 90 %
+completeness". One expression per flag; repeat the flag to require several
+conditions at once.
+
+```console
+--filter "<table>.<column> <op> <value>"
+```
+
+| Part | Values |
+|------|--------|
+| `<table>` | `genomes` or `contigs`. **Always required** — both tables have a `length` and a `name`. |
+| `<column>` | Any column of that table, including the extra ones your `--contigs`/`--genomes` metadata tables added (run `dump -t genomes -H` to see them). Names with spaces, dashes, or dots need no quoting: `genomes.Present Markers >= 50`. |
+| `<op>` | `>` `>=` `<` `<=` `==` `!=`, plus `=~` / `!~` for a regular-expression match. A lone `=` means `==`. |
+| `<value>` | A number — plain (`1000000`), scientific (`1e6`), underscored (`1_000_000`), or with a size suffix (`10kb`, `2.5Mb`, `1Gb`, case-insensitive) — or, for `==`/`!=`/`=~`, free text. |
+
+Two extra columns exist beyond what `dump` prints: `contigs.genome` holds the
+**genome name** of each contig (`/contigs` stores only the integer
+`genome_id`), and it is available during `create` too, before any id exists.
+
+```bash
+# Genomes above 1 Mb, dumped as a table
+metacooler dump gut_T0.metacool -t genomes -H --filter "genomes.length > 1Mb"
+
+# Contigs of MAG_01 longer than 50 kb — names choose the candidates,
+# the filter narrows them (this is an intersection, not a union)
+metacooler dump gut_T0.metacool -t contigs -H \
+    --genomes MAG_01 --filter "contigs.length > 50kb"
+
+# Several conditions at once
+metacooler extract gut_T0.metacool -o big_complete.cool \
+    --filter "genomes.length > 1Mb" \
+    --filter "genomes.Completeness > 90" \
+    --filter "contigs.length >= 10kb"
+
+# Drop the sub-5 kb tail at creation time, so it never costs a bin
+metacooler create pairs --pairs contacts.pairs.gz --bins 2000 --fasta assembly.fa \
+    --contigs contig_data_final.txt --contigs-format metator \
+    --filter "contigs.length >= 5kb" -o gut_T0.metacool
+```
+
+**Semantics.**
+
+- **Repeating the flag ANDs** the conditions. There is no `or` and no
+  parenthesised grammar — that is the price of letting a column be called
+  `Weighted completeness` without backticks. For an `or`, run the two filters
+  separately.
+- **Names choose, filters narrow.** `--genomes MAG_01 --filter
+  "contigs.length > 50kb"` is *MAG_01's long contigs*, not "MAG_01 plus every
+  long contig in the file". With no `--genomes`/`--contigs` at all, the filter
+  selects from the whole file.
+- **A `genomes.*` filter selects that genome's contigs**, so it narrows the
+  bins, pixels, and contigs tables too — not just the `/genomes` rows.
+- **Missing values never match.** A row whose value is `NA` fails every
+  comparison, including the negated `!=` and `!~`: a filter selects rows it can
+  positively vouch for.
+- **Text columns holding numbers still work.** MetaTOR writes `-` for an absent
+  shotgun coverage, so `contigs.Shotgun_coverage > 3` coerces what it can,
+  excludes the rest, and logs how many it could not read. A column where
+  *nothing* is a number is rejected outright, with a pointer to `==`/`=~`.
+- **Nothing selected is an error, not an empty file.** The message reports what
+  each filter would have kept on its own, so a mistyped threshold is
+  distinguishable from a genuinely empty intersection:
+
+    ```console
+    $ metacooler dump gut_T0.metacool -t genomes --filter "genomes.length > 1Gb"
+    Error: Nothing passed --filter. On its own, each filter keeps:
+      genomes.length > 1Gb  ->  0 of 49 genomes   <-- keeps nothing
+    ```
+
+- **Unknown columns are caught, with a suggestion.** `genomes.lenght > 1Mb`
+  reports `Did you mean 'length'?` and lists the available columns. A malformed
+  expression is rejected before the file is even opened.
+
+!!! note "`--filter` in `create` is not the same as `--filter` in `extract`"
+    In `create`, a dropped contig is never tiled into bins and its pairs are
+    discarded while binning (counted in the usual drop summary), so the sub-kb
+    tail of an assembly costs nothing at all — including the per-chunk
+    `cooler.create` overhead, which scales with contig count. The `/genomes`
+    rows, lengths, and offsets are then derived from what survives, so a genome
+    left with no contigs disappears entirely.
+
+    One column is unavailable there: `genomes.n_bins` does not exist until the
+    bins are tiled, and asking for it says so rather than reporting an unknown
+    column. Filter on `genomes.length` or `genomes.n_contigs` instead.
+
 ---
 
 ## Create and edit
@@ -86,6 +175,7 @@ metacooler create pairs --pairs P --bins B --contigs C -o OUT.metacool [OPTIONS]
 | `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs header has no `#chromsize:` lines. |
 | `--assembly-name` | — | Name for this assembly / metagenome. Stored in the standard cooler `genome-assembly` attribute (reported as `assembly` by `info`). |
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
+| `--filter` | — | Keep only the genomes/contigs matching an expression, *before* anything is binned — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. See [Filtering with `--filter`](#filter). `genomes.n_bins` is not available here. |
 | `--chunksize` | `50000000` | Pairs processed per chunk. This is chunk *granularity*, not read memory (the pyarrow read block is capped separately). Under `external` sorting each chunk becomes a temporary cooler at a fixed per-call cost that scales with contig count, so smaller chunks cost disproportionately more. |
 | `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (`memory` unless the binned pixels exceed 100 M rows), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
 | `-f, --force` | off | Overwrite the output if it already exists. |
@@ -138,6 +228,7 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `cool` (preserve the input's order), or `alpha`. |
 | `--assembly-name` | — | Assembly / metagenome name, stored as `genome-assembly`. |
 | `--drop-unassigned` | off | Drop unassigned contigs. |
+| `--filter` | — | Keep only the genomes/contigs matching an expression, *before* the bins are remapped. Repeatable. Same semantics and caveats as `create pairs`. |
 | `--nproc` | `1` | Parallel reader threads for pixel remapping. |
 | `--sort-strategy` | `auto` | As `create pairs`, but `nnz` is known up front so the 100 M-pixel threshold is compared directly. |
 | `-f, --force` | off | Overwrite the output if it already exists. |
@@ -327,13 +418,17 @@ metacooler extract METACOOL_PATH --genomes G -o OUT.cool [OPTIONS]
 | `-o, --output` | *required* | Output `.cool` path (or filename prefix with `--split`). |
 | `--genomes` | — | Genome name(s) to extract. |
 | `--contigs` | — | Contig name(s) to extract (single-file mode only). |
+| `--filter` | — | Keep only the genomes/contigs matching an expression. Repeatable; narrows `--genomes`/`--contigs`, or selects from the whole file on its own. See [Filtering with `--filter`](#filter). |
 | `--split` | off | Write one `.cool` per genome (genome-only); `--output` becomes a prefix. Cannot be combined with `--contigs`. |
 | `-f, --force` | off | Overwrite existing output(s), including per-genome files with `--split`. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
-At least one of `--genomes`/`--contigs` is required. The output is a plain
-cooler file, readable by cooltools, HiGlass, and anything else that reads
+At least one of `--genomes`/`--contigs`/`--filter` is required. The output is a
+plain cooler file, readable by cooltools, HiGlass, and anything else that reads
 `.cool`.
+
+With `--split`, one file is written per genome that still has a contig, so
+`--filter` alone is a complete selection there too.
 
 ```bash
 # Single MAG
@@ -341,6 +436,9 @@ metacooler extract gut_T0.metacool --genomes MAG_01 -o MAG_01.cool
 
 # Multiple MAGs, one file each
 metacooler extract gut_T0.metacool --genomes MAG_01,MAG_02 --split -o split
+
+# Every MAG over 1 Mb, one file each — no need to name them
+metacooler extract gut_T0.metacool --filter "genomes.length > 1Mb" --split -o big
 ```
 
 ### `flatten` { #flatten }
@@ -373,6 +471,7 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 | `-t, --table` | `pixels` | `bins`, `chroms`, `contigs`, `genomes`, `pixels`, `indexes`, or `all`. |
 | `--genomes` | — | Filter rows to the named genome(s). |
 | `--contigs` | — | Filter rows to the named contig(s). |
+| `--filter` | — | Filter rows by property, e.g. `--filter "contigs.length >= 10kb"`. Repeatable; narrows `--genomes`/`--contigs`. See [Filtering with `--filter`](#filter). |
 | `-H, --header` | off | Include a header row. |
 | `-o, --output` | stdout | Output file. |
 | `--prefix` | — | Filename prefix; **required** with `-t all`, and rejected with any other table. |
@@ -397,7 +496,7 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
     | Combination | Why it fails |
     |-------------|--------------|
     | `--weight` / `--join` with `-t bins/chroms/contigs/genomes/indexes` | Only the pixels table has a value column or coordinates to join. |
-    | `--genomes` / `--contigs` with `-t indexes` | The indexes table has no genome or contig dimension. |
+    | `--genomes` / `--contigs` / `--filter` with `-t indexes` | The indexes table has no genome or contig dimension. |
     | `-o/--output` with `-t all` | `all` writes one file per table — use `--prefix`. |
     | `--prefix` with any table other than `all` | Single-table dumps go to `-o/--output`. |
     | `--genomes ''` / `--contigs ''` | An explicitly empty filter is rejected rather than treated as "no filter". |
@@ -502,6 +601,7 @@ metacooler show METACOOL_PATH -o heatmap.png [OPTIONS]
 | `--level` | `genome` | `bin` (finest), `contig`, or `genome` (coarsest). |
 | `--genomes` | — | Genome names, **comma-separated or repeated** (`--genomes MAG_01,MAG_02`). Every name goes on **both** axes — see below. Honoured at every level. |
 | `--contigs` | — | Contig names, same syntax and same rule. Bare names only; for coordinates use `-r`. Upgrades `--level genome` to `contig`. |
+| `--filter` | — | Choose the axes by property instead of by name, e.g. `--filter "genomes.length > 1Mb"`. Repeatable; narrows `--genomes`/`--contigs`. A `contigs.*` filter upgrades `--level genome` to `contig`, exactly as `--contigs` does. Cannot be combined with `-r/-r2`. See [Filtering with `--filter`](#filter). |
 | `--transform` | `log1p` | Value transform: `log1p`, `log10`, or `none`. |
 | `--cmap` | `afmhot_r` | Matplotlib colormap name. |
 | `--vmax` | — | Upper colormap bound (default: 99th percentile of the non-zero values). |
@@ -518,12 +618,16 @@ There are exactly two, and they cannot be combined:
 
 | Selector | Shape | Meaning |
 |----------|-------|---------|
-| `--genomes` / `--contigs` | **symmetric** | Every name goes on **both** axes, so the figure holds all the intra- *and* inter-block contacts between them. Uniform in the number of names: one name is that genome against itself, N names are all N against all N. Blocks appear in the order the names were given — you control the layout — with a heavier boundary line between them. |
+| `--genomes` / `--contigs` (± `--filter`) | **symmetric** | Every name goes on **both** axes, so the figure holds all the intra- *and* inter-block contacts between them. Uniform in the number of names: one name is that genome against itself, N names are all N against all N. Blocks appear in the order the names were given — you control the layout — with a heavier boundary line between them. |
 | `-r/--range` + `-r2/--range2` | **asymmetric** | A different region per axis, at bin level. This is the only way to get a rectangular image. |
 
 `--genomes` and `--contigs` are mutually exclusive: both put their names on
 *both* axes, so combining them would have no single meaning. `--contigs` takes
 bare names — a coordinate range is `-r`'s job.
+
+`--filter` belongs to the symmetric side: it narrows whichever list you gave
+(or the whole file), keeps the file's order, and is rejected alongside
+`-r/-r2` for the same reason `--genomes` is.
 
 !!! note "There is no `--genome` (singular)"
     It was removed: `--genomes MAG_01` with one name is exactly the same thing,

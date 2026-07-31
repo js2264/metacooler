@@ -46,6 +46,60 @@ def parse_comma_list(ctx, param, value):
     return parsed
 
 
+def parse_filter_list(ctx, param, value):
+    """Validate every ``--filter`` expression, passing the raw strings through.
+
+    Deliberately *not* comma-split like :func:`parse_comma_list`: a filter
+    value is free text (a regex, a genome name) and may legitimately contain a
+    comma.  Repeat the option to AND several comparisons.
+
+    Parsing here rather than in the io/ops layer means a typo is reported
+    before the file is opened, and reported against the option that caused it.
+
+    Args:
+        ctx: Click context (unused, part of the callback signature).
+        param: The Click ``Parameter`` being converted.
+        value: Tuple of raw strings from a ``multiple=True`` option.
+
+    Returns:
+        The expressions as a list, unchanged.  ``[]`` when the option was not
+        given.
+
+    Raises:
+        click.BadParameter: If any expression does not parse.
+    """
+    from metacooler.filters import FilterError, parse_filter
+
+    exprs = [v for v in (value or ())]
+    for expr in exprs:
+        try:
+            parse_filter(expr)
+        except FilterError as exc:
+            raise click.BadParameter(str(exc)) from exc
+    return exprs
+
+
+def filter_option(f):
+    """Attach the standard repeatable ``--filter`` option to a command."""
+    return click.option(
+        "--filter",
+        "filters",
+        type=str,
+        multiple=True,
+        callback=parse_filter_list,
+        metavar="EXPR",
+        help=(
+            "Keep only rows matching [cyan]<table>.<column> <op> <value>[/cyan], "
+            "where [cyan]<table>[/cyan] is [yellow]genomes[/yellow] or "
+            "[yellow]contigs[/yellow] — e.g. "
+            "[cyan]--filter 'genomes.length > 1Mb'[/cyan]. Operators: "
+            "[cyan]> >= < <= == != =~ !~[/cyan] ([cyan]=~[/cyan] is a regex "
+            "match). Numbers accept [cyan]bp/kb/Mb/Gb[/cyan] suffixes. Repeat "
+            "the option to require several conditions at once."
+        ),
+    )(f)
+
+
 def check_output(path: str | Path | None, force: bool = False) -> None:
     """Refuse to overwrite an existing output file unless ``--force`` was given.
 

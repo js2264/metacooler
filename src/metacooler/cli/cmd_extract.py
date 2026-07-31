@@ -8,6 +8,7 @@ import rich_click as click
 
 from metacooler.cli._options import (
     check_output,
+    filter_option,
     parse_comma_list,
     quiet_option,
     verbose_option,
@@ -21,8 +22,10 @@ from metacooler.cli.main import MetaCoolURI, cli
     Extract a standard cool file for specific genome(s)/contig(s). Genome
     and contig selection can be combined: the output will include
     all contigs from selected genomes plus any directly selected contigs.
+    [cyan]--filter[/cyan] then narrows that selection (or the whole file, when
+    no name is given), e.g. [cyan]--filter 'genomes.length > 1Mb'[/cyan].
     By default, a single merged cool file is written. With --split, one cool
-    file per genome is created. 
+    file per genome is created.
     """,
 )
 @click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
@@ -47,6 +50,7 @@ from metacooler.cli.main import MetaCoolURI, cli
     callback=parse_comma_list,
     help="Contig name(s) to extract (comma-separated or repeated).",
 )
+@filter_option
 @click.option(
     "--split",
     is_flag=True,
@@ -64,6 +68,7 @@ def cmd_extract(
     metacool_path: Path,
     genomes: list[str],
     contigs: list[str],
+    filters: list[str],
     output: Path,
     split: bool,
     force: bool,
@@ -87,8 +92,10 @@ def cmd_extract(
         check_output(output, force)
 
     genome_list = list(genomes)
-    if not genome_list and not contigs:
-        raise click.UsageError("At least one of --genomes or --contigs is required.")
+    if not genome_list and not contigs and not filters:
+        raise click.UsageError(
+            "At least one of --genomes, --contigs or --filter is required."
+        )
     if split and contigs:
         raise click.UsageError(
             "--contigs cannot be combined with --split (split is genome-only)."
@@ -98,6 +105,7 @@ def cmd_extract(
         uri=metacool_path,
         genomes=genome_list or None,
         contigs=list(contigs) or None,
+        filters=list(filters) or None,
         output=output,
         split=split,
         force=force,

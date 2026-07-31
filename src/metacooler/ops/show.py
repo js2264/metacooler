@@ -265,7 +265,10 @@ def _validate_names(names: Sequence[str], known: Sequence[str], noun: str) -> li
 
 
 def _resolve_selection(
-    mc: MetaCooler, genomes: Sequence[str] | None, contigs: Sequence[str] | None
+    mc: MetaCooler,
+    genomes: Sequence[str] | None,
+    contigs: Sequence[str] | None,
+    filters: Sequence[str] | None = None,
 ) -> _Selection:
     """Validate the axis selection and return it in normalised form.
 
@@ -273,9 +276,12 @@ def _resolve_selection(
         mc: Open MetaCooler instance.
         genomes: The ``--genomes`` values, if given.
         contigs: The ``--contigs`` values, if given.
+        filters: The ``--filter`` expressions, if given.  They narrow whatever
+            the names selected — or the whole file, when no name is given.
 
     Raises:
-        ValueError: If both options are given, or if either fails validation.
+        ValueError: If both name options are given, if either fails
+            validation, or if nothing survives the filters.
     """
     if genomes is not None and contigs is not None:
         raise ValueError(
@@ -284,16 +290,101 @@ def _resolve_selection(
             "Use --range/--range2 for a different selection per axis."
         )
     if genomes is not None:
-        names = _validate_names(
-            [str(g) for g in genomes], mc.genomes["name"].tolist(), "genomes"
+        base = _Selection(
+            "genomes",
+            _validate_names(
+                [str(g) for g in genomes], mc.genomes["name"].tolist(), "genomes"
+            ),
         )
-        return _Selection("genomes", names)
-    if contigs is not None:
-        names = _validate_names(
-            [str(c) for c in contigs], mc.contigs["name"].tolist(), "contigs"
+    elif contigs is not None:
+        base = _Selection(
+            "contigs",
+            _validate_names(
+                [str(c) for c in contigs], mc.contigs["name"].tolist(), "contigs"
+            ),
         )
-        return _Selection("contigs", names)
-    return _Selection("all", [])
+    else:
+        base = _Selection("all", [])
+    return base if not filters else _apply_filters(mc, base, filters)
+
+
+def _apply_filters(
+    mc: MetaCooler, base: _Selection, filters: Sequence[str]
+) -> _Selection:
+    """Narrow *base* by the ``--filter`` predicates, keeping the given order.
+
+    A contig-level filter has no meaning in genome id space (a genome is one
+    row, and half of it cannot be dropped), so any contig filter resolves the
+    selection to ``"contigs"`` — the same upgrade ``--contigs`` already
+    triggers.  A genome-only filter leaves the kind alone.
+
+    Args:
+        mc: Open MetaCooler instance.
+        base: The selection the names produced.
+        filters: Raw ``--filter`` expressions.
+
+    Returns:
+        The narrowed selection, with names in their original order.
+
+    Raises:
+        metacooler.filters.FilterError: If a filter is malformed, names an
+            unknown column, or leaves nothing selected.
+    """
+    from metacooler.filters import (
+        FilterError,
+        explain_empty,
+        filter_mask,
+        parse_filters,
+    )
+    from metacooler.io._utils import contigs_with_genome_names
+
+    parsed = parse_filters(filters)
+    genomes_df = mc.genomes
+    contigs_df = contigs_with_genome_names(mc)
+    kept_genomes = set(
+        genomes_df.loc[filter_mask(genomes_df, parsed, table="genomes"), "name"]
+    )
+    contig_mask = filter_mask(contigs_df, parsed, table="contigs")
+    kept_contig_ids = set(contigs_df.index[contig_mask])
+
+    if base.kind == "contigs" or any(f.table == "contigs" for f in parsed):
+        # Candidate contigs, in the order the caller asked for.
+        if base.kind == "contigs":
+            candidates = [_contig_id(mc, c) for c in base.names]
+        elif base.kind == "genomes":
+            candidates = [cid for g in base.names for cid in _genome_contig_ids(mc, g)]
+        else:
+            candidates = list(contigs_df.index)
+        genome_of = contigs_df["genome_id"].map(genomes_df["name"])
+        names = [
+            str(contigs_df.at[cid, "name"])
+            for cid in candidates
+            if cid in kept_contig_ids and genome_of[cid] in kept_genomes
+        ]
+        kind: Literal["all", "genomes", "contigs"] = "contigs"
+        n_candidates = len(candidates)
+    else:
+        candidates_g = (
+            base.names if base.kind == "genomes" else genomes_df["name"].tolist()
+        )
+        names = [str(g) for g in candidates_g if g in kept_genomes]
+        kind = "genomes"
+        n_candidates = len(candidates_g)
+
+    logger.info("--filter kept %d of %d %s.", len(names), n_candidates, kind)
+    if not names:
+        raise FilterError(
+            explain_empty(
+                {"genomes": genomes_df, "contigs": contigs_df},
+                parsed,
+                context=(
+                    f"...and nothing named by --{base.kind} survived them."
+                    if base.kind != "all"
+                    else ""
+                ),
+            )
+        )
+    return _Selection(kind, names)
 
 
 def _selection_scope(sel: _Selection) -> str | None:
@@ -636,6 +727,7 @@ def show(
     level: Literal["bin", "contig", "genome"] = "genome",
     genomes: Sequence[str] | None = None,
     contigs: Sequence[str] | None = None,
+    filters: Sequence[str] | None = None,
     range1: str | None = None,
     range2: str | None = None,
     transform: Literal["log1p", "log10", "none"] = "log1p",
@@ -670,6 +762,10 @@ def show(
         level: Resolution level to display.
         genomes: Genome names to put on both axes.
         contigs: Contig names to put on both axes.
+        filters: ``--filter`` expressions (see :mod:`metacooler.filters`) that
+            narrow *genomes*/*contigs* — or the whole file when neither is
+            given.  A ``contigs.*`` filter resolves the axes to contigs, just
+            as *contigs* does.  Cannot be combined with *range1*/*range2*.
         range1: Row-dimension range: genome name, contig name, or
             ``contig:start-end``.  Implies ``level="bin"`` when set.
         range2: Column-dimension range (defaults to *range1* when omitted).
@@ -695,12 +791,12 @@ def show(
         raise ValueError(f"Unknown transform: {transform!r}")
 
     mc = MetaCooler(uri)
-    sel = _resolve_selection(mc, genomes, contigs)
-    if (range1 is not None or range2 is not None) and sel.kind != "all":
+    if (range1 is not None or range2 is not None) and (genomes or contigs or filters):
         raise ValueError(
-            "--range/--range2 cannot be combined with --genomes or --contigs; "
-            "they are two ways of selecting the same axes."
+            "--range/--range2 cannot be combined with --genomes, --contigs or "
+            "--filter; they are two ways of selecting the same axes."
         )
+    sel = _resolve_selection(mc, genomes, contigs, filters)
 
     # A selector that only makes sense at one level upgrades the level rather
     # than being silently dropped. Done here, not in the CLI, so the Python API
@@ -710,8 +806,9 @@ def show(
         level = "bin"
     elif sel.kind == "contigs" and level == "genome":
         logger.info(
-            "--contigs has no meaning at --level genome (a genome is one "
-            "row/column); showing --level contig instead."
+            "%s has no meaning at --level genome (a genome is one row/column, "
+            "and part of it cannot be dropped); showing --level contig instead.",
+            "--contigs" if contigs else "A contigs.* --filter",
         )
         level = "contig"
 

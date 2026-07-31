@@ -34,7 +34,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
     from typing import Literal
 
 
@@ -637,6 +637,118 @@ def _build_contigs_table(
     extra_cols = [c for c in df.columns if c not in core_cols]
     df = df[core_cols + extra_cols]
     return df.astype({k: v for k, v in CONTIGS_DTYPE.items() if k in df.columns})
+
+
+def _apply_create_filters(
+    contig_lengths: dict[str, int],
+    contig_genome_map: dict[str, str],
+    contig_df: pd.DataFrame | None,
+    extra_genomes_df: pd.DataFrame | None,
+    filters: Sequence[str] | None,
+    bins_df: pd.DataFrame | None = None,
+) -> tuple[dict[str, int], pd.DataFrame | None]:
+    """Drop the contigs that fail the ``--filter`` predicates, before binning.
+
+    Filtering here rather than after the fact is the point of supporting it in
+    ``create`` at all: a contig removed now is never tiled into bins and its
+    contacts are never binned, so the sub-kilobase tail of a metagenomic
+    assembly costs nothing instead of dominating the contig count (and with it
+    the per-chunk ``cooler.create`` overhead).
+
+    The ``/genomes`` and ``/contigs`` frames the expressions are evaluated
+    against are built with the very same :func:`_build_genomes_table` /
+    :func:`_build_contigs_table` the output file will use, so a filter written
+    against a ``dump`` of an existing file means exactly the same thing here —
+    including the ``user_`` renames applied to colliding column names and the
+    numeric coercion of text columns.  The one absentee is ``genomes.n_bins``,
+    which does not exist until the bins are tiled; it gets a specific error
+    rather than a bare "unknown column".
+
+    Args:
+        contig_lengths: Mapping of contig name to length, already narrowed by
+            ``drop_unassigned``.
+        contig_genome_map: Mapping of contig name to genome name.
+        contig_df: Optional parsed contig table supplying extra columns.
+        extra_genomes_df: Optional parsed genomes table supplying extra columns.
+        filters: Raw ``--filter`` expressions, or ``None``.
+        bins_df: Optional bins DataFrame (string ``chrom`` names) to narrow in
+            lockstep, so a pre-defined bin table cannot keep bins for a contig
+            that was just dropped.
+
+    Returns:
+        ``(contig_lengths, bins_df)`` with the failing contigs removed.
+
+    Raises:
+        metacooler.filters.FilterError: If a filter is malformed, names a
+            column the tables do not have, or leaves no contig at all.
+    """
+    from metacooler.filters import (
+        FilterError,
+        explain_empty,
+        filter_mask,
+        parse_filters,
+    )
+
+    parsed = parse_filters(filters)
+    if not parsed:
+        return contig_lengths, bins_df
+
+    # Order is irrelevant for a row-wise predicate, so the tables are built
+    # over the contigs as they stand rather than waiting for the canonical
+    # order — which is computed from the *surviving* contigs anyway.
+    order = list(contig_lengths)
+    genomes_df = _build_genomes_table(
+        order, contig_lengths, contig_genome_map, extra_genomes_df
+    )
+    contigs_df = _build_contigs_table(
+        order, contig_lengths, contig_genome_map, genomes_df, contig_df
+    )
+    contigs_df = contigs_df.assign(
+        genome=contigs_df["genome_id"].map(genomes_df["name"])
+    )
+    hints = {
+        "n_bins": (
+            "no bin has been tiled yet, so a genome's bin count is not known "
+            "during 'create'. Filter on genomes.length or genomes.n_contigs "
+            "instead, or filter the finished file with 'extract'"
+        )
+    }
+
+    keep_genomes = set(
+        genomes_df.loc[
+            filter_mask(genomes_df, parsed, table="genomes", hints=hints), "name"
+        ]
+    )
+    keep_contigs = set(
+        contigs_df.loc[
+            filter_mask(contigs_df, parsed, table="contigs", hints=hints)
+            & contigs_df["genome"].isin(keep_genomes),
+            "name",
+        ]
+    )
+
+    n_before, n_genomes_before = len(contig_lengths), len(genomes_df)
+    filtered = {c: ln for c, ln in contig_lengths.items() if c in keep_contigs}
+    if not filtered:
+        raise FilterError(
+            explain_empty(
+                {"genomes": genomes_df, "contigs": contigs_df}, parsed, hints=hints
+            )
+        )
+    n_genomes_after = len({contig_genome_map.get(c, "__unbinned__") for c in filtered})
+    logger.info(
+        "--filter kept %d of %d contig(s) in %d of %d genome(s); the %d dropped "
+        "contig(s) are tiled into no bins, and their contacts are discarded "
+        "while binning (reported in the drop summary below).",
+        len(filtered),
+        n_before,
+        n_genomes_after,
+        n_genomes_before,
+        n_before - len(filtered),
+    )
+    if bins_df is not None:
+        bins_df = bins_df[bins_df["chrom"].isin(filtered)].copy()
+    return filtered, bins_df
 
 
 def _validate_bin_coords(df: pd.DataFrame) -> None:
@@ -1620,6 +1732,7 @@ def from_pairs(
         "genome-then-length", "genome-then-alpha", "fasta", "alpha"
     ] = "genome-then-length",
     drop_unassigned: bool = False,
+    filters: Sequence[str] | None = None,
     binsize: int | None = None,
     genomes_table: str | Path | None = None,
     pairs_kwargs: dict | None = None,
@@ -1646,6 +1759,11 @@ def from_pairs(
         contig_ordering: Canonical ordering strategy.
         drop_unassigned: If ``True``, drop contigs not present in the contig
             table instead of assigning them to ``__unbinned__``.
+        filters: ``--filter`` expressions (see :mod:`metacooler.filters`)
+            applied to the derived ``/genomes`` and ``/contigs`` tables before
+            anything is binned, e.g. ``["contigs.length >= 5kb"]``.  A dropped
+            contig gets no bins, and its pairs are discarded while binning.
+            ``genomes.n_bins`` is not available here.
         binsize: Fixed bin size (used only when *bins* is ``None``).
         genomes_table: Optional path to a genomes metadata TSV **with a header
             row**. The first column must be named ``genome_name``; any additional
@@ -1730,6 +1848,16 @@ def from_pairs(
             f"Dropped {n_before - len(contig_lengths)} unassigned contigs; "
             f"{len(contig_lengths)} remain"
         )
+
+    # --- Apply --filter predicates before anything is tiled or binned ---
+    contig_lengths, bins_df = _apply_create_filters(
+        contig_lengths,
+        cg_map,
+        contig_df,
+        extra_genomes_df,
+        filters,
+        bins_df,
+    )
 
     # --- Build canonical contig order and genome / contig tables ---
     contig_order = _build_contig_order(contig_lengths, cg_map, ordering=contig_ordering)
@@ -1864,6 +1992,7 @@ def from_cool(
     ] = "genome-then-length",
     assembly_name: str | None = None,
     drop_unassigned: bool = False,
+    filters: Sequence[str] | None = None,
     metadata: dict | None = None,
     nproc: int = 1,
     sort_in_memory: bool | None = None,
@@ -1887,6 +2016,11 @@ def from_cool(
         assembly_name: Name for this assembly / metagenome, stored in file attrs.
         drop_unassigned: If ``True``, drop contigs absent from the contig table
             instead of collecting them under ``__unbinned__``.
+        filters: ``--filter`` expressions (see :mod:`metacooler.filters`)
+            applied to the derived ``/genomes`` and ``/contigs`` tables before
+            the bins are remapped.  A dropped contig keeps none of its bins,
+            and every pixel touching one is discarded.  ``genomes.n_bins`` is
+            not available here.
         metadata: Optional metadata dictionary to store in the file attrs.
         nproc: Accepted for backwards compatibility, but currently has **no
             effect**: HDF5 reads must be serialised, so pixel remapping runs in
@@ -1934,6 +2068,7 @@ def from_cool(
 
     # --- Parse contig assignments ---
     contig_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
+    extra_genomes_df = _load_extra_genomes_table(genomes_table)
 
     # --- Filter unassigned contigs ---
     if drop_unassigned:
@@ -1942,6 +2077,11 @@ def from_cool(
             for ct, ln in contig_lengths.items()
             if ct in contig_map and contig_map[ct] != "__unbinned__"
         }
+
+    # --- Apply --filter predicates before the bins are remapped ---
+    contig_lengths, _ = _apply_create_filters(
+        contig_lengths, contig_map, contig_df, extra_genomes_df, filters
+    )
 
     # --- Build contig order ---
     if contig_ordering == "cool":
@@ -1958,7 +2098,6 @@ def from_cool(
         )
 
     # --- Build genome / contig tables ---
-    extra_genomes_df = _load_extra_genomes_table(genomes_table)
     genomes = _build_genomes_table(
         contig_order=contig_order,
         contig_lengths=contig_lengths,

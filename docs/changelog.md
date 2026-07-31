@@ -77,6 +77,25 @@
 
 ### Added
 
+- **`--filter`**, a repeatable predicate selector on `create pairs`,
+  `create cool`, `extract`, `dump`, and `show`, for choosing genomes and contigs
+  by *property* rather than by name: `--filter "genomes.length > 1Mb"`,
+  `--filter "contigs.length >= 10kb"`, `--filter "genomes.Completeness > 90"`.
+  One comparison per flag — `> >= < <= == != =~ !~`, with `bp/kb/Mb/Gb`
+  suffixes on numbers — and repeating the flag ANDs them. The `genomes.` /
+  `contigs.` prefix is mandatory, since both tables have a `length` and a
+  `name`. Any column of either table can be used, including the ones a
+  `--contigs`/`--genomes` metadata table added, plus a derived
+  `contigs.genome` holding the genome name. Names choose the candidates and
+  filters narrow them, so `--genomes MAG_01 --filter "contigs.length > 50kb"`
+  is an intersection, not a union. Because the column names in real MetaTOR
+  tables contain spaces and dashes (`Present Markers`, `GC-content`), the first
+  operator terminates the column name and no quoting or backticking is needed;
+  the cost is that there is no `or`. Selecting nothing is an error that reports
+  what each filter would have kept on its own, and an unknown column suggests
+  the closest one. In `create` the filter runs before anything is tiled, so a
+  dropped contig costs no bin, no pixel, and no `cooler.create` overhead — see
+  [Filtering with `--filter`](cli.md#filter).
 - **`check`**: an integrity report over the existing validators. Prints one line
   per check — `readable`, `format`, `structure`, `dtypes`, `cooler-compat` —
   instead of raising on the first problem, so every failure is visible in one

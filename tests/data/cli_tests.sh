@@ -222,6 +222,7 @@ metacooler dump -t genomes -H -o dump_genomes_force.tsv --force -q assembly_1_re
 metacooler dump -t bins --join assembly_1_rep1_1kb_from_cool.metacool || echo "  (expected: --join only applies to the pixels table)"
 metacooler dump -t genomes --weight count assembly_1_rep1_1kb_from_cool.metacool || echo "  (expected: --weight only applies to the pixels table)"
 metacooler dump -t indexes --genomes MAG_05 assembly_1_rep1_1kb_from_cool.metacool || echo "  (expected: --genomes cannot be used with --table indexes)"
+metacooler dump -t indexes --filter 'contigs.length > 1' assembly_1_rep1_1kb_from_cool.metacool || echo "  (expected: --filter cannot be used with --table indexes)"
 metacooler dump -t all --prefix p_ -o out.tsv assembly_1_rep1_1kb_from_cool.metacool || echo "  (expected: -o cannot be used with --table all)"
 metacooler dump -t bins --prefix p_ assembly_1_rep1_1kb_from_cool.metacool || echo "  (expected: --prefix only applies to --table all)"
 ## An explicitly EMPTY filter is rejected rather than silently disabled (an
@@ -242,6 +243,55 @@ if [ -s dump_head_stderr ]; then
 else
     printf '  OK    dump | head: no error reported\n'
 fi
+
+# ================================================================================
+## --filter
+# ================================================================================
+
+## A --filter at CREATE time and the same --filter at READ time must select the
+## same contigs: the create path evaluates the expression against tables built
+## by the very same builders the output file uses, so the two can only disagree
+## if that stops being true.
+metacooler create pairs -q --contigs ../contigs_table_1.tsv --genomes ../mag_table_1.tsv \
+    --pairs ../contacts_1_rep1.pairs.gz --bins 1000 --filter 'contigs.length >= 30kb' \
+    --output assembly_1_rep1_1kb_filtered.metacool
+metacooler dump -t contigs -H assembly_1_rep1_1kb_filtered.metacool | cut -f1,2 | sort > filter_contigs_at_create.tsv
+metacooler dump -t contigs -H --filter 'contigs.length >= 30kb' assembly_1_rep1_1kb.metacool | cut -f1,2 | sort > filter_contigs_at_read.tsv
+assert_identical "--filter at create == --filter at dump" filter_contigs_at_read.tsv filter_contigs_at_create.tsv
+
+## A filter is a genuine restriction, not a no-op.
+metacooler dump -t contigs -H assembly_1_rep1_1kb.metacool | cut -f1,2 | sort > filter_contigs_unfiltered.tsv
+assert_differs "--filter restricts the contigs table" filter_contigs_unfiltered.tsv filter_contigs_at_read.tsv
+
+## --genomes and --filter INTERSECT: the result must be a proper, non-empty
+## subset of what --genomes alone gives, and must never pull in a contig from
+## another genome (which a union would). MAG_01's contigs are 25 kb, 22 kb and
+## 13 kb, so a 20 kb threshold keeps two of the three while the file as a whole
+## has longer contigs elsewhere.
+metacooler dump -t contigs --genomes MAG_01 assembly_1_rep1_1kb.metacool | cut -f1 | sort > filter_mag01_all.txt
+metacooler dump -t contigs --genomes MAG_01 --filter 'contigs.length >= 20kb' assembly_1_rep1_1kb.metacool | cut -f1 | sort > filter_mag01_long.txt
+foreign="$(comm -13 filter_mag01_all.txt filter_mag01_long.txt)"
+n_all="$(wc -l < filter_mag01_all.txt)"
+n_long="$(wc -l < filter_mag01_long.txt)"
+if [ -n "$foreign" ]; then
+    printf '  FAIL  --genomes + --filter returned contigs outside MAG_01:\n'
+    printf '%s\n' "$foreign" | sed 's/^/        /'
+    FAILURES=$((FAILURES + 1))
+elif [ "$n_long" -eq 0 ] || [ "$n_long" -ge "$n_all" ]; then
+    printf '  FAIL  --genomes + --filter kept %s of %s contigs — not a proper subset, so the intersection is untested\n' "$n_long" "$n_all"
+    FAILURES=$((FAILURES + 1))
+else
+    printf '  OK    --genomes + --filter intersect: %s of MAG_01'"'"'s %s contigs, none foreign\n' "$n_long" "$n_all"
+fi
+
+## extract accepts --filter as a complete selection, with no name given.
+metacooler extract assembly_1_rep1_1kb.metacool --filter 'genomes.length > 100kb' -o filter_extract.cool
+metacooler show assembly_1_rep1_1kb.metacool --filter 'genomes.length > 100kb' -o filter_show.png
+
+## Malformed / impossible filters are errors, not empty output (expected errors).
+metacooler dump -t genomes --filter 'length > 1Mb' assembly_1_rep1_1kb.metacool || echo "  (expected: --filter needs a genomes./contigs. table prefix)"
+metacooler dump -t genomes --filter 'genomes.lenght > 1Mb' assembly_1_rep1_1kb.metacool || echo "  (expected: unknown column, with a suggestion)"
+metacooler dump -t genomes --filter 'genomes.length > 1Gb' assembly_1_rep1_1kb.metacool || echo "  (expected: nothing passed --filter)"
 
 cooler dump -t pixels ../assembly_1_rep1_1kb.cool -r contig_1_000:5000-15000 > dump_pixels_range_cool_original
 metacooler dump -t pixels -r contig_1_000:5000-15000 assembly_1_rep1_1kb_from_cool.metacool > dump_pixels_range_metacool

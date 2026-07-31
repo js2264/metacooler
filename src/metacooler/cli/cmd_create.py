@@ -6,7 +6,12 @@ from pathlib import Path
 
 import rich_click as click
 
-from metacooler.cli._options import force_option, quiet_option, verbose_option
+from metacooler.cli._options import (
+    filter_option,
+    force_option,
+    quiet_option,
+    verbose_option,
+)
 from metacooler.cli.main import cli
 
 _CONTIGS_FORMAT_HELP = """
@@ -22,10 +27,12 @@ def shared_options(f):
     """Apply options shared by all ``create`` subcommands.
 
     Adds: ``-o/--output``, ``--contigs``, ``--contigs-format``, ``--genomes``,
-    ``--metadata``, ``-f/--force``, ``-v/--verbose``, ``-q/--quiet``.
+    ``--filter``, ``--metadata``, ``-f/--force``, ``-v/--verbose``,
+    ``-q/--quiet``.
 
-    The force/verbose/quiet flags come from :mod:`metacooler.cli._options` so
-    they stay identical to every other command in the CLI.
+    The filter/force/verbose/quiet options come from
+    :mod:`metacooler.cli._options` so they stay identical to every other
+    command in the CLI.
     """
     decorators = [
         click.option(
@@ -57,6 +64,7 @@ def shared_options(f):
                 "First column must be 'genome_name'; any further columns are stored in the /genomes table."
             ),
         ),
+        filter_option,
         click.option(
             "--metadata",
             type=click.Path(exists=True, path_type=Path),

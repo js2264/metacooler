@@ -25,6 +25,8 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from metacooler.api import MetaCooler
 
 logger = logging.getLogger("metacooler")
@@ -527,8 +529,8 @@ def _finalize_metacool_file(
 
 def _filter_by_genomes_and_contigs(
     mc: MetaCooler,
-    genomes: list[str] | None = None,
-    contigs: list[str] | None = None,
+    genomes: Sequence[str] | None = None,
+    contigs: Sequence[str] | None = None,
 ) -> set[int]:
     """Return the set of contig IDs matching the genome/contig filters.
 
@@ -570,4 +572,116 @@ def _filter_by_genomes_and_contigs(
             cid = int(all_contigs.loc[all_contigs["name"] == c].index[0])
             selected.add(cid)
 
+    return selected
+
+
+def contigs_with_genome_names(mc: MetaCooler) -> pd.DataFrame:
+    """The ``/contigs`` table with a ``genome`` column holding the genome *name*.
+
+    ``/contigs`` stores only the integer ``genome_id``, but a filter is written
+    against names (``contigs.genome == MAG_01``), and ``create`` evaluates the
+    same expressions before any id exists.  Deriving the column here is what
+    makes the filter language identical on both sides.
+
+    A contig table that already carries its own ``genome`` column keeps it:
+    ``genome`` is not one of ``_CONTIGS_RESERVED_COLUMNS``, so a user column of
+    that name survives creation verbatim, and overwriting it here would filter
+    on something other than what ``dump`` prints.
+
+    Args:
+        mc: Open ``MetaCooler`` instance.
+
+    Returns:
+        The contigs table, with a ``genome`` column.
+    """
+    contigs = mc.contigs
+    if "genome" in contigs.columns:
+        return contigs
+    return contigs.assign(genome=contigs["genome_id"].map(mc.genomes["name"]))
+
+
+def resolve_contig_selection(
+    mc: MetaCooler,
+    *,
+    genomes: Sequence[str] | None = None,
+    contigs: Sequence[str] | None = None,
+    filters: Sequence[str] | None = None,
+) -> set[int] | None:
+    """Resolve name selectors plus ``--filter`` predicates to a set of contig IDs.
+
+    Names choose the candidate set; filters narrow it.  ``--genomes MAG_01
+    --filter 'contigs.length > 50kb'`` is therefore *MAG_01's long contigs*,
+    not "MAG_01, plus every long contig in the file".  With no names given the
+    candidate set is the whole file, so ``--filter`` alone selects from
+    everything.
+
+    Args:
+        mc: Open ``MetaCooler`` instance.
+        genomes: Genome names to include (all their contigs).
+        contigs: Contig names to include directly.
+        filters: Raw ``--filter`` expressions (see :mod:`metacooler.filters`).
+
+    Returns:
+        The selected contig IDs, or ``None`` when no selector was given at all
+        — which callers read as "no filtering, use the whole file".
+
+    Raises:
+        KeyError: If a genome or contig name is not found.
+        metacooler.filters.FilterError: If a filter is malformed or names a
+            column the tables do not have, or if nothing survives it.
+    """
+    from metacooler.filters import (
+        FilterError,
+        explain_empty,
+        filter_mask,
+        parse_filters,
+    )
+
+    parsed = parse_filters(filters)
+    named = bool(genomes) or bool(contigs)
+    if not named and not parsed:
+        return None
+
+    all_contigs = contigs_with_genome_names(mc)
+    if named:
+        selected = _filter_by_genomes_and_contigs(mc, genomes=genomes, contigs=contigs)
+    else:
+        selected = {int(i) for i in all_contigs.index}
+    if not parsed:
+        return selected
+
+    all_genomes = mc.genomes
+    keep_genome_ids = set(
+        all_genomes.index[filter_mask(all_genomes, parsed, table="genomes")]
+    )
+    keep = set(
+        all_contigs.index[
+            filter_mask(all_contigs, parsed, table="contigs")
+            & all_contigs["genome_id"].isin(keep_genome_ids).to_numpy()
+        ]
+    )
+    before = len(selected)
+    selected &= {int(i) for i in keep}
+    logger.info(
+        "--filter kept %d of %d contig(s) (%d of %d genome(s) passed the "
+        "genome-level filters).",
+        len(selected),
+        before,
+        len(keep_genome_ids),
+        len(all_genomes),
+    )
+    if not selected:
+        context = ""
+        if named:
+            context = (
+                f"The {before} contig(s) named by --genomes/--contigs were then "
+                f"intersected with the above, leaving none."
+            )
+        raise FilterError(
+            explain_empty(
+                {"genomes": all_genomes, "contigs": all_contigs},
+                parsed,
+                context=context,
+            )
+        )
     return selected

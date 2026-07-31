@@ -9,6 +9,7 @@ import rich_click as click
 
 from metacooler.cli._options import (
     check_output,
+    filter_option,
     force_option,
     parse_comma_list,
     quiet_option,
@@ -59,6 +60,7 @@ def _given(ctx, name: str) -> bool:
     callback=parse_comma_list,
     help="Filter by contig name(s) (comma-separated or repeated).",
 )
+@filter_option
 @click.option(
     "-H",
     "--header",
@@ -131,6 +133,7 @@ def dump(
     table: str,
     genomes: list[str],
     contigs: list[str],
+    filters: list[str],
     header: bool,
     output: Path | None,
     prefix: str | None,
@@ -164,7 +167,11 @@ def dump(
                     f"it is meaningless with --table {table}."
                 )
     if table == "indexes":
-        for opt, values in (("--genomes", genomes), ("--contigs", contigs)):
+        for opt, values in (
+            ("--genomes", genomes),
+            ("--contigs", contigs),
+            ("--filter", filters),
+        ):
             if values:
                 raise click.UsageError(
                     f"{opt} cannot be used with --table indexes: the indexes "
@@ -190,6 +197,7 @@ def dump(
         ),
         genomes=genomes or None,
         contigs=contigs or None,
+        filters=filters or None,
         range1=range1,
         range2=range2,
         header=header,

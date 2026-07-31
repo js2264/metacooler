@@ -9,6 +9,7 @@ import rich_click as click
 
 from metacooler.cli._options import (
     check_output,
+    filter_option,
     force_option,
     parse_comma_list,
     quiet_option,
@@ -62,6 +63,7 @@ from metacooler.cli.main import MetaCoolURI, cli
         "[cyan]contig[/cyan]."
     ),
 )
+@filter_option
 @click.option(
     "--transform",
     type=click.Choice(["log1p", "log10", "none"]),
@@ -127,6 +129,7 @@ def cmd_show(
     level: str,
     genomes: list[str],
     contigs: list[str],
+    filters: list[str],
     transform: str,
     cmap: str,
     vmax: float | None,
@@ -154,6 +157,7 @@ def cmd_show(
         level=cast(Literal["bin", "contig", "genome"], level),
         genomes=genomes or None,
         contigs=contigs or None,
+        filters=filters or None,
         range1=range1,
         range2=range2,
         transform=cast(Literal["log1p", "log10", "none"], transform),
