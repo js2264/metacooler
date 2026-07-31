@@ -6,6 +6,7 @@ from pathlib import Path
 
 import h5py
 import pytest
+from _cli_output import flat as _flat
 from click.testing import CliRunner
 
 from metacooler.cli.main import cli
@@ -122,9 +123,7 @@ class TestRmCommand:
         target = f"{two_entry_mmetacool}::entries/nonexistent"
         result = runner.invoke(cli, ["rm", "-f", target])
         assert result.exit_code == 2, result.output
-        flat = " ".join(
-            result.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
-        )
+        flat = _flat(result.output)
         assert "Invalid value for 'TARGET'" in flat
         assert "Group '/entries/nonexistent' not found" in flat
         # nothing was removed
@@ -149,8 +148,5 @@ class TestRmCommand:
         """A collection root is not a valid rm target (UsageError, exit 2)."""
         result = runner.invoke(cli, ["rm", "-f", str(two_entry_mmetacool)])
         assert result.exit_code == 2, result.output
-        flat = " ".join(
-            result.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
-        )
-        assert "is an mmetacool collection" in flat
+        assert "is an mmetacool collection" in _flat(result.output)
         assert list_entries(two_entry_mmetacool) == ["entry1", "entry2"]

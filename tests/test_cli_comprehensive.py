@@ -21,6 +21,7 @@ from pathlib import Path
 
 import cooler
 import pytest
+from _cli_output import flat as _flat
 from click.testing import CliRunner
 
 from metacooler.cli.main import cli
@@ -1023,10 +1024,9 @@ class TestStack:
             ],
         )
         assert stacked.exit_code == 2, stacked.output
-        flat = " ".join(
-            stacked.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
+        assert "Number of --names (3) must match number of inputs (2)." in _flat(
+            stacked.output
         )
-        assert "Number of --names (3) must match number of inputs (2)." in flat
         assert not out.exists()
 
     def test_stack_duplicate_names_is_usage_error(
@@ -1046,10 +1046,7 @@ class TestStack:
             ],
         )
         assert stacked.exit_code == 2, stacked.output
-        flat = " ".join(
-            stacked.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split()
-        )
-        assert "duplicate entry names" in flat
+        assert "duplicate entry names" in _flat(stacked.output)
         assert not out.exists()
 
 

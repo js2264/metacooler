@@ -18,6 +18,8 @@ from pathlib import Path
 
 import h5py
 import pytest
+from _cli_output import flat as _flat
+from _cli_output import squash as _squash
 from click.testing import CliRunner
 
 from metacooler.cli.main import cli
@@ -40,26 +42,6 @@ def _run(args: list[str]):
       .output      str  (combined stdout + stderr)
     """
     return _runner.invoke(cli, args, catch_exceptions=True)
-
-
-def _flat(output: str) -> str:
-    """Collapse rich-click's box-drawing/wrapped output to a single line.
-
-    rich-click renders errors inside a Unicode box and hard-wraps at the
-    terminal width, so a message assertion must not depend on where the wrap
-    landed.  This strips the border characters and normalises whitespace.
-    """
-    stripped = output.translate({ord(c): " " for c in "│╭╮╰╯─"})
-    return " ".join(stripped.split())
-
-
-def _squash(output: str) -> str:
-    """Like :func:`_flat` but with *all* whitespace removed.
-
-    rich-click wraps mid-token when a long tmp_path does not fit the line, so
-    assertions that embed a path must ignore whitespace entirely.
-    """
-    return "".join(_flat(output).split())
 
 
 def _make_corrupt_hdf5(path: Path) -> None:
