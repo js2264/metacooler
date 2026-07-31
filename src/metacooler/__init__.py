@@ -37,6 +37,8 @@ __all__ = [
     "is_mmetacooler",
     "validate",
     "validate_mmetacooler",
+    "check",
+    "CheckResult",
     "parse_uri",
     # mmetacool collections
     "create_mmetacool",
@@ -113,6 +115,14 @@ def __getattr__(name: str) -> object:
         from metacooler.schema import validate_mmetacooler as _validate_mmetacooler
 
         return _validate_mmetacooler
+    if name == "check":
+        from metacooler.schema import check as _check
+
+        return _check
+    if name == "CheckResult":
+        from metacooler.schema import CheckResult as _CheckResult
+
+        return _CheckResult
     if name == "is_metacooler":
         from metacooler.schema import is_metacooler as _is_metacooler
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import h5py
 import numpy as np
@@ -58,6 +58,34 @@ CONTIGS_DTYPE = {
     "length": "i4",
     "genome_id": "i4",
 }
+
+# On-disk dtype *kinds* the core columns must have, as ``numpy.dtype.kind``
+# characters.  Deliberately a kind and not an exact dtype: a legitimately
+# written file may hold ``length`` as int32 or int64 (``from_cool`` copies the
+# source width) and ``name`` as fixed-length bytes or a vlen str, and rejecting
+# either would fail files metacooler itself wrote.  What is *not* legitimate is
+# a float bin coordinate or a string offset, which is what this catches.
+CORE_COLUMN_KINDS: dict[str, str] = {
+    "genomes/name": "SOU",
+    "genomes/length": "iu",
+    "genomes/n_contigs": "iu",
+    "genomes/n_bins": "iu",
+    "contigs/name": "SOU",
+    "contigs/length": "iu",
+    "contigs/genome_id": "iu",
+    "bins/chrom": "iu",
+    "bins/start": "iu",
+    "bins/end": "iu",
+    "pixels/bin1_id": "iu",
+    "pixels/bin2_id": "iu",
+    "pixels/count": "iuf",
+    "indexes/chrom_offset": "iu",
+    "indexes/bin1_offset": "iu",
+    "indexes/genome_offset": "iu",
+}
+
+# Pixel rows read per iteration by the ``--deep`` scan.
+DEEP_PIXEL_CHUNK = 1_000_000
 
 
 class MetaCoolerFormatError(ValueError):
@@ -743,6 +771,312 @@ def list_metacoolers(uri: str | Path) -> list[str]:
         ``entries`` group.
     """
     return [f"/entries/{name}" for name in list_entry_names(uri)]
+
+
+# ------------------------------------------------------------------
+# Integrity report
+# ------------------------------------------------------------------
+
+
+class CheckResult(NamedTuple):
+    """One line of a :func:`check` report.
+
+    Attributes:
+        name: Short name of the check (e.g. ``"structure"``).
+        ok: Whether the check passed.
+        detail: What was found — the reason on failure, the evidence on success.
+    """
+
+    name: str
+    ok: bool
+    detail: str
+
+
+def _resolve_node(froot: h5py.File, group_path: str) -> h5py.Group:
+    """Return the group named by a URI group path inside an open file."""
+    key = group_path.lstrip("/")
+    return froot[key] if key else froot
+
+
+def _core_dtype_problems(path: Path, group_path: str) -> list[str]:
+    """Report core columns whose on-disk dtype kind is unusable.
+
+    :func:`validate` checks that the columns exist and that their *values* are
+    consistent, but never looks at their storage type, so a ``bins/start``
+    written as float64 or a ``genome_id`` written as a string passes it and then
+    fails much later, inside cooler or numpy indexing.
+
+    Args:
+        path: Path to the HDF5 file.
+        group_path: URI group path of the map to inspect (``"/"`` for a
+            top-level ``.metacool``).
+
+    Returns:
+        One message per offending column; empty when every core column is
+        stored in an acceptable type.
+    """
+    problems: list[str] = []
+    with h5py.File(path, "r") as froot:
+        node = _resolve_node(froot, group_path)
+        for column, kinds in CORE_COLUMN_KINDS.items():
+            if column not in node:
+                continue  # absence is validate()'s business, not this check's
+            dataset = node[column]
+            if not isinstance(dataset, h5py.Dataset):
+                problems.append(
+                    f"/{column} is a {type(dataset).__name__}, not a table column"
+                )
+                continue
+            if dataset.dtype.kind not in kinds:
+                problems.append(
+                    f"/{column} is {dataset.dtype} (kind {dataset.dtype.kind!r}); "
+                    f"expected one of the kinds {list(kinds)}"
+                )
+    return problems
+
+
+def _deep_pixel_problems(path: Path, group_path: str) -> list[str]:
+    """Scan the *whole* pixel table and report every invariant it breaks.
+
+    :func:`validate` samples three windows of the pixel table because it runs on
+    every ``MetaCooler`` construction; this is the O(nnz) version behind
+    ``check --deep``, and it additionally reconciles ``attrs['sum']`` with the
+    counts actually stored — the one declared total nothing else checks.
+
+    Args:
+        path: Path to the HDF5 file.
+        group_path: URI group path of the map to scan.
+
+    Returns:
+        At most one message per broken invariant, in the order encountered.
+    """
+    problems: list[str] = []
+    with h5py.File(path, "r") as froot:
+        node = _resolve_node(froot, group_path)
+        pixels = node["pixels"]
+        n_bins = _table_length(node["bins"], "bins")
+        n_pixels = _table_length(pixels, "pixels")
+        bin1_offset = np.array(node["indexes"]["bin1_offset"]).astype(np.int64)
+        square = _attr(node, "storage-mode") == "square"
+        integer_counts = np.issubdtype(pixels["count"].dtype, np.integer)
+
+        reported: set[str] = set()
+
+        def once(kind: str, message: str) -> None:
+            """Record the first occurrence of each kind of breakage."""
+            if kind not in reported:
+                reported.add(kind)
+                problems.append(message)
+
+        # Only integer counts are totalled: attrs['sum'] is an integer contact
+        # count, so there is nothing to reconcile a float weight column against.
+        total = 0
+        previous: tuple[int, int] | None = None
+        for lo in range(0, n_pixels, DEEP_PIXEL_CHUNK):
+            hi = min(lo + DEEP_PIXEL_CHUNK, n_pixels)
+            b1 = np.array(pixels["bin1_id"][lo:hi]).astype(np.int64)
+            b2 = np.array(pixels["bin2_id"][lo:hi]).astype(np.int64)
+            if integer_counts:
+                total += int(np.array(pixels["count"][lo:hi]).astype(np.int64).sum())
+
+            if b1.min() < 0 or b2.min() < 0 or b1.max() >= n_bins or b2.max() >= n_bins:
+                once("range", f"pixel bin ids out of range [0, {n_bins})")
+            if not square and np.any(b1 > b2):
+                bad = int(np.argmax(b1 > b2))
+                once(
+                    "triangle",
+                    f"pixels are not upper-triangular (bin1_id <= bin2_id): row "
+                    f"{lo + bad} is ({int(b1[bad])}, {int(b2[bad])})",
+                )
+            # Prepend the last row of the previous chunk so the ordering is
+            # checked *across* chunk boundaries too, not just within them.
+            j1 = np.concatenate(([previous[0]], b1)) if previous else b1
+            j2 = np.concatenate(([previous[1]], b2)) if previous else b2
+            ordered = (j1[:-1] < j1[1:]) | ((j1[:-1] == j1[1:]) & (j2[:-1] <= j2[1:]))
+            if len(j1) > 1 and not np.all(ordered):
+                bad = int(np.argmax(~ordered)) + (0 if previous else 1)
+                once(
+                    "order",
+                    f"pixels are not sorted by (bin1_id, bin2_id) at row {lo + bad}",
+                )
+            owner = np.searchsorted(bin1_offset, np.arange(lo, hi), side="right") - 1
+            if not np.array_equal(owner, b1):
+                bad = int(np.argmax(owner != b1))
+                once(
+                    "index",
+                    f"bin1_offset disagrees with pixels/bin1_id at row {lo + bad}: "
+                    f"the index places it in bin {int(owner[bad])}, the pixel says "
+                    f"{int(b1[bad])}",
+                )
+            if hi > lo:
+                previous = (int(b1[-1]), int(b2[-1]))
+
+        declared = _int_attr(node, "sum") if integer_counts else None
+        if declared is not None and declared != total:
+            problems.append(
+                f"attrs['sum'] ({declared}) != the sum of pixels/count ({total})"
+            )
+    return problems
+
+
+def check(uri: str | Path, deep: bool = False) -> list[CheckResult]:
+    """Check the integrity of a ``.metacool`` or ``.mmetacool`` file.
+
+    This is the reporting front end to the validators: it runs
+    :func:`validate` / :func:`validate_mmetacooler` and turns their
+    all-or-nothing exception into one result row per check, so a caller sees
+    every problem at once instead of only the first.  Two checks go beyond
+    ``validate``, which is deliberately cheap because it runs on every file
+    open: the on-disk dtypes of the core columns, and — under *deep* — a full
+    scan of the pixel table.
+
+    Checks are ordered cheapest first and stop early only when a later one
+    could not be meaningful (an unreadable file, or one that is not a
+    metacooler at all).  A collection is checked entry by entry.
+
+    Args:
+        uri: Path to the file, or a ``file.mmetacool::entries/entry`` URI.  A
+            bare ``.mmetacool`` path checks every entry.
+        deep: Also scan the whole pixel table (O(nnz)) rather than the three
+            sampled windows ``validate`` uses, and reconcile ``attrs['sum']``
+            with the stored counts.
+
+    Returns:
+        The report, one :class:`CheckResult` per check.  The file is sound iff
+        every result has ``ok=True``; the function itself does not raise for a
+        malformed file.
+    """
+    from metacooler.uri import parse_uri
+
+    results: list[CheckResult] = []
+
+    try:
+        path, group_path = parse_uri(str(uri))
+    except ValueError as exc:
+        return [CheckResult("readable", False, str(exc))]
+    if not path.exists():
+        return [CheckResult("readable", False, f"File not found: {path}")]
+    try:
+        with h5py.File(path, "r") as froot:
+            if group_path.lstrip("/") and group_path.lstrip("/") not in froot:
+                return [
+                    CheckResult(
+                        "readable",
+                        False,
+                        f"Group {group_path!r} not found in {path}; top-level keys: "
+                        f"{sorted(froot.keys())[:20]}",
+                    )
+                ]
+    except OSError as exc:
+        return [CheckResult("readable", False, f"Cannot open {path} as HDF5: {exc}")]
+    results.append(CheckResult("readable", True, f"{path} opens as HDF5"))
+
+    # --- what kind of file is this? ---
+    collection = group_path == "/" and is_mmetacooler(path)
+    if collection:
+        entries = list_metacoolers(path)
+        results.append(
+            CheckResult(
+                "format",
+                True,
+                f"{MMETACOOLER_FORMAT} collection with {len(entries)} "
+                f"{'entry' if len(entries) == 1 else 'entries'}",
+            )
+        )
+        targets = [(name.rsplit("/", 1)[-1], name) for name in entries]
+    elif is_metacooler(uri):
+        results.append(CheckResult("format", True, METACOOLER_FORMAT))
+        targets = [("", group_path)]
+    else:
+        import cooler.fileops
+
+        cooler_uri = str(path) if group_path == "/" else f"{path}::{group_path}"
+        extra = (
+            " It is a plain cooler file: convert it with `metacooler create cool`."
+            if cooler.fileops.is_cooler(cooler_uri)
+            else ""
+        )
+        results.append(
+            CheckResult(
+                "format",
+                False,
+                f"Not a metacool or mmetacool file: no {METACOOLER_FORMAT!r} "
+                f"metacooler-format attribute with the expected groups.{extra}",
+            )
+        )
+        return results
+
+    # --- structure: the existing validators, reported instead of raised ---
+    def _structure() -> str:
+        if collection:
+            validate_mmetacooler(path)
+            return f"every entry conforms to {METACOOLER_FORMAT}"
+        validate(uri)
+        return "required groups, columns, indexes and counts are consistent"
+
+    try:
+        results.append(CheckResult("structure", True, _structure()))
+    except (MetaCoolerFormatError, OSError, KeyError) as exc:
+        results.append(CheckResult("structure", False, str(exc)))
+
+    # --- per-map checks ---
+    import cooler
+
+    for label, target_group in targets:
+        suffix = f" [{label}]" if label else ""
+        problems = _core_dtype_problems(path, target_group)
+        results.append(
+            CheckResult(
+                f"dtypes{suffix}",
+                not problems,
+                "; ".join(problems)
+                if problems
+                else f"{len(CORE_COLUMN_KINDS)} core columns are stored in usable types",
+            )
+        )
+
+        target_uri = str(path) if target_group == "/" else f"{path}::{target_group}"
+        try:
+            clr = cooler.Cooler(target_uri)
+            n_bins, _ = clr.shape
+            results.append(
+                CheckResult(
+                    f"cooler-compat{suffix}",
+                    True,
+                    f"cooler.Cooler() opens it: {len(clr.chromnames)} chroms "
+                    f"(= contigs), {n_bins} bins, {clr.info.get('nnz')} pixels",
+                )
+            )
+        except Exception as exc:
+            # Deliberately broad: *any* way in which cooler fails to open the
+            # file breaks the dual-identity invariant, and the point of this
+            # check is to report that rather than propagate it.
+            results.append(
+                CheckResult(
+                    f"cooler-compat{suffix}",
+                    False,
+                    f"cooler.Cooler() cannot open it — the central metacooler "
+                    f"invariant is broken: {type(exc).__name__}: {exc}",
+                )
+            )
+
+        if deep:
+            try:
+                problems = _deep_pixel_problems(path, target_group)
+            except (OSError, KeyError, ValueError, MetaCoolerFormatError) as exc:
+                problems = [f"the pixel scan could not complete: {exc}"]
+            results.append(
+                CheckResult(
+                    f"pixels{suffix}",
+                    not problems,
+                    "; ".join(problems)
+                    if problems
+                    else "every pixel is in range, upper-triangular, sorted, "
+                    "indexed by bin1_offset, and summed by attrs['sum']",
+                )
+            )
+
+    return results
 
 
 def read_table(uri: str | Path, group: str) -> pd.DataFrame:

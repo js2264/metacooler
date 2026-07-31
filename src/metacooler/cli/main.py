@@ -202,7 +202,7 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Inspect",
-            "commands": ["info", "tree", "metadata", "attrs"],
+            "commands": ["info", "tree", "metadata", "attrs", "check"],
         },
         {
             "name": "Manage collections",
@@ -232,6 +232,7 @@ from metacooler.cli import (  # noqa: E402, F401
     cmd_aggregate,
     cmd_attrs,
     cmd_binnify,
+    cmd_check,
     cmd_cp,
     cmd_create,
     cmd_create_cool,

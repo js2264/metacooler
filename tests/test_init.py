@@ -77,6 +77,8 @@ class TestInit:
             "is_mmetacooler",
             "validate",
             "validate_mmetacooler",
+            "check",
+            "CheckResult",
             "parse_uri",
             # mmetacool collections
             "create_mmetacool",

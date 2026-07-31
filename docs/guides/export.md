@@ -162,6 +162,19 @@ A dense-matrix size guard applies at every level, including `--level bin` and
 range queries: a selection too large to materialise is refused with an error
 instead of attempting the allocation.
 
+## Checking a file (`check`)
+
+`check` reports on the integrity of a file instead of raising on the first
+problem, printing one line per check and exiting non-zero if any failed:
+
+```bash
+metacooler check sample.metacool          # readable/format/structure/dtypes/cooler-compat
+metacooler check --deep sample.metacool   # + a full O(nnz) pixel scan
+metacooler check reps.mmetacool           # every entry in a collection
+```
+
+See the [`check` reference](../cli.md#check) for what each check establishes.
+
 ## Python API for export
 
 Every export operation is also a top-level function — `metacooler.extract`,

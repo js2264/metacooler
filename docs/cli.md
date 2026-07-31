@@ -579,6 +579,50 @@ Specify the group **once**: giving both a URI group and a `GROUP_PATH`
 (`metacooler attrs reps.mmetacool::entries/rep1 /genomes`) is an error. The URI
 group used to be silently discarded, so the lookup hit the file root.
 
+### `check` { #check }
+
+Check the integrity of a `.metacool` file (or of every entry in an
+`.mmetacool`). **API:** `metacooler.check` (`metacooler.schema.check`).
+
+```console
+metacooler check METACOOL_PATH [--deep]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--deep` | off | Also scan the **whole** pixel table instead of the three sampled windows, and reconcile `attrs['sum']` with the stored counts. O(nnz) — slow on large files. |
+| `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+This is the reporting front end to the same validators that run on every file
+open ([`validate` / `validate_mmetacooler`](api/metacooler.md)): instead of raising
+on the first problem it prints one line per check, so every failure is visible in
+one pass. Accepts a bare `.mmetacool` path — the per-map checks then repeat once
+per entry, tagged with the entry name.
+
+| Check | What it establishes |
+|-------|---------------------|
+| `readable` | The path exists, opens as HDF5, and contains the group the URI names. |
+| `format` | It carries `metacooler-format` / `HDF5::MMetaCooler`. A plain `.cool` is reported as such, with the `create cool` hint. |
+| `structure` | `validate()`: required groups and columns, offset lengths, pixel sort order, `genome_id` range, and every declared count against the tables. |
+| `dtypes` | The 16 core columns are stored in a usable dtype **kind**. `validate` casts on read, so a `bins/start` written as float64 or a `genome_id` written as a string passes it and fails much later inside cooler. |
+| `cooler-compat` | `cooler.Cooler()` opens the file — the central metacooler invariant that a `.metacool` is always also a cooler. |
+| `pixels` (`--deep`) | Every pixel, not a sample: in range, upper-triangular, sorted by `(bin1_id, bin2_id)` across chunk boundaries, in the `bin1_offset` slot that claims it, and summing to `attrs['sum']`. |
+
+Exits `0` when everything passed, `1` otherwise, listing the checks that failed.
+
+```bash
+metacooler check gut_T0.metacool
+# ✓ readable: gut_T0.metacool opens as HDF5
+# ✓ format: HDF5::MetaCooler
+# ✓ structure: required groups, columns, indexes and counts are consistent
+# ✓ dtypes: 16 core columns are stored in usable types
+# ✓ cooler-compat: cooler.Cooler() opens it: 44 chroms (= contigs), 661 bins, 36249 pixels
+# gut_T0.metacool: OK (5 checks passed)
+
+metacooler check --deep gut_T0.metacool        # + a full pixel scan
+metacooler check gut_T0.mmetacool              # every entry in a collection
+```
+
 ---
 
 ## Manage collections

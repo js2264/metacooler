@@ -48,6 +48,33 @@
 
 ### Added
 
+- **`check`**: an integrity report over the existing validators. Prints one line
+  per check — `readable`, `format`, `structure`, `dtypes`, `cooler-compat` —
+  instead of raising on the first problem, so every failure is visible in one
+  pass, and repeats the per-map checks for each entry of an `.mmetacool`. Two
+  checks go beyond what runs on every file open: the on-disk dtype *kind* of the
+  16 core columns (`validate` casts on read, so a float64 `bins/start` used to
+  pass it and fail later inside cooler), and, under `--deep`, a full O(nnz) pixel
+  scan that also reconciles `attrs['sum']` with the stored counts. Exposed as
+  `metacooler.check` / `metacooler.CheckResult`.
+- **`show --genomes` accepts any number of genomes**, with one uniform rule:
+  every name goes on both axes, so N names give all N against all N — intra and
+  inter blocks alike — laid out in the order the names were given, with a
+  heavier boundary line between blocks.
+- **`show --contigs`**, the same selector in contig space: bare contig names,
+  comma-separated or repeated, on both axes. It closes the one gap `-r` could
+  not — more than one contig on the same axis — and upgrades `--level genome`
+  (where a contig has no row of its own) to `--level contig`. Mutually
+  exclusive with `--genomes`.
+- **`show` figures are titled and their axes labelled.** The title names the
+  selection and the level (`MAG_01 vs MAG_02 — contig level`), truncating a long
+  genome list to `(+N more)`; axis labels name the selection and its size
+  (`MAG_01 (12 contigs)`).
+- **`show --level bin` ticks the axes in base pairs**, not bin indices. A bin
+  index starts at 0 even when the selection does not, so `-r contig:20000-50000`
+  used to read as though it began at the start of the contig. A selection
+  spanning several contigs has no single coordinate system, so there the ticks
+  name the contigs, one at the first bin of each.
 - `-q/--quiet` on every command: suppresses INFO logging, keeps warnings and
   errors.
 - `-f/--force` on `dump`, `network`, and `show`, which previously clobbered
