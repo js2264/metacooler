@@ -69,7 +69,7 @@ def _preferred_sequence(
     Args:
         start: Starting value of the progression.
         stop: Inclusive upper bound; returned values never exceed it.
-        style: ``"nice"`` for 1-2-5 × 10^k steps, ``"binary"`` for ×2 steps.
+        style: ``"nice"`` for 1-2-5 x 10^k steps, ``"binary"`` for x2 steps.
 
     Returns:
         The list of progression values in ascending order.
@@ -105,7 +105,7 @@ def _parse_resolutions(rstring: str, base_binsize: int, maxres: int) -> list[int
     - a plain integer is used verbatim (``5000``);
     - ``<n>N`` / bare ``N`` gives a "nice" 1-2-5 progression from ``<n>``
       (or from *base_binsize* for bare ``N``) up to *maxres*;
-    - ``<n>B`` / bare ``B`` gives a binary (×2) progression;
+    - ``<n>B`` / bare ``B`` gives a binary (x2) progression;
     - ``4DN`` is an alias for ``1000,2000,5000N``.
 
     Tokens are comma-separated and case-insensitive (``1000,2000,5000N``).

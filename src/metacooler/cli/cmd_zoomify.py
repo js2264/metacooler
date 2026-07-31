@@ -37,12 +37,9 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=str,
     default=None,
     help=(
-        "Resolution ladder, in cooler's own [b]ladder-token[/b] grammar — "
-        "deliberately [i]not[/i] the plain comma-separated list used by "
-        "--genomes/--contigs elsewhere in this CLI. Accepts an explicit list "
-        "('1000,2000,5000'), or a single generator token: '1000N' (nice 1-2-5 "
-        "progression from 1000), '1000B' (binary x2 progression from 1000), or "
-        "'4DN' (the 4DN standard ladder). Every requested resolution must be a "
+        "Resolution ladder. Accepts an explicit list "
+        "('--resolutions 1000,2000,5000'), or a single generator token: "
+        "'1000B' (binary x2 progression from 1000). Every requested resolution must be a "
         "multiple of the base bin size. Takes precedence over --levels."
     ),
 )
