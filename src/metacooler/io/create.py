@@ -885,24 +885,42 @@ def _tile_bins(
     if binsize <= 0:
         raise ValueError(f"binsize must be a positive integer, got {binsize!r}.")
     i32_max = int(np.iinfo(np.int32).max)
-    parts = []
-    for contig in contig_order:
-        cid = contig_name_to_id[contig]
-        length = int(contig_lengths[contig])
-        # Build in int64 and range-check *before* narrowing: an int32 ``arange``
-        # silently wraps to negative starts on a contig longer than ~2.1 Gbp,
-        # and schema.validate() does not catch negative bin coordinates.
-        if length > i32_max:
-            raise ValueError(
-                f"Contig {contig!r} is {length} bp, which exceeds the int32 bin "
-                f"coordinate range ({i32_max} bp); contigs larger than ~2.1 Gbp "
-                "are not supported."
-            )
-        starts = np.arange(0, length, binsize, dtype=np.int64)
-        ends = np.minimum(starts + binsize, length)
-        parts.append(pd.DataFrame({"chrom": cid, "start": starts, "end": ends}))
-    df = pd.concat(parts, ignore_index=True)
-    return df.astype({"chrom": np.int32, "start": np.int32, "end": np.int32})
+    n = len(contig_order)
+    # Tiled with three np.repeat calls rather than one DataFrame per contig plus
+    # a final concat: the per-contig form costs ~200 us per contig (frame
+    # construction, then a concat over as many blocks), which is invisible on a
+    # genome assembly and becomes many minutes -- and gigabytes of transient
+    # frame objects held at once -- on a metagenome with millions of contigs.
+    ids = np.fromiter(
+        (contig_name_to_id[c] for c in contig_order), dtype=np.int64, count=n
+    )
+    lengths = np.fromiter(
+        (int(contig_lengths[c]) for c in contig_order), dtype=np.int64, count=n
+    )
+    # Build in int64 and range-check *before* narrowing: an int32 ``arange``
+    # silently wraps to negative starts on a contig longer than ~2.1 Gbp, and
+    # schema.validate() does not catch negative bin coordinates.
+    over = np.flatnonzero(lengths > i32_max)
+    if over.size:
+        contig = contig_order[int(over[0])]
+        raise ValueError(
+            f"Contig {contig!r} is {lengths[over[0]]} bp, which exceeds the int32 "
+            f"bin coordinate range ({i32_max} bp); contigs larger than ~2.1 Gbp "
+            "are not supported."
+        )
+    # Ceiling division; clamped so a non-positive length tiles to no bins rather
+    # than to a negative repeat count.
+    n_bins = np.maximum(-(-lengths // binsize), 0)
+    chrom = np.repeat(ids, n_bins)
+    caps = np.repeat(lengths, n_bins)
+    # Index of each bin within its own contig: a global arange minus the global
+    # position at which that contig's run starts.
+    run_starts = np.repeat(np.cumsum(n_bins) - n_bins, n_bins)
+    starts = (np.arange(chrom.size, dtype=np.int64) - run_starts) * binsize
+    ends = np.minimum(starts + binsize, caps)
+    return pd.DataFrame({"chrom": chrom, "start": starts, "end": ends}).astype(
+        {"chrom": np.int32, "start": np.int32, "end": np.int32}
+    )
 
 
 def _scan_pairs_header(path: Path) -> tuple[int, bool]:
