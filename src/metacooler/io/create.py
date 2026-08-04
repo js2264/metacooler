@@ -2076,12 +2076,21 @@ def from_cool(
         else:
             sort_in_memory = True
 
-    # Build contig lengths from bins (use actual contigs in bins, not chroms table)
+    # Build contig lengths from bins (use actual contigs in bins, not chroms table).
+    # One vectorised max per contig, not one materialised sub-frame per contig:
+    # ``clr.bins()[:]`` hands back ``chrom`` as a Categorical, so iterating the
+    # groupby builds a DataFrame per contig (~14 us each, measured) and costs
+    # half a minute on a metagenome before a single pixel has been read.
+    # ``observed=True`` also drops the empty groups a zero-length chrom would
+    # otherwise contribute as a NaN max, which ``int()`` cannot convert.
     chroms = clr.chroms()[:]
     contig_id_to_name = dict(enumerate(chroms["name"]))
+    _max_end = bins.groupby("chrom", observed=True)["end"].max()
     contig_lengths: dict[str, int] = {
-        str(chrom): int(group["end"].max()) for chrom, group in bins.groupby("chrom")
+        str(name): int(end)
+        for name, end in zip(_max_end.index, _max_end.to_numpy(), strict=True)
     }
+    del _max_end
     contig_lengths, _ = _drop_nonpositive_contigs(contig_lengths)
 
     # --- Parse contig assignments ---
