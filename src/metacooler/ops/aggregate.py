@@ -15,13 +15,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import cooler
 import numpy as np
 import pandas as pd
 from scipy import sparse
 
 from metacooler.api import MetaCooler
-from metacooler.io._utils import chrom_codes, to_upper_triangle
+from metacooler.io._utils import chrom_codes, to_upper_triangle, write_cooler
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -181,10 +180,10 @@ def _write_aggregated_cool(
     src_dtype = mc._clr.pixels()[:0][count_col].dtype
     count_dtype = np.int64 if np.issubdtype(src_dtype, np.integer) else np.float64
 
-    cooler.create_cooler(
-        str(output),
-        bins=bins_out,
-        pixels=_aggregate_pixel_stream(
+    write_cooler(
+        output,
+        bins_out,
+        _aggregate_pixel_stream(
             mc, level=level, chunksize=chunksize, count_col=count_col
         ),
         dtypes={"count": count_dtype},

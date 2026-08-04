@@ -24,6 +24,7 @@ from metacooler.io._utils import (
     check_ascii_names,
     check_output_path,
     resolve_count_dtype,
+    write_cooler,
 )
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
@@ -1968,10 +1969,11 @@ def from_pairs(
         ordered = False
     pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
     with _staged_output(uri) as staged:
-        cooler.create_cooler(
-            str(staged),
-            bins=bins_df,
-            pixels=pixel_source,
+        write_cooler(
+            staged,
+            bins_df,
+            pixel_source,
+            binsize=binsize,
             ordered=ordered,
             symmetric_upper=True,
             assembly=assembly_name,
@@ -2182,10 +2184,10 @@ def from_cool(
         ordered = False
     pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
     with _staged_output(output_path) as staged:
-        cooler.create_cooler(
-            str(staged),
-            bins=bins_remapped,
-            pixels=pixel_source,
+        write_cooler(
+            staged,
+            bins_remapped,
+            pixel_source,
             ordered=ordered,
             symmetric_upper=True,
             assembly=assembly_name or "imported",

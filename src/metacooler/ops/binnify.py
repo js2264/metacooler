@@ -579,10 +579,9 @@ def _write_rebinned_metacool(
         assembly_name: Optional assembly name to propagate from source file.
         contig_ordering: Contig ordering string to propagate from source file.
     """
-    import cooler
     import h5py
 
-    from metacooler.io._utils import _finalize_metacool_file
+    from metacooler.io._utils import _finalize_metacool_file, write_cooler
     from metacooler.schema import validate
 
     # Pre-compute index offsets from the bins DataFrame
@@ -612,10 +611,11 @@ def _write_rebinned_metacool(
     # globally ordered, so ordered=False (cooler's merge pass sums duplicate bin
     # pairs across chunks). int64/float64 counts so a coarse bin pair summing
     # >2**31 source contacts is not saturated by cooler's default int32.
-    cooler.create_cooler(
-        str(output),
-        bins=bins,
-        pixels=pixels,
+    write_cooler(
+        output,
+        bins,
+        pixels,
+        binsize=binsize,
         dtypes={"count": count_dtype},
         ordered=False,
         symmetric_upper=True,

@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import cooler
 import numpy as np
 
-from metacooler.io._utils import enforce_upper_triangle, resolve_count_dtype
+from metacooler.io._utils import (
+    enforce_upper_triangle,
+    resolve_count_dtype,
+    write_cooler,
+)
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 logger = logging.getLogger("metacooler")
@@ -72,10 +75,10 @@ def flatten(
         len(bins),
     )
 
-    cooler.create_cooler(
-        str(output),
-        bins=bins,
-        pixels=_pixel_stream(),
+    write_cooler(
+        output,
+        bins,
+        _pixel_stream(),
         ordered=True,
         symmetric_upper=True,
         dtypes={"count": count_dtype},

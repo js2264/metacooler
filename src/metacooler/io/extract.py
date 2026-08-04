@@ -15,6 +15,7 @@ from metacooler.io._utils import (
     enforce_upper_triangle,
     resolve_contig_selection,
     resolve_count_dtype,
+    write_cooler,
 )
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
@@ -180,10 +181,10 @@ def _extract_contig_ids(
                 "count": pd.Series(dtype=count_dtype),
             }
         )
-        cooler.create_cooler(
-            str(output),
-            bins=bins_df,
-            pixels=empty_pixels,
+        write_cooler(
+            output,
+            bins_df,
+            empty_pixels,
             ordered=True,
             symmetric_upper=True,
             assembly=assembly,
@@ -196,10 +197,10 @@ def _extract_contig_ids(
             yield first_chunk
             yield from pixel_stream
 
-        cooler.create_cooler(
-            str(output),
-            bins=bins_df,
-            pixels=_all_chunks(),
+        write_cooler(
+            output,
+            bins_df,
+            _all_chunks(),
             ordered=False,
             symmetric_upper=True,
             assembly=assembly,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import logging
 import re
@@ -25,7 +26,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from metacooler.api import MetaCooler
 
@@ -395,6 +396,147 @@ def check_ascii_names(genomes: pd.DataFrame, contigs: pd.DataFrame) -> None:
             "Refusing to write a metacool file that cooler could not open — "
             "these names are not ASCII:\n" + format_ascii_violations(violations)
         )
+
+
+def infer_binsize(bins: pd.DataFrame) -> int | None:
+    """Infer a uniform bin width, or ``None`` if the bins are not uniform.
+
+    Reproduces ``cooler.util.get_binsize`` -- the width shared by every bin
+    except the last of each contig, or ``None`` when more than one width is in
+    play -- without its per-contig ``groupby`` loop, which costs ~50 us per
+    contig (measured) and so minutes on a metagenome.
+
+    Assumes each contig's rows are contiguous, which holds for every bins table
+    metacooler hands to cooler (they are sorted by ``chrom`` then ``start``).
+
+    Args:
+        bins: Bins table with ``chrom``, ``start`` and ``end`` columns.
+
+    Returns:
+        The uniform bin width, or ``None``.
+    """
+    chrom = bins["chrom"].to_numpy()
+    n = len(chrom)
+    if n == 0:
+        return None
+    # A contig's last bin is the row before a change of chrom, plus the final row.
+    is_last = np.empty(n, dtype=bool)
+    is_last[:-1] = chrom[1:] != chrom[:-1]
+    is_last[-1] = True
+    widths = (bins["end"].to_numpy() - bins["start"].to_numpy())[~is_last]
+    if widths.size == 0:
+        # Every contig holds a single bin, so no width is ever compared —
+        # the same "no uniform size" answer cooler gives from an empty set.
+        return None
+    first = widths[0]
+    return int(first) if bool((widths == first).all()) else None
+
+
+@contextlib.contextmanager
+def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
+    """Neutralise two ``cooler.create`` costs that scale with *contig* count.
+
+    Both are invisible on a genome assembly and dominate everything else on a
+    metagenome, and neither is reachable through ``create_cooler``'s signature:
+
+    - ``write_bins`` types ``/bins/chrom`` as an HDF5 enum with one member per
+      contig.  ``H5Tenum_insert`` rescans every member already inserted, so the
+      build is quadratic: 2.3 s at 32 k contigs, extrapolating to **~2 h at
+      1.9 M** (measured, x3.8 per doubling).  Worse, it is doomed -- past
+      ~4 k contigs the enum header exceeds HDF5's object-header limit, the
+      ``create_dataset`` raises ``ValueError``, and cooler silently retries as
+      a plain int.  The whole cost buys nothing, and
+      :func:`_finalize_metacool_file` rewrites that dataset as ``int32``
+      regardless.
+    - ``get_binsize`` re-derives the bin width with a per-contig ``groupby``
+      loop over a table metacooler tiled itself and already knows the width of.
+      It does not short-circuit on a uniform grid, so it runs to completion:
+      ~1.6 min at 1.9 M contigs.
+
+    Patching a dependency's module globals is not free of risk, so this only
+    installs shims it can find, and restores them unconditionally.  Neither
+    changes a byte of the output file.
+
+    Args:
+        binsize: The bin width to hand back in place of cooler's inference,
+            typically from :func:`infer_binsize`.  ``None`` means non-uniform,
+            which is what cooler would have concluded.
+
+    Yields:
+        ``None``, with the shims installed for the duration of the block.
+    """
+    from cooler.create import _create as cooler_create
+
+    original_write_bins = getattr(cooler_create, "write_bins", None)
+    original_get_binsize = getattr(cooler_create, "get_binsize", None)
+    if original_write_bins is None or original_get_binsize is None:
+        # A cooler that has moved these on: leave it alone and pay the cost.
+        logger.debug("cooler.create internals not as expected; shims not installed")
+        yield
+        return
+
+    # Signatures mirror cooler's exactly: these are installed as its own module
+    # globals, and everything calling them is cooler's code, not ours.
+    def write_bins_without_enum(
+        grp: h5py.Group,
+        bins: pd.DataFrame,
+        chromnames: list[str],
+        h5opts: dict,
+        chrom_as_enum: bool = True,
+    ) -> None:
+        original_write_bins(grp, bins, chromnames, h5opts, chrom_as_enum=False)
+
+    def get_binsize_precomputed(bins: pd.DataFrame) -> int | None:
+        return binsize
+
+    # Rebinding another module's function is the whole point here, so the
+    # shadowing ty flags is intentional rather than accidental.
+    cooler_create.write_bins = write_bins_without_enum  # ty:ignore[invalid-assignment]
+    cooler_create.get_binsize = get_binsize_precomputed  # ty:ignore[invalid-assignment]
+    try:
+        yield
+    finally:
+        cooler_create.write_bins = original_write_bins
+        cooler_create.get_binsize = original_get_binsize
+
+
+def write_cooler(
+    path: str | Path,
+    bins: pd.DataFrame,
+    pixels: object,
+    *,
+    binsize: int | None = None,
+    **kwargs: object,
+) -> None:
+    """``cooler.create_cooler`` with :func:`cooler_writer_shims` installed.
+
+    **Every** metacooler writer must go through this rather than calling
+    ``cooler.create_cooler`` directly, because the per-call cost the shims
+    remove is not paid once per file.  With ``ordered=False`` -- which
+    ``binnify``, ``aggregate`` and ``extract`` all use, since their chunks are
+    individually sorted but not globally ordered -- cooler's
+    ``create_from_unordered`` calls ``create()`` once per pixel chunk plus once
+    per merge pass, and each of those calls rebuilds the doomed contig enum and
+    re-derives the bin size from scratch.  At ``binnify``'s default 1 M-pixel
+    chunk that is tens of calls, so a cost of ~2 h per call on a 1.9 M-contig
+    metagenome turns a re-binning run into one that never finishes.
+
+    Args:
+        path: Destination ``.cool``/``.metacool`` path.
+        bins: Bins table, sorted by ``chrom`` then ``start``.
+        pixels: Anything ``cooler.create_cooler`` accepts as *pixels*.
+        binsize: Bin width to record, when the caller means to assert one
+            regardless of what the table looks like (``create`` and ``binnify``
+            do: cooler infers ``None`` as soon as every contig holds a single
+            bin).  Defaults to :func:`infer_binsize` of *bins*, which is what
+            cooler would have concluded.
+        **kwargs: Passed through to ``cooler.create_cooler`` untouched.
+    """
+    import cooler
+
+    resolved = binsize if binsize is not None else infer_binsize(bins)
+    with cooler_writer_shims(resolved):
+        cooler.create_cooler(str(path), bins=bins, pixels=pixels, **kwargs)
 
 
 def _finalize_metacool_file(

@@ -251,6 +251,104 @@ class TestTileBins:
         assert df["end"].tolist() == [100, 200, 250, 100]
 
 
+def _tile(specs: dict[int, int], binsize: int) -> pd.DataFrame:
+    """Tile ``{contig_id: length}`` into a bins table, last bin of each clamped."""
+    rows = [
+        (cid, start, min(start + binsize, length))
+        for cid, length in specs.items()
+        for start in range(0, length, binsize)
+    ]
+    return pd.DataFrame(rows, columns=["chrom", "start", "end"])
+
+
+def _bins_case(case: str) -> pd.DataFrame:
+    match case:
+        case "uniform, short last bins":
+            return _tile({0: 250, 1: 300}, 100)
+        case "uniform, exact multiples":
+            return _tile({0: 300, 1: 200}, 100)
+        case "every contig a single bin":
+            return _tile({0: 80, 1: 90}, 100)
+        case "single contig":
+            return _tile({0: 250}, 100)
+        case "two different widths":
+            return pd.DataFrame(
+                {
+                    "chrom": [0, 0, 1, 1],
+                    "start": [0, 100, 0, 50],
+                    "end": [100, 150, 50, 90],
+                }
+            )
+        case "zero-width bins":
+            return pd.DataFrame(
+                {"chrom": [0, 0, 0], "start": [0, 0, 0], "end": [0, 0, 0]}
+            )
+        case "empty":
+            return pd.DataFrame({"chrom": [], "start": [], "end": []}, dtype="int64")
+    raise AssertionError(f"unknown case {case!r}")
+
+
+class TestInferBinsize:
+    """infer_binsize must agree with cooler.util.get_binsize, case for case.
+
+    metacooler substitutes its answer for cooler's during ``create``
+    (see ``cooler_writer_shims``), and on the ``--bins`` path that value is what
+    lands in the file's ``bin-size`` / ``bin-type`` attributes unedited.
+    """
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "uniform, short last bins",
+            "uniform, exact multiples",
+            "every contig a single bin",
+            "single contig",
+            "two different widths",
+            "zero-width bins",
+            "empty",
+        ],
+    )
+    def test_matches_cooler(self, case):
+        from cooler.util import get_binsize
+
+        from metacooler.io._utils import infer_binsize
+
+        frame = _bins_case(case)
+        expected = get_binsize(frame)
+        got = infer_binsize(frame)
+        assert got == expected, f"{case}: {got!r} != cooler's {expected!r}"
+
+
+class TestCoolerWriterShims:
+    def test_restores_cooler_globals(self):
+        from cooler.create import _create as cooler_create
+
+        from metacooler.io._utils import cooler_writer_shims
+
+        before = (cooler_create.write_bins, cooler_create.get_binsize)
+        with cooler_writer_shims(1000):
+            assert cooler_create.write_bins is not before[0]
+            assert cooler_create.get_binsize(None) == 1000
+        assert (cooler_create.write_bins, cooler_create.get_binsize) == before
+
+    def test_restores_after_exception(self):
+        from cooler.create import _create as cooler_create
+
+        from metacooler.io._utils import cooler_writer_shims
+
+        before = (cooler_create.write_bins, cooler_create.get_binsize)
+        with pytest.raises(RuntimeError), cooler_writer_shims(None):
+            raise RuntimeError("boom")
+        assert (cooler_create.write_bins, cooler_create.get_binsize) == before
+
+    def test_bins_chrom_is_plain_int32(self, tiny_metacooler):
+        """The suppressed enum is the one _finalize_metacool_file strips anyway."""
+        with h5py.File(tiny_metacooler, "r") as f:
+            dset = f["bins"]["chrom"]
+            assert dset.dtype == "int32"
+            assert h5py.check_enum_dtype(dset.dtype) is None
+
+
 class TestBuildContigsTableExtra:
     """Tests for _build_contigs_table with extra columns."""
 
