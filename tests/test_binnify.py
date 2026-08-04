@@ -125,3 +125,83 @@ class TestBinnify:
 
         validate(out)  # raises if the schema is violated
         assert cooler.fileops.is_cooler(str(out))  # still openable by cooler
+
+
+class TestMapOldBinsPerContig:
+    """The vectorised bin mapper must agree with the per-contig loop it replaced.
+
+    That loop rebuilt an ``old_chrom == cid`` mask per contig, making the whole
+    function O(n_contigs x n_bins) -- unrunnable past a few tens of thousands of
+    contigs. These cases pin the behaviour the rewrite has to preserve.
+    """
+
+    @staticmethod
+    def _reference(old_bins, bin_chrom_codes, n_contigs, new_bins):
+        """The original per-contig implementation, kept as the oracle."""
+        import numpy as np
+
+        old_midpoints = (old_bins["start"].values + old_bins["end"].values) / 2
+        lookup = {}
+        for cid, grp in new_bins.groupby("chrom", sort=False):
+            lookup[int(cid)] = (
+                grp["start"].values.astype(np.int64),
+                grp.index.values.astype(np.int64),
+            )
+        out = np.full(len(old_bins), -1, dtype=np.int64)
+        for cid in range(n_contigs):
+            mask = bin_chrom_codes == cid
+            if not mask.any():
+                continue
+            starts, ids = lookup.get(
+                cid, (np.array([], np.int64), np.array([], np.int64))
+            )
+            if len(starts) == 0:
+                continue
+            idx = np.searchsorted(starts, old_midpoints[mask], side="right") - 1
+            valid = idx >= 0
+            pos = np.where(mask)[0]
+            out[pos[valid]] = ids[idx[valid]]
+        return out
+
+    @pytest.mark.parametrize(
+        ("lengths", "label"),
+        [
+            ([10_000] * 20, "uniform contigs"),
+            ([1, 999, 12_345, 50_000, 7], "ragged contigs"),
+            ([500, 900, 1_500], "contigs shorter than one target bin"),
+            ([0, 4_000, 0, 9_000], "zero-length contigs interleaved"),
+            ([123_456], "single contig"),
+            ([0, 0, 0], "every contig zero-length"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("src", "tgt"), [(1_000, 5_000), (500, 10_000), (1_000, 1_000)]
+    )
+    def test_matches_per_contig_loop(self, lengths, label, src, tgt):
+        import numpy as np
+
+        from metacooler.ops.binnify import _map_old_bins_per_contig, _tile_uniform
+
+        arr = np.asarray(lengths, dtype=np.int64)
+        old_bins = _tile_uniform(arr, src)
+        codes = old_bins["chrom"].values.astype(np.int64)
+        new_bins = _tile_uniform(arr, tgt)
+        expected = self._reference(old_bins, codes, len(arr), new_bins)
+        got = _map_old_bins_per_contig(old_bins, codes, len(arr), new_bins)
+        assert np.array_equal(got, expected), f"{label} {src}->{tgt}"
+
+    def test_midpoint_past_stale_contig_length_clamps_to_last_bin(self):
+        """A bin reaching past /contigs/length must not leak into the next contig."""
+        import numpy as np
+        import pandas as pd
+
+        from metacooler.ops.binnify import _map_old_bins_per_contig, _tile_uniform
+
+        old_bins = pd.DataFrame(
+            {"chrom": [0, 0, 1], "start": [0, 900, 0], "end": [100, 5_000, 10]}
+        )
+        codes = np.array([0, 0, 1], dtype=np.int64)
+        new_bins = _tile_uniform(np.array([200, 50]), 100)
+        got = _map_old_bins_per_contig(old_bins, codes, 2, new_bins)
+        # contig 0 owns new bins 0-1, contig 1 owns new bin 2.
+        assert got.tolist() == [0, 1, 2]

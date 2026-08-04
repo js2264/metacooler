@@ -348,32 +348,51 @@ def _map_old_bins_per_contig(
     The target bin size is guaranteed (by :func:`_check_target_binsize`) to be
     an exact multiple of a fixed source bin size, so every output bin receives
     the same number of source bins.
+
+    One global ``searchsorted``, not one per contig.  The per-contig form also
+    rebuilt an ``old_chrom == cid`` mask on every iteration, which is a full
+    pass over the source bins per contig -- O(n_contigs x n_bins), so a
+    metagenome with millions of contigs never finished.  Both output bins and
+    source bins are already in ``(contig, start)`` order, so folding the contig
+    id into the sort key above every coordinate turns that lexicographic order
+    into plain integer order and the whole mapping becomes one sorted lookup.
     """
-    old_midpoints = (old_bins["start"].values + old_bins["end"].values) / 2
-    new_bin_lookup: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    for cid, grp in new_bins.groupby("chrom", sort=False):
-        new_bin_lookup[int(cid)] = (  # ty:ignore[invalid-argument-type]
-            grp["start"].values.astype(np.int64),
-            grp.index.values.astype(np.int64),
-        )
+    old_chrom = bin_chrom_codes.astype(np.int64)
+    # Integer midpoints: every bin boundary is an integer, so flooring cannot
+    # move a midpoint across one, and it keeps the key arithmetic exact.
+    old_mid = (
+        old_bins["start"].values.astype(np.int64)
+        + old_bins["end"].values.astype(np.int64)
+    ) // 2
+    new_chrom = new_bins["chrom"].values.astype(np.int64)
+    new_start = new_bins["start"].values.astype(np.int64)
+    new_ids = new_bins.index.values.astype(np.int64)
 
     old_to_new = np.full(len(old_bins), -1, dtype=np.int64)
-    for cid in range(n_contigs):
-        old_mask = bin_chrom_codes == cid
-        if not old_mask.any():
-            continue
-        new_starts, new_indices = new_bin_lookup.get(
-            cid, (np.array([], dtype=np.int64), np.array([], dtype=np.int64))
+    if new_start.size == 0 or old_mid.size == 0:
+        return old_to_new
+
+    # Where each contig's run of output bins starts, so a hit that fell short of
+    # its own contig can be told from one inside it.
+    new_count = np.bincount(new_chrom, minlength=n_contigs)
+    new_first = np.concatenate([[0], np.cumsum(new_count)])[:n_contigs]
+
+    scale = int(max(int(new_start.max()), int(old_mid.max()))) + 1
+    idx = (
+        np.searchsorted(
+            new_chrom * scale + new_start,
+            old_chrom * scale + old_mid,
+            side="right",
         )
-        if len(new_starts) == 0:
-            continue
-        mids = old_midpoints[old_mask]
-        # searchsorted is bounded by the contig's own new bins, so a midpoint
-        # past a stale /contigs/length still lands on that contig's last bin.
-        idx = np.searchsorted(new_starts, mids, side="right") - 1
-        valid = idx >= 0
-        positions = np.where(old_mask)[0]
-        old_to_new[positions[valid]] = new_indices[idx[valid]]
+        - 1
+    )
+    # The two exclusions the per-contig loop made: a contig with no output bin
+    # at all, and a midpoint preceding its contig's first bin (which lands the
+    # search in an earlier contig's run, hence below new_first).  A midpoint
+    # past a stale /contigs/length still lands on that contig's last bin,
+    # because the next key belongs to the next contig.
+    ok = (new_count[old_chrom] > 0) & (idx >= new_first[old_chrom])
+    old_to_new[ok] = new_ids[idx[ok]]
     return old_to_new
 
 
