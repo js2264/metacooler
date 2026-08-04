@@ -1915,6 +1915,14 @@ def from_pairs(
     # --- Compute chrom / genome offsets and insert n_bins into genomes_df ---
     chrom_offset, genome_offset = _compute_all_offsets(bins_df, contigs_df, genomes_df)
 
+    # Everything the tables were built from is dead now, and the binning pass
+    # below is the memory-hungry one: `_buffer_pixels` accumulates up to
+    # _SORT_IN_MEMORY_PIXEL_THRESHOLD rows and folds them, which transiently
+    # doubles. Holding these on for its whole duration costs gigabytes on a
+    # metagenome -- `contig_df` alone is the user's text table with one Python
+    # str per cell (~1.5 GiB at 1.9 M contigs x 10 columns, measured).
+    del contig_df, cg_map, extra_genomes_df, contig_lengths
+
     # --- Stream pairs, bin, sort, and write the cooler file ---
     logger.info(f"Starting to create cooler file at {uri}...")
     bin_starts: np.ndarray | None = (
@@ -2144,6 +2152,12 @@ def from_cool(
     # --- Remap bins to new contig IDs; compute offsets ---
     bins_remapped, old_to_new_bin = _remap_bins(bins, contig_order)
     chrom_offset, genome_offset = _compute_all_offsets(bins_remapped, contigs, genomes)
+
+    # Free the sources the tables were derived from before the pixel stream, for
+    # the reason given in from_pairs: the streaming pass is where the memory is
+    # wanted, and none of these is read again.
+    del bins, chroms, contig_id_to_name, contig_df, contig_map, extra_genomes_df
+    del contig_lengths, contig_order
 
     # --- Stream, remap, sort, and write ---
     logger.info(
