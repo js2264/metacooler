@@ -16,6 +16,7 @@ from metacooler.io._utils import (
     resolve_contig_selection,
     resolve_count_dtype,
 )
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 logger = logging.getLogger("metacooler")
 
@@ -138,7 +139,7 @@ def _extract_contig_ids(
     genome_bin_set = set(genome_bin_indices.tolist())
     genome_bin_array = np.array(sorted(genome_bin_set), dtype=np.int64)
     valid_min, valid_max = genome_bin_array[0], genome_bin_array[-1]
-    chunksize = 1_000_000
+    chunksize = DEFAULT_CHUNKSIZE
 
     # Use bin1_offset index to find pixel range for this genome's bins
     with h5py.File(str(mc.store), "r") as _f:

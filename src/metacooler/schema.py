@@ -87,6 +87,16 @@ CORE_COLUMN_KINDS: dict[str, str] = {
 # Pixel rows read per iteration by the ``--deep`` scan.
 DEEP_PIXEL_CHUNK = 1_000_000
 
+# Rows (pixels, or pairs on the ``create`` path) handled per chunk by every
+# streaming operation.  High on purpose: any writer that hands cooler an
+# unordered chunk stream pays a fresh ``cooler.create`` call *per chunk* plus
+# one per merge pass, and that call's cost scales with contig count -- on a
+# metagenome it dominates everything else (see CLAUDE.md).  Chunk count, not
+# chunk size, is what makes a metagenomic run intractable, so the default
+# favours few large chunks.  The cost is peak memory: roughly 24 bytes per
+# buffered pixel, so ~1.2 GB at this size.  Lower it on a memory-capped host.
+DEFAULT_CHUNKSIZE = 50_000_000
+
 # How many offending values to name per column when refusing non-ASCII text.
 _MAX_REPORTED_NON_ASCII = 5
 

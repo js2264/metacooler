@@ -14,6 +14,7 @@ import pandas as pd
 
 from metacooler.io._utils import chrom_codes
 from metacooler.schema import (
+    DEFAULT_CHUNKSIZE,
     read_table,
 )
 from metacooler.schema import (
@@ -455,7 +456,7 @@ class MetaCooler:
         hi = int(all_valid.max()) + 1
 
         chunks = []
-        chunksize = 1_000_000
+        chunksize = DEFAULT_CHUNKSIZE
         n_pix = self.info["nnz"]
         # Use bin1_offset index to find the pixel range for bins [lo, hi)
         with h5py.File(self._store, "r") as f:

@@ -29,6 +29,7 @@ from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
 from metacooler.schema import (
     CONTIGS_DTYPE,
+    DEFAULT_CHUNKSIZE,
     GENOMES_DTYPE,
     validate,
 )
@@ -970,7 +971,7 @@ def _stream_pairs(
     p1: int = 3,
     c2: int = 4,
     p2: int = 5,
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
 ) -> Iterable[pd.DataFrame]:
     """Stream a pairs file in chunks via pyarrow for fast native gzip decoding.
 
@@ -1590,7 +1591,7 @@ def _stream_remapped_pixels(
     old_to_new_bin: np.ndarray,
     nproc: int,
     count_dtype: np.dtype,
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
 ) -> Iterable[pd.DataFrame]:
     """Stream pixels from a cool file with bin-ID remapping and rich progress.
 
@@ -1755,7 +1756,7 @@ def from_pairs(
     genomes_table: str | Path | None = None,
     pairs_kwargs: dict | None = None,
     metadata: dict | None = None,
-    chunksize: int = 50_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
     sort_in_memory: bool | None = None,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.

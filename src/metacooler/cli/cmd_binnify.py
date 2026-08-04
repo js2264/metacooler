@@ -14,6 +14,7 @@ from metacooler.cli._options import (
     verbose_option,
 )
 from metacooler.cli.main import MetaCoolURI, cli
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -48,9 +49,12 @@ if TYPE_CHECKING:
 @click.option(
     "--chunksize",
     type=int,
-    default=1_000_000,
+    default=DEFAULT_CHUNKSIZE,
     show_default=True,
-    help="Number of pixels read per chunk (controls peak memory usage).",
+    help="Number of pixels read and aggregated per chunk. Each chunk is written "
+    "as a temporary cooler at a fixed per-call cost that scales with contig "
+    "count, so smaller chunks cost disproportionately more; the trade-off is "
+    "~24 bytes of peak memory per buffered pixel.",
 )
 @force_option
 @verbose_option

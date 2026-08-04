@@ -10,6 +10,7 @@ import rich_click as click
 from metacooler.cli._options import check_output
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 
 @create.command(
@@ -63,7 +64,7 @@ from metacooler.cli.cmd_create import create, shared_options
 @click.option(
     "--chunksize",
     type=int,
-    default=50_000_000,
+    default=DEFAULT_CHUNKSIZE,
     show_default=True,
     help="Number of pairs to process per chunk. This is chunk granularity, not "
     "read memory (the pyarrow read block is capped separately). Under "

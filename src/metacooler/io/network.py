@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from metacooler.io._utils import check_output_path, chrom_codes
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -90,7 +91,7 @@ def network(
     weight: str = "count",
     out: str | Path | None = None,
     header: bool = False,
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
 ) -> None:
     """Export a network edge list from a metacool file.

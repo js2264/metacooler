@@ -22,6 +22,7 @@ from scipy import sparse
 
 from metacooler.api import MetaCooler
 from metacooler.io._utils import chrom_codes, to_upper_triangle
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -56,7 +57,7 @@ def _level_chroms(mc: MetaCooler, level: Literal["contig", "genome"]) -> pd.Data
 def _aggregate_sparse(
     mc: MetaCooler,
     level: Literal["contig", "genome"] = "contig",
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
 ) -> sparse.csr_matrix:
     """Return the aggregated contact matrix as a sparse CSR matrix.
 
@@ -105,7 +106,7 @@ def _aggregate_sparse(
 def _aggregate_pixel_stream(
     mc: MetaCooler,
     level: Literal["contig", "genome"] = "contig",
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
     count_col: str = "count",
 ) -> Generator[pd.DataFrame, None, None]:
     """Yield aggregated pixel chunks without building a sparse matrix.
@@ -158,7 +159,7 @@ def _write_aggregated_cool(
     output: str | Path,
     level: Literal["contig", "genome"] = "contig",
     count_col: str = "count",
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
 ) -> None:
     """Stream an aggregated ``.cool`` for an already-open MetaCooler.
 
@@ -199,7 +200,7 @@ def aggregate(
     output: str | Path,
     level: Literal["contig", "genome"] = "contig",
     count_col: str = "count",
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
 ) -> None:
     """Aggregate a metacool file to contig or genome level.
 

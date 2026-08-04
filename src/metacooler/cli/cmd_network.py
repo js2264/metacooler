@@ -14,6 +14,7 @@ from metacooler.cli._options import (
     verbose_option,
 )
 from metacooler.cli.main import MetaCoolURI, cli
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 
 @cli.command(name="network", help="Export a network edge list from a metacool file.")
@@ -46,7 +47,7 @@ from metacooler.cli.main import MetaCoolURI, cli
 @click.option(
     "--chunksize",
     type=int,
-    default=1_000_000,
+    default=DEFAULT_CHUNKSIZE,
     show_default=True,
     help="Number of pixels to process per chunk (memory control).",
 )

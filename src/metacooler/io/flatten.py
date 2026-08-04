@@ -9,6 +9,7 @@ import cooler
 import numpy as np
 
 from metacooler.io._utils import enforce_upper_triangle, resolve_count_dtype
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 logger = logging.getLogger("metacooler")
 
@@ -45,7 +46,7 @@ def flatten(
     bins["end"] = bins["end"].astype(np.int32)
 
     # Stream pixels in chunks to avoid loading the full table into memory.
-    chunksize = 1_000_000
+    chunksize = DEFAULT_CHUNKSIZE
     n_pix = mc._clr.info["nnz"]
 
     # Preserve the width of the source ``count`` column: a binnified source

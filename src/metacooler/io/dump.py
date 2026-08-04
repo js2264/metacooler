@@ -15,7 +15,7 @@ from metacooler.io._utils import (
     chrom_codes,
     resolve_contig_selection,
 )
-from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
+from metacooler.schema import DEFAULT_CHUNKSIZE, DENSE_MATRIX_BIN_LIMIT
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -215,7 +215,7 @@ def dump_table(
 
             mat = np.zeros((n_sel, n_sel), dtype=np.float64)
             n_pix = len(mc._clr.pixels())
-            chunksize = 1_000_000
+            chunksize = DEFAULT_CHUNKSIZE
             for lo in range(0, n_pix, chunksize):
                 chunk = mc._clr.pixels()[lo : lo + chunksize]
                 if valid_bin_ids is not None:
@@ -284,7 +284,7 @@ def dump_table(
             try:
                 first_chunk = True
                 n_pix = len(mc._clr.pixels())
-                chunksize = 1_000_000
+                chunksize = DEFAULT_CHUNKSIZE
                 for lo in range(0, n_pix, chunksize):
                     chunk = mc._clr.pixels()[lo : lo + chunksize]
                     if valid_bin_ids is not None:

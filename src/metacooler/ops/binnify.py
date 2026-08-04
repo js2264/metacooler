@@ -15,6 +15,7 @@ from metacooler.io._utils import (
     resolve_count_dtype,
     to_upper_triangle,
 )
+from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -33,7 +34,7 @@ def binnify(
     output: str | Path,
     binsize: int,
     level: Literal["contig", "genome"] = "contig",
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
 ) -> None:
     """Re-bin a metacool file to a new, coarser fixed bin size.
@@ -275,7 +276,7 @@ def _remap_pixel_chunks(
     mc: MetaCooler,
     old_to_new: np.ndarray,
     valid_mask: np.ndarray,
-    chunksize: int = 1_000_000,
+    chunksize: int = DEFAULT_CHUNKSIZE,
     count_dtype: np.dtype = _DEFAULT_COUNT_DTYPE,
 ) -> Generator[pd.DataFrame, None, None]:
     """Stream source pixels, remap their bin ids and aggregate per chunk.
