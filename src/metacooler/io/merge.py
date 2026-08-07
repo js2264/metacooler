@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ import h5py
 import numpy as np
 
 from metacooler._version import __version__
+from metacooler.qc import QC_COLUMN_PREFIX, QC_METADATA_KEY
 from metacooler.schema import (
     COOLER_FORMAT,
     COOLER_FORMAT_URL,
@@ -41,6 +43,12 @@ def _hash_group(f: h5py.File, group: str) -> str:
     h = hashlib.md5(usedforsecurity=False)
     g = f[group]
     for key in sorted(g.keys()):
+        # QC columns describe each input's own contacts, not the assembly they
+        # share, so two libraries of the same metagenome legitimately differ
+        # there. Hashing them would reject exactly the merge this command
+        # exists for — replicates over one assembly.
+        if str(key).startswith(QC_COLUMN_PREFIX):
+            continue
         arr = g[key][:]
         # Variable-length string datasets read back as object arrays of Python
         # strings; encode them to bytes for a stable hash.
@@ -172,10 +180,15 @@ def merge(
 
     # Post-process: add back metacooler-specific groups
     with h5py.File(first, "r") as fsrc, h5py.File(output, "a") as fdst:
-        # Copy genomes
+        # Copy genomes, minus the first input's QC columns: the merged pixel
+        # table is the sum of every input, so counts copied from one of them
+        # would understate it while looking authoritative. Re-run
+        # ``metacooler qc --store`` on the output to get honest ones.
         if "genomes" in fdst:
             del fdst["genomes"]
         fdst.copy(fsrc["genomes"], "genomes")
+        for key in [k for k in fdst["genomes"] if str(k).startswith(QC_COLUMN_PREFIX)]:
+            del fdst["genomes"][key]
 
         # Copy contigs (overwrites the chroms-compatible one)
         if "contigs" in fdst:
@@ -208,5 +221,16 @@ def merge(
         fdst.attrs["generated-by"] = f"metacooler-{__version__}"
         fdst.attrs["ngenomes"] = len(fsrc["genomes"]["name"])
         fdst.attrs["contig-ordering"] = ordering
+
+        # Same reasoning as the QC columns above: whatever block an input
+        # carried describes that input alone.
+        raw = fdst.attrs.get("metadata")
+        if raw is not None:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            meta = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            if QC_METADATA_KEY in meta:
+                del meta[QC_METADATA_KEY]
+                fdst.attrs["metadata"] = json.dumps(meta)
 
     validate(output)

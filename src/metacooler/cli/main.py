@@ -198,11 +198,19 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Extract and view",
-            "commands": ["extract", "flatten", "dump", "network", "aggregate", "show"],
+            "commands": [
+                "extract",
+                "flatten",
+                "dump",
+                "network",
+                "aggregate",
+                "show",
+                "ps",
+            ],
         },
         {
             "name": "Inspect",
-            "commands": ["info", "tree", "metadata", "attrs", "check"],
+            "commands": ["info", "qc", "tree", "metadata", "attrs", "check"],
         },
         {
             "name": "Manage collections",
@@ -246,6 +254,8 @@ from metacooler.cli import (  # noqa: E402, F401
     cmd_metadata,
     cmd_mv,
     cmd_network,
+    cmd_ps,
+    cmd_qc,
     cmd_rm,
     cmd_show,
     cmd_stack,

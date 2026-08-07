@@ -32,6 +32,15 @@ __all__ = [
     "aggregate",
     "network",
     "dump_table",
+    # quality control
+    # Spelled ``contact_qc``, not ``qc``: ``metacooler.qc`` is the tally engine
+    # *module*, and importing it anywhere (``io.create`` does, at import time)
+    # binds that name on the package — which would shadow a lazily-exported
+    # function of the same name, making ``metacooler.qc`` mean different things
+    # depending on what had been imported first.
+    "contact_qc",
+    "contact_probability",
+    "plot_ps",
     # format
     "is_metacooler",
     "is_mmetacooler",
@@ -107,6 +116,18 @@ def __getattr__(name: str) -> object:
         from metacooler.ops.aggregate import aggregate as _aggregate
 
         return _aggregate
+    if name == "contact_qc":
+        from metacooler.ops.qc import qc as _qc
+
+        return _qc
+    if name == "contact_probability":
+        from metacooler.ops.ps import contact_probability as _contact_probability
+
+        return _contact_probability
+    if name == "plot_ps":
+        from metacooler.ops.ps import plot_ps as _plot_ps
+
+        return _plot_ps
     if name == "validate":
         from metacooler.schema import validate as _validate
 

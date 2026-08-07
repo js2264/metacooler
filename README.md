@@ -37,6 +37,8 @@ metacooler info output.metacool
 metacooler dump -t genomes output.metacool
 metacooler aggregate --level genome output.metacool -o genome.cool
 metacooler show output.metacool --level genome -o heatmap.png
+metacooler qc output.metacool --table
+metacooler ps output.metacool --by genome --plot ps.png
 ```
 
 Every command takes its input as a positional path (or an `file.mmetacool::entries/<name>` URI), and shares `-o/--output`, `-f/--force`, `-v/--verbose`, and `-q/--quiet`.
@@ -207,6 +209,8 @@ assembly:
 - **Metacool identity**: `metacooler-format="HDF5::MetaCooler"` attribute + `genomes/` group
 - **Implement genomes table**: `name`, `length`, `n_contigs`, `n_bins`, plus optional metadata columns
 - **Support multi-contigs and multi-genomes visualization**: `show` command at `--level bin/contig/genome`
+- **Report contact quality**: the 3D ratio and its intra-contig / intra-MAG / inter-MAG breakdown, tallied at creation time into `metadata.qc` and per-MAG `/genomes` columns, recomputable with `qc`
+- **Export P(s)**: contact probability vs genomic distance, pooled or per MAG, as a table and a log-log plot (`ps`)
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
 - **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
 - **Unassigned contigs**: default to `__unbinned__` genome

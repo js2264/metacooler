@@ -44,6 +44,9 @@ metacooler solves this by:
   metadata (completeness, contamination, taxonomy…).
 - Computing **genome-level and contig-level aggregated contact matrices** without
   re-creating the file.
+- Recording **contact-quality statistics** — the 3D ratio, and how much signal is
+  intra-contig, intra-MAG and inter-MAG — at creation time, per file *and* per
+  MAG, plus **P(s)** curves for judging the library itself.
 - Providing a **`/contigs` table** as the canonical chromosome table, with a soft
   link at `/chroms` so cooler compatibility is transparent.
 - Offering a **collection format** (`.mmetacool`) to group multiple assemblies,
@@ -64,6 +67,12 @@ metacooler create pairs \
 
 # Inspect
 metacooler info gut_T0.metacool
+
+# Contact quality: the 3D ratio and its breakdown
+metacooler qc gut_T0.metacool --table
+
+# P(s), one curve per MAG
+metacooler ps gut_T0.metacool --by genome --plot ps.png
 
 # Genome-level heatmap
 metacooler show gut_T0.metacool --level genome -o heatmap.png

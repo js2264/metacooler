@@ -53,6 +53,7 @@ One row per genome / MAG.
 | `length` | `int64` | Total length in bp (sum of assigned contig lengths). |
 | `n_contigs` | `int32` | Number of contigs assigned to this genome. |
 | `n_bins` | `int64` | Number of bins across all contigs of this genome. |
+| `qc_*` | `int64` / `float64` | Optional per-genome contact-quality columns (see [Contact-quality block](#qc-block)). Present when the file was created with `--qc` (the default) or annotated with `metacooler qc --store`. |
 | *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`). Stored as fixed-length bytes or numeric arrays. |
 
 The row *set* is derived from the contig-to-genome assignments: one row per
@@ -209,6 +210,40 @@ ordering.
 | `cool` | Preserve the exact contig order of the input cooler. `create cool` only. |
 
 ---
+
+## Contact-quality block { #qc-block }
+
+`create` records where the library's contacts landed, and `metacooler qc`
+recomputes it on demand. It occupies two places in the file, both optional —
+a file written with `--no-qc` has neither.
+
+**`metadata["qc"]`**, a JSON object inside the root `metadata` attribute,
+alongside the `commands` provenance list:
+
+| Key | Meaning |
+|-----|---------|
+| `version` | Block schema version (currently `1`). |
+| `source` | `"pairs"` — measured on read positions by `create pairs`, before binning — or `"pixels"`, measured between bin midpoints. |
+| `distance_threshold` | Short/long intra-contig split, in bp (default 10 000). |
+| `n_contacts` | Total contacts classified. |
+| `intra_contig_short`, `intra_contig_long`, `inter_contig_intra_genome`, `inter_genome` | The four mutually exclusive categories; they sum to `n_contacts`. |
+| `intra_contig`, `inter_contig`, `intra_genome` | Convenience sums of the above. |
+| `trans_contig_ratio` | The "3D ratio": `inter_contig / n_contacts`. |
+| `*_fraction` | Each category's share of `n_contacts`. `null` on an empty file. |
+| `binsize` | Bin size at measurement time (pixel source). |
+| `n_pairs_read`, `n_pairs_discarded` | Pairs seen and dropped while binning (pairs source), so the denominator the ratio does *not* use stays visible. |
+
+**`/genomes` columns**, one row per genome:
+`qc_intra_contig_short`, `qc_intra_contig_long`,
+`qc_inter_contig_intra_genome`, `qc_inter_genome` (`int64`), and
+`qc_intra_genome_ratio` (`float64`, `NaN` for a genome with no contact). An
+inter-genome contact is credited to both genomes involved, so these columns sum
+to more than the file-level totals.
+
+Both are statements about one specific pixel table, so `binnify` and `merge`
+drop them from their output instead of carrying them forward, and `merge`
+ignores `qc_*` columns when it compares the inputs' `/genomes` tables for
+compatibility — two libraries over one assembly legitimately differ there.
 
 ## Cooler compatibility detail
 

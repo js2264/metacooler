@@ -1,0 +1,477 @@
+"""Tests for contact-quality statistics (metacooler.qc / ops.qc / cmd_qc)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from metacooler.api import MetaCooler
+from metacooler.io.create import from_cool, from_pairs
+from metacooler.ops.qc import qc
+from metacooler.qc import (
+    QC_CATEGORIES,
+    QC_GENOME_COLUMNS,
+    QC_METADATA_KEY,
+    ContactQC,
+    strip_qc_columns,
+    strip_qc_metadata,
+)
+
+
+# ----------------------------------------------------------------------
+# Fixtures: a file whose category counts are known exactly by construction
+# ----------------------------------------------------------------------
+@pytest.fixture
+def known_pairs(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, int]]:
+    """Pairs whose contact categories are counted by hand.
+
+    Four contigs of 10 kb in 1 kb bins, two MAGs:
+    ``MAG_1 = {c1, c2}``, ``MAG_2 = {c3}``, ``c4`` unassigned.
+    """
+    lengths = {"c1": 10_000, "c2": 10_000, "c3": 10_000, "c4": 10_000}
+
+    bins = tmp_path / "bins.bed"
+    bins.write_text(
+        "".join(
+            f"{c}\t{s}\t{s + 1000}\n"
+            for c, ln in lengths.items()
+            for s in range(0, ln, 1000)
+        )
+    )
+    contigs = tmp_path / "contigs.tsv"
+    contigs.write_text(
+        "contig_name\tgenome_name\nc1\tMAG_1\nc2\tMAG_1\nc3\tMAG_2\n",
+    )
+
+    rows = [
+        # (chrom1, pos1, chrom2, pos2), one line each
+        # 3 intra-contig short (< 10 kb default threshold is everything here,
+        # so use an explicit small threshold in the tests that care)
+        ("c1", 1_000, "c1", 1_500),  # same contig, 500 bp apart
+        ("c1", 2_000, "c1", 2_400),  # same contig, 400 bp
+        ("c2", 1_000, "c2", 9_000),  # same contig, 8000 bp
+        # 2 inter-contig within MAG_1
+        ("c1", 1_000, "c2", 5_000),
+        ("c2", 3_000, "c1", 7_000),
+        # 4 inter-genome
+        ("c1", 1_000, "c3", 1_000),
+        ("c2", 2_000, "c3", 2_000),
+        ("c3", 3_000, "c4", 3_000),
+        ("c1", 4_000, "c4", 4_000),
+    ]
+    pairs = tmp_path / "known.pairs"
+    pairs.write_text(
+        "#columns: readID chrom1 pos1 chrom2 pos2\n"
+        + "".join(
+            f"r{i}\t{c1}\t{p1}\t{c2}\t{p2}\n" for i, (c1, p1, c2, p2) in enumerate(rows)
+        )
+    )
+    expected = {
+        "intra_contig_short": 2,  # 500 bp and 400 bp, at a 1 kb threshold
+        "intra_contig_long": 1,  # 8000 bp
+        "inter_contig_intra_genome": 2,
+        "inter_genome": 4,
+    }
+    return pairs, bins, contigs, expected
+
+
+@pytest.fixture
+def known_metacool(tmp_path: Path, known_pairs) -> tuple[Path, dict[str, int]]:
+    """A metacool built from :func:`known_pairs`, QC'd at a 1 kb threshold."""
+    pairs, bins, contigs, expected = known_pairs
+    out = tmp_path / "known.metacool"
+    from_pairs(
+        uri=out,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+        qc_distance_threshold=1000,
+    )
+    return out, expected
+
+
+# ----------------------------------------------------------------------
+# The engine
+# ----------------------------------------------------------------------
+def test_categories_partition_every_contact():
+    """Every contact lands in exactly one category, so the parts sum to the whole."""
+    tally = ContactQC(n_genomes=2, distance_threshold=1000)
+    rng = np.random.default_rng(0)
+    n = 500
+    contig1 = rng.integers(0, 4, n)
+    contig2 = rng.integers(0, 4, n)
+    genome_of_contig = np.array([0, 0, 1, 1])
+    tally.tally(
+        contig1,
+        contig2,
+        genome_of_contig[contig1],
+        genome_of_contig[contig2],
+        rng.integers(0, 5000, n),
+    )
+    summary = tally.summary()
+    assert summary["n_contacts"] == n
+    assert sum(summary[c] for c in QC_CATEGORIES) == n
+    assert summary["intra_genome"] + summary["inter_genome"] == n
+    assert summary["intra_contig"] + summary["inter_contig"] == n
+
+
+def test_inter_genome_contact_is_credited_to_both_genomes():
+    """A contact between two MAGs counts for each of them, but once overall."""
+    tally = ContactQC(n_genomes=2, distance_threshold=1000)
+    tally.tally(
+        np.array([0]), np.array([1]), np.array([0]), np.array([1]), np.array([0])
+    )
+    assert tally.summary()["inter_genome"] == 1
+    table = tally.genome_table(["A", "B"])
+    assert table["qc_inter_genome"].tolist() == [1, 1]
+    # Neither genome kept any contact to itself, so both ratios are 0.
+    assert table["qc_intra_genome_ratio"].tolist() == [0.0, 0.0]
+
+
+def test_empty_tally_reports_none_not_zero():
+    """A file with no contact has no measured ratio — not a ratio of zero."""
+    summary = ContactQC(n_genomes=1, distance_threshold=1000).summary()
+    assert summary["n_contacts"] == 0
+    assert summary["trans_contig_ratio"] is None
+    assert summary["intra_genome_fraction"] is None
+
+
+def test_weights_are_summed_exactly():
+    """Pixel counts are weights, not one contact per row."""
+    tally = ContactQC(n_genomes=1, distance_threshold=1000)
+    tally.tally(
+        np.array([0, 0]),
+        np.array([0, 0]),
+        np.array([0, 0]),
+        np.array([0, 0]),
+        np.array([10, 5000]),
+        weights=np.array([7, 3], dtype=np.int64),
+    )
+    summary = tally.summary()
+    assert summary["intra_contig_short"] == 7
+    assert summary["intra_contig_long"] == 3
+
+
+def test_genome_table_rejects_mismatched_names():
+    with pytest.raises(ValueError, match="expected 2 genome"):
+        ContactQC(n_genomes=2).genome_table(["only_one"])
+
+
+def test_negative_threshold_rejected():
+    with pytest.raises(ValueError, match="distance_threshold"):
+        ContactQC(n_genomes=1, distance_threshold=-1)
+
+
+# ----------------------------------------------------------------------
+# create pairs: the exact, position-based tally
+# ----------------------------------------------------------------------
+def test_from_pairs_counts_match_hand_count(known_metacool):
+    path, expected = known_metacool
+    block = MetaCooler(path).metadata[QC_METADATA_KEY]
+    assert block["source"] == "pairs"
+    assert block["distance_threshold"] == 1000
+    for category, count in expected.items():
+        assert block[category] == count, category
+    assert block["n_contacts"] == sum(expected.values())
+    assert block["trans_contig_ratio"] == pytest.approx(6 / 9, abs=1e-6)
+    assert block["n_pairs_read"] == 9
+    assert block["n_pairs_discarded"] == 0
+
+
+def test_from_pairs_writes_genome_columns(known_metacool):
+    path, _ = known_metacool
+    genomes = MetaCooler(path).genomes
+    for column in QC_GENOME_COLUMNS:
+        assert column in genomes.columns
+
+    row = genomes.set_index("name")
+    # MAG_1 holds c1 and c2: 3 intra-contig, 2 inter-contig cis, and 3 of the
+    # 4 inter-genome contacts touch it (c1-c3, c2-c3, c1-c4).
+    assert int(row.at["MAG_1", "qc_intra_contig_short"]) == 2
+    assert int(row.at["MAG_1", "qc_intra_contig_long"]) == 1
+    assert int(row.at["MAG_1", "qc_inter_contig_intra_genome"]) == 2
+    assert int(row.at["MAG_1", "qc_inter_genome"]) == 3
+    assert row.at["MAG_1", "qc_intra_genome_ratio"] == pytest.approx(5 / 8)
+
+
+def test_qc_can_be_disabled(tmp_path: Path, known_pairs):
+    pairs, bins, contigs, _ = known_pairs
+    out = tmp_path / "noqc.metacool"
+    from_pairs(
+        uri=out,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+        qc=False,
+    )
+    mc = MetaCooler(out)
+    assert QC_METADATA_KEY not in mc.metadata
+    assert not [c for c in mc.genomes.columns if c.startswith("qc_")]
+
+
+def test_qc_block_does_not_displace_user_metadata(tmp_path: Path, known_pairs):
+    pairs, bins, contigs, _ = known_pairs
+    out = tmp_path / "meta.metacool"
+    from_pairs(
+        uri=out,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+        metadata={"commands": ["metacooler create pairs ..."], "operator": "mm"},
+    )
+    metadata = MetaCooler(out).metadata
+    assert metadata["operator"] == "mm"
+    assert metadata["commands"] == ["metacooler create pairs ..."]
+    assert metadata[QC_METADATA_KEY]["source"] == "pairs"
+
+
+# ----------------------------------------------------------------------
+# create cool and the standalone command: the pixel-based tally
+# ----------------------------------------------------------------------
+def test_from_cool_tallies_from_pixels(tmp_path: Path, tiny_cool, tiny_contigs_table):
+    out = tmp_path / "imported.metacool"
+    from_cool(cool_uri=tiny_cool, output=out, contig_genome_map=tiny_contigs_table)
+    block = MetaCooler(out).metadata[QC_METADATA_KEY]
+    assert block["source"] == "pixels"
+    assert block["n_contacts"] == MetaCooler(out).info["sum"]
+
+
+def test_pixel_and_pairs_tallies_agree_except_on_short_range(known_metacool):
+    """Binning only blurs the intra-contig distance; every other total is exact."""
+    path, _ = known_metacool
+    pairs_block = MetaCooler(path).metadata[QC_METADATA_KEY]
+    pixel_block = qc(path, distance_threshold=1000).summary
+
+    for key in (
+        "n_contacts",
+        "intra_contig",
+        "inter_contig",
+        "inter_contig_intra_genome",
+        "inter_genome",
+        "intra_genome",
+    ):
+        assert pixel_block[key] == pairs_block[key], key
+    assert pixel_block["trans_contig_ratio"] == pairs_block["trans_contig_ratio"]
+    # The 400 bp and 500 bp contacts fall inside one 1 kb bin, so their binned
+    # distance is 0 — still short. The blur only shows up at the boundary.
+    assert (
+        pixel_block["intra_contig_short"] + pixel_block["intra_contig_long"]
+        == pairs_block["intra_contig_short"] + pairs_block["intra_contig_long"]
+    )
+
+
+def test_a_genome_with_no_contact_gets_nan_not_a_fabricated_ratio(tmp_path: Path):
+    """A MAG none of the reads touched has no self-containment score."""
+    bins = tmp_path / "bins.bed"
+    bins.write_text(
+        "".join(f"{c}\t{s}\t{s + 500}\n" for c in ("c1", "c2") for s in (0, 500))
+    )
+    contigs = tmp_path / "contigs.tsv"
+    contigs.write_text("contig_name\tgenome_name\nc1\tMAG_1\nc2\tMAG_SILENT\n")
+    pairs = tmp_path / "silent.pairs"
+    pairs.write_text("#columns: readID chrom1 pos1 chrom2 pos2\nr0\tc1\t10\tc1\t400\n")
+
+    out = tmp_path / "silent.metacool"
+    from_pairs(
+        uri=out,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+    )
+    genomes = MetaCooler(out).genomes.set_index("name")
+    assert genomes.at["MAG_1", "qc_intra_genome_ratio"] == 1.0
+    assert np.isnan(genomes.at["MAG_SILENT", "qc_intra_genome_ratio"])
+    assert int(genomes.at["MAG_SILENT", "qc_inter_genome"]) == 0
+
+
+def test_qc_totals_match_the_pixel_table(tiny_metacooler):
+    """The tally covers every pixel exactly once."""
+    mc = MetaCooler(tiny_metacooler)
+    assert qc(tiny_metacooler).summary["n_contacts"] == mc.info["sum"]
+
+
+def test_qc_respects_chunking(tiny_metacooler):
+    """Chunk size is a memory knob, not a result knob."""
+    whole = qc(tiny_metacooler).summary
+    chunked = qc(tiny_metacooler, chunksize=3).summary
+    assert whole == chunked
+
+
+def test_qc_store_round_trip(tiny_metacooler):
+    result = qc(tiny_metacooler, distance_threshold=250, store=True)
+    mc = MetaCooler(tiny_metacooler)
+    assert mc.metadata[QC_METADATA_KEY] == result.summary
+    genomes = mc.genomes
+    for column in QC_GENOME_COLUMNS:
+        assert column in genomes.columns
+    np.testing.assert_allclose(
+        genomes["qc_inter_genome"].to_numpy(dtype=float),
+        result.per_genome["qc_inter_genome"].to_numpy(dtype=float),
+    )
+
+
+def test_qc_store_twice_does_not_duplicate_columns(tiny_metacooler):
+    qc(tiny_metacooler, store=True)
+    qc(tiny_metacooler, distance_threshold=5000, store=True)
+    columns = list(MetaCooler(tiny_metacooler).genomes.columns)
+    assert len(columns) == len(set(columns))
+    assert (
+        MetaCooler(tiny_metacooler).metadata[QC_METADATA_KEY]["distance_threshold"]
+        == 5000
+    )
+
+
+def test_qc_store_keeps_the_file_valid(tiny_metacooler):
+    from metacooler.schema import validate
+
+    qc(tiny_metacooler, store=True)
+    validate(tiny_metacooler)  # raises on any structural problem
+    import cooler
+
+    cooler.Cooler(str(tiny_metacooler))  # the dual identity must survive
+
+
+def test_qc_on_mmetacool_entry(tiny_mmetacool):
+    uri = f"{tiny_mmetacool}::entries/entry1"
+    result = qc(uri, store=True)
+    assert result.summary["n_contacts"] > 0
+    assert MetaCooler(uri).metadata[QC_METADATA_KEY] == result.summary
+
+
+def test_qc_warns_when_bins_are_coarser_than_the_threshold(tiny_metacooler, caplog):
+    qc(tiny_metacooler, distance_threshold=50)
+    assert "at least the short/long distance threshold" in caplog.text
+
+
+def test_qc_warns_before_replacing_a_pairs_block(known_metacool, caplog):
+    path, _ = known_metacool
+    qc(path, store=True)
+    assert "Replacing a block measured on read positions" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# Staleness in derived files
+# ----------------------------------------------------------------------
+def test_strip_helpers():
+    frame = pd.DataFrame({"name": ["a"], "length": [1], "qc_inter_genome": [2]})
+    assert list(strip_qc_columns(frame).columns) == ["name", "length"]
+    assert strip_qc_metadata({"qc": {}, "operator": "mm"}) == {"operator": "mm"}
+
+
+def test_binnify_drops_stale_qc(tmp_path: Path, tiny_metacooler):
+    from metacooler.ops.binnify import binnify
+
+    qc(tiny_metacooler, store=True)
+    out = tmp_path / "rebinned.metacool"
+    binnify(uri=tiny_metacooler, output=out, binsize=200)
+    mc = MetaCooler(out)
+    assert QC_METADATA_KEY not in mc.metadata
+    assert not [c for c in mc.genomes.columns if c.startswith("qc_")]
+
+
+def test_merge_ignores_qc_columns_when_comparing_genomes(tmp_path: Path, known_pairs):
+    """Two libraries over one assembly differ in QC but are still mergeable."""
+    from metacooler.io.merge import merge
+
+    pairs, bins, contigs, _ = known_pairs
+    first = tmp_path / "a.metacool"
+    second = tmp_path / "b.metacool"
+    from_pairs(
+        uri=first,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+        qc_distance_threshold=1000,
+    )
+    from_pairs(
+        uri=second,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+        # A different threshold gives the same file a different qc_* split,
+        # which is exactly the divergence the merge must tolerate.
+        qc_distance_threshold=5000,
+    )
+    out = tmp_path / "merged.metacool"
+    merge([first, second], out)
+
+    mc = MetaCooler(out)
+    assert QC_METADATA_KEY not in mc.metadata
+    assert not [c for c in mc.genomes.columns if c.startswith("qc_")]
+    assert mc.info["sum"] == 2 * MetaCooler(first).info["sum"]
+
+
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
+def test_cli_qc_json(tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    result = CliRunner().invoke(cli, ["qc", str(tiny_metacooler), "-q"])
+    assert result.exit_code == 0, result.output
+    block = json.loads(result.output)
+    assert block["source"] == "pixels"
+    assert block["n_contacts"] > 0
+
+
+def test_cli_qc_threshold_accepts_size_suffix(tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    result = CliRunner().invoke(
+        cli, ["qc", str(tiny_metacooler), "--threshold", "2kb", "-q"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["distance_threshold"] == 2000
+
+
+def test_cli_qc_rejects_a_bad_threshold(tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    result = CliRunner().invoke(
+        cli, ["qc", str(tiny_metacooler), "--threshold", "ten-kb", "-q"]
+    )
+    assert result.exit_code != 0
+    assert "not a number" in result.output
+
+
+def test_cli_qc_per_genome_tsv(tmp_path: Path, tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    out = tmp_path / "per_genome.tsv"
+    result = CliRunner().invoke(
+        cli, ["qc", str(tiny_metacooler), "--per-genome", str(out), "-q"]
+    )
+    assert result.exit_code == 0, result.output
+    table = pd.read_csv(out, sep="\t")
+    assert list(table.columns) == ["name", *QC_GENOME_COLUMNS]
+    assert len(table) == len(MetaCooler(tiny_metacooler).genomes)
+
+
+def test_cli_qc_refuses_to_clobber(tmp_path: Path, tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    out = tmp_path / "taken.json"
+    out.write_text("keep me")
+    result = CliRunner().invoke(cli, ["qc", str(tiny_metacooler), "-o", str(out), "-q"])
+    assert result.exit_code != 0
+    assert out.read_text() == "keep me"

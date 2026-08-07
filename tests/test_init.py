@@ -72,6 +72,10 @@ class TestInit:
             "aggregate",
             "network",
             "dump_table",
+            # quality control
+            "contact_qc",
+            "contact_probability",
+            "plot_ps",
             # format
             "is_metacooler",
             "is_mmetacooler",

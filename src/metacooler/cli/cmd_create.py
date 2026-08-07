@@ -13,6 +13,7 @@ from metacooler.cli._options import (
     verbose_option,
 )
 from metacooler.cli.main import cli
+from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD
 
 _CONTIGS_FORMAT_HELP = """
     Format of the contig assignment table. Four formats are supported: [dim]\\[default: contigs][/dim]\n
@@ -27,8 +28,8 @@ def shared_options(f):
     """Apply options shared by all ``create`` subcommands.
 
     Adds: ``-o/--output``, ``--contigs``, ``--contigs-format``, ``--genomes``,
-    ``--filter``, ``--metadata``, ``-f/--force``, ``-v/--verbose``,
-    ``-q/--quiet``.
+    ``--filter``, ``--metadata``, ``--qc/--no-qc``, ``--qc-threshold``,
+    ``-f/--force``, ``-v/--verbose``, ``-q/--quiet``.
 
     The filter/force/verbose/quiet options come from
     :mod:`metacooler.cli._options` so they stay identical to every other
@@ -69,6 +70,27 @@ def shared_options(f):
             "--metadata",
             type=click.Path(exists=True, path_type=Path),
             help="Path to a JSON or YAML file containing metadata to ingest into the file.",
+        ),
+        click.option(
+            "--qc/--no-qc",
+            default=True,
+            show_default=True,
+            help=(
+                "Tally contact-quality statistics during creation and store them "
+                "in [cyan]metadata.qc[/cyan] and the [cyan]/genomes[/cyan] "
+                "[cyan]qc_*[/cyan] columns. Read them back with "
+                "[cyan]metacooler qc[/cyan]."
+            ),
+        ),
+        click.option(
+            "--qc-threshold",
+            type=str,
+            default=str(DEFAULT_DISTANCE_THRESHOLD),
+            show_default=True,
+            help=(
+                "Distance splitting short- from long-range intra-contig signal. "
+                "Accepts [cyan]bp/kb/Mb/Gb[/cyan] suffixes."
+            ),
         ),
         force_option,
         verbose_option,

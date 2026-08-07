@@ -361,9 +361,35 @@ class TestMetaCoolerMmetacoolURI:
 
 
 class TestMetaCoolerMetadata:
-    def test_metadata_property_empty_when_not_set(self, tiny_metacooler):
+    def test_metadata_property_holds_no_user_keys_when_none_were_set(
+        self, tiny_metacooler
+    ):
+        """The only key a fresh file carries is the QC block ``create`` writes."""
+        from metacooler.qc import QC_METADATA_KEY
+
         mc = MetaCooler(tiny_metacooler)
-        assert mc.metadata == {}
+        assert set(mc.metadata) == {QC_METADATA_KEY}
+
+    def test_metadata_property_empty_when_qc_is_disabled(
+        self,
+        tiny_fasta,
+        tiny_contigs_table,
+        tiny_bins_bed,
+        tiny_pairs,
+        tmp_path,
+    ):
+        from metacooler.io.create import from_pairs
+
+        out = tmp_path / "no_metadata.metacool"
+        from_pairs(
+            uri=out,
+            bins=tiny_bins_bed,
+            pairs=tiny_pairs,
+            contig_genome_map=tiny_contigs_table,
+            fasta=tiny_fasta,
+            qc=False,
+        )
+        assert MetaCooler(out).metadata == {}
 
     def test_metadata_written_by_from_pairs(
         self,

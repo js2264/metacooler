@@ -227,12 +227,22 @@ def describe(filters: Sequence[Filter]) -> str:
 # ----------------------------------------------------------------------
 # Evaluation
 # ----------------------------------------------------------------------
-def _to_number(text: str, filt: Filter) -> float:
-    """Parse a filter value as a number, honouring bp/kb/Mb/Gb suffixes.
+def parse_size(text: str) -> float:
+    """Parse a genomic size, honouring bp/kb/Mb/Gb suffixes.
+
+    The one place the suffix table is interpreted, shared by ``--filter``
+    values and by every option that takes a distance (``qc --threshold``,
+    ``ps --min-distance``), so ``10kb`` means the same everywhere.
+
+    Args:
+        text: A plain number (``1000000``, ``1e6``) or a number with a size
+            suffix (``1Mb``, ``10kb``), case-insensitive.
+
+    Returns:
+        The value in base pairs.
 
     Raises:
-        FilterError: If *text* is neither a plain number nor a number with a
-            recognised size suffix.
+        ValueError: If *text* is neither.
     """
     try:
         return float(text)
@@ -246,11 +256,24 @@ def _to_number(text: str, filt: Filter) -> float:
                 return float(number) * _UNIT_MULTIPLIERS[unit]
             except ValueError:
                 pass
-    raise FilterError(
-        f"Filter {filt.raw!r}: {text!r} is not a number. Write a plain number "
+    raise ValueError(
+        f"{text!r} is not a number. Write a plain number "
         f"(1000000, 1e6, 1_000_000) or add a size suffix "
         f"({', '.join(sorted(_UNIT_MULTIPLIERS))})."
     )
+
+
+def _to_number(text: str, filt: Filter) -> float:
+    """Parse a filter value as a number, naming the filter if it is not one.
+
+    Raises:
+        FilterError: If *text* is neither a plain number nor a number with a
+            recognised size suffix.
+    """
+    try:
+        return parse_size(text)
+    except ValueError as exc:
+        raise FilterError(f"Filter {filt.raw!r}: {exc}") from None
 
 
 def _numeric_column(col: pd.Series, filt: Filter) -> np.ndarray:

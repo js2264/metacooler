@@ -23,11 +23,20 @@ from metacooler.io._utils import (
     _finalize_metacool_file,
     check_ascii_names,
     check_output_path,
+    infer_binsize,
     resolve_count_dtype,
+    store_qc,
     write_cooler,
 )
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
+from metacooler.qc import (
+    DEFAULT_DISTANCE_THRESHOLD,
+    QC_GENOME_COLUMNS,
+    BinMaps,
+    ContactQC,
+    bin_maps,
+)
 from metacooler.schema import (
     CONTIGS_DTYPE,
     DEFAULT_CHUNKSIZE,
@@ -65,8 +74,12 @@ _PIXEL_FOLD_FRACTION = 4
 # costs chunk-granularity, not read memory.
 _PAIRS_READ_BLOCK_MAX_BYTES = 128 * 1024**2  # 128 MiB (~1.2 M pairs)
 # Column names metacooler writes itself into /genomes and /contigs.  A user table
-# is free to carry extra columns, but one of these names would collide.
-_GENOMES_RESERVED_COLUMNS = frozenset({"name", "length", "n_contigs", "n_bins"})
+# is free to carry extra columns, but one of these names would collide.  The
+# QC columns are reserved unconditionally, not only when QC is computed, so a
+# user column called ``qc_inter_genome`` means the same thing on every file.
+_GENOMES_RESERVED_COLUMNS = frozenset(
+    {"name", "length", "n_contigs", "n_bins"} | set(QC_GENOME_COLUMNS)
+)
 _CONTIGS_RESERVED_COLUMNS = frozenset({"name", "length", "genome_id"})
 # How many distinct unknown contig names to remember for the dropped-pair report.
 _MAX_REPORTED_UNKNOWN_CONTIGS = 10
@@ -1144,6 +1157,8 @@ def _bin_pairs_chunk(
     binsize: int | None,
     bin_starts: np.ndarray | None,
     stats: _PairsDropStats | None = None,
+    qc: ContactQC | None = None,
+    contig_genome_id: np.ndarray | None = None,
 ) -> pd.DataFrame | None:
     """Bin a single pairs chunk into aggregated ``(bin1_id, bin2_id, count)`` pixels.
 
@@ -1161,6 +1176,12 @@ def _bin_pairs_chunk(
             ``binsize`` is ``None``.
         stats: Optional accumulator updated with the number of pairs seen and
             dropped, so the caller can report them once at end of stream.
+        qc: Optional contact-quality tally, updated from the *raw positions* of
+            this chunk.  Doing it here is what makes the intra-contig
+            short/long split exact: after binning, the only distances left are
+            multiples of the bin size.
+        contig_genome_id: Genome id of every contig, required when *qc* is
+            given.
 
     Returns:
         Aggregated pixel DataFrame or ``None`` if the chunk is empty after
@@ -1209,6 +1230,12 @@ def _bin_pairs_chunk(
         )
     p1 = np.maximum(raw_p1, 0)
     p2 = np.maximum(raw_p2, 0)
+
+    if qc is not None:
+        assert contig_genome_id is not None, "contig_genome_id required with qc"
+        g1 = contig_genome_id[c1]
+        g2 = contig_genome_id[c2]
+        qc.tally(c1, c2, g1, g2, np.abs(p2 - p1))
 
     if binsize is not None:
         # Fixed-size bins: clamp so an out-of-range position never overflows
@@ -1532,6 +1559,9 @@ def _stream_binned_pairs(
     bin_starts: np.ndarray | None,
     chunksize: int,
     pairs_kwargs: dict,
+    stats: _PairsDropStats | None = None,
+    qc: ContactQC | None = None,
+    contig_genome_id: np.ndarray | None = None,
 ) -> Iterable[pd.DataFrame]:
     """Stream a pairs file and yield binned pixel DataFrames with progress.
 
@@ -1544,6 +1574,13 @@ def _stream_binned_pairs(
             is ``None``.
         chunksize: Rows per streaming batch.
         pairs_kwargs: Extra keyword arguments forwarded to ``_stream_pairs``.
+        stats: Drop tally to fill in.  Passed in (rather than created here)
+            when the caller needs the pair counts afterwards — the QC block
+            reports them as the denominator it did *not* use.
+        qc: Optional contact-quality tally, forwarded to
+            :func:`_bin_pairs_chunk`.
+        contig_genome_id: Genome id of every contig, required when *qc* is
+            given.
 
     Yields:
         Aggregated pixel DataFrames (``bin1_id``, ``bin2_id``, ``count``).
@@ -1564,11 +1601,18 @@ def _stream_binned_pairs(
         task = progress.add_task("", total=None)
         pending: list[pd.DataFrame] = []
         pending_pairs = 0
-        stats = _PairsDropStats()
+        stats = stats if stats is not None else _PairsDropStats()
         for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
             progress.update(task, advance=len(chunk))
             result = _bin_pairs_chunk(
-                chunk, contig_name_to_id, chrom_offset, binsize, bin_starts, stats
+                chunk,
+                contig_name_to_id,
+                chrom_offset,
+                binsize,
+                bin_starts,
+                stats,
+                qc,
+                contig_genome_id,
             )
             if result is not None and not result.empty:
                 pending.append(result)
@@ -1584,6 +1628,36 @@ def _stream_binned_pairs(
         if pending:
             yield _merge_pixel_frames(pending)
     stats.report()
+
+
+def _tally_pixel_qc(
+    stream: Iterable[pd.DataFrame],
+    tally: ContactQC,
+    maps: BinMaps,
+) -> Iterable[pd.DataFrame]:
+    """Pass a pixel stream through unchanged, tallying QC on the way.
+
+    ``from_cool`` has no read positions to classify, but it is already
+    streaming every pixel to the writer; teeing that stream costs one pass over
+    each chunk in NumPy and saves the caller a second full read of the file
+    afterwards.
+
+    Args:
+        stream: Pixel chunks headed for the writer.
+        tally: Accumulator to update.
+        maps: Per-bin lookup arrays for the *output* bin table.
+
+    Yields:
+        Each chunk of *stream*, untouched.
+    """
+    for chunk in stream:
+        tally.tally_pixels(
+            chunk["bin1_id"].to_numpy(),
+            chunk["bin2_id"].to_numpy(),
+            chunk["count"].to_numpy(),
+            maps,
+        )
+        yield chunk
 
 
 def _stream_remapped_pixels(
@@ -1759,6 +1833,8 @@ def from_pairs(
     metadata: dict | None = None,
     chunksize: int = DEFAULT_CHUNKSIZE,
     sort_in_memory: bool | None = None,
+    qc: bool = True,
+    qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
@@ -1807,6 +1883,13 @@ def from_pairs(
             ``None`` (default), buffer the binned pixels and use ``True`` unless
             they exceed 100 M rows, in which case fall back to ``False`` with a
             logged warning.
+        qc: Tally contact-quality statistics while the pairs are being binned
+            and store them in ``metadata["qc"]`` and the ``/genomes`` ``qc_*``
+            columns (see :mod:`metacooler.qc`).  Free apart from a few
+            vectorised operations per chunk, since the pass over the pairs is
+            happening anyway — and only possible *here*, because binning
+            discards the sub-bin distances the short/long split needs.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
     """
     uri = Path(uri)
     if pairs_kwargs is None:
@@ -1930,6 +2013,12 @@ def from_pairs(
     bin_starts: np.ndarray | None = (
         None if binsize is not None else bins_df["start"].values.astype(np.int64)
     )
+    drop_stats = _PairsDropStats()
+    qc_tally = (
+        ContactQC(len(genomes_df), qc_distance_threshold, source="pairs")
+        if qc
+        else None
+    )
     raw_pixels: Iterable[pd.DataFrame] = _stream_binned_pairs(
         pairs,
         contig_name_to_id,
@@ -1938,6 +2027,9 @@ def from_pairs(
         bin_starts,
         chunksize,
         pairs_kwargs,
+        drop_stats,
+        qc_tally,
+        contigs_df["genome_id"].to_numpy(dtype=np.int64) if qc else None,
     )
     pixel_source: Iterable[pd.DataFrame]
     if sort_in_memory is None:
@@ -1994,6 +2086,22 @@ def from_pairs(
             binsize=binsize,
         )
 
+        # --- Contact-quality statistics ---
+        # Written here rather than through write_cooler's `metadata`: the tally
+        # is only complete once the pixel stream above has been consumed, which
+        # happens inside that very call.
+        if qc_tally is not None:
+            store_qc(
+                staged,
+                qc_tally.summary(
+                    binsize=binsize,
+                    n_pairs_read=drop_stats.total,
+                    n_pairs_discarded=drop_stats.unknown_contig
+                    + drop_stats.null_position,
+                ),
+                qc_tally.genome_table(genomes_df["name"].to_numpy()),
+            )
+
         # --- Validate ---
         logger.info("Validating created metacool file")
         validate(staged)
@@ -2025,6 +2133,8 @@ def from_cool(
     metadata: dict | None = None,
     nproc: int = 1,
     sort_in_memory: bool | None = None,
+    qc: bool = True,
+    qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
 ) -> None:
     """Create a metacool file from an existing cool file.
 
@@ -2059,6 +2169,13 @@ def from_cool(
             stream to cooler's external sort (scalable for large files).  If
             ``None`` (default), auto-detect based on pixel count: files with
             more than 100 M pixels use ``False`` with a logged warning.
+        qc: Tally contact-quality statistics off the pixel stream that is
+            being copied anyway, and store them in ``metadata["qc"]`` and the
+            ``/genomes`` ``qc_*`` columns (see :mod:`metacooler.qc`).  A cool
+            file has no read positions left, so intra-contig distances are
+            measured between bin midpoints and the block records
+            ``source="pixels"``.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
 
     Raises:
         ValueError: If ``cool_uri`` is not a valid cooler file.
@@ -2174,6 +2291,13 @@ def from_cool(
     raw_pixels: Iterable[pd.DataFrame] = _stream_remapped_pixels(
         str(cool_path), clr.info["nnz"], old_to_new_bin, nproc, count_dtype
     )
+    qc_tally = (
+        ContactQC(len(genomes), qc_distance_threshold, source="pixels") if qc else None
+    )
+    if qc_tally is not None:
+        raw_pixels = _tally_pixel_qc(
+            raw_pixels, qc_tally, bin_maps(bins_remapped, contigs)
+        )
     if sort_in_memory:
         pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
             pixel_iter=raw_pixels
@@ -2206,6 +2330,16 @@ def from_cool(
             contig_ordering=contig_ordering,
             assembly_name=assembly_name,
         )
+
+        # --- Contact-quality statistics ---
+        # Complete only now: the tally rides on the pixel stream that
+        # write_cooler above consumed.
+        if qc_tally is not None:
+            store_qc(
+                staged,
+                qc_tally.summary(binsize=infer_binsize(bins_remapped)),
+                qc_tally.genome_table(genomes["name"].to_numpy()),
+            )
 
         # --- Validate ---
         logger.info("Validating created metacool file")

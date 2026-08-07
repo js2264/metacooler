@@ -44,6 +44,20 @@ def _run(args: list[str]):
     return _runner.invoke(cli, args, catch_exceptions=True)
 
 
+def _user_metadata(output: str) -> dict:
+    """Parse ``metadata list`` output, minus the blocks metacooler writes itself.
+
+    ``create`` stores a contact-quality block under ``qc`` (see
+    ``metacooler qc``), so a freshly created file's metadata is no longer
+    empty.  Tests about *user* metadata compare against this.
+    """
+    from metacooler.qc import QC_METADATA_KEY
+
+    data = json.loads(output)
+    data.pop(QC_METADATA_KEY, None)
+    return data
+
+
 def _make_corrupt_hdf5(path: Path) -> None:
     """Write a plain HDF5 file that is NOT a valid metacool file."""
     with h5py.File(path, "w") as f:
@@ -1575,12 +1589,15 @@ class TestMetadataCLI:
         assert isinstance(data, dict)
         assert "format" not in data
 
-    def test_metadata_list_empty_metadata(self, tiny_metacooler):
-        # Fresh metacool files have an empty metadata attribute.
+    def test_metadata_list_holds_only_the_qc_block_on_a_fresh_file(
+        self, tiny_metacooler
+    ):
+        # A fresh metacool file carries no *user* metadata; the only key is the
+        # contact-quality block ``create`` records itself.
         r = _run(["metadata", "list", str(tiny_metacooler)])
         assert r.exit_code == 0
-        data = json.loads(r.output)
-        assert data == {}
+        assert _user_metadata(r.output) == {}
+        assert json.loads(r.output)["qc"]["source"] == "pairs"
 
     def test_metadata_list_verbose(self, tiny_metacooler):
         r = _run(["metadata", "list", "-v", str(tiny_metacooler)])
@@ -1810,8 +1827,10 @@ class TestMetadataCLI:
         assert r.exit_code == 0
         list_r = _run(["metadata", "list", str(tiny_metacooler)])
         assert list_r.exit_code == 0
-        data = json.loads(list_r.output)
-        assert data == {"project": "test_project", "version": "2.0"}
+        assert _user_metadata(list_r.output) == {
+            "project": "test_project",
+            "version": "2.0",
+        }
 
     def test_metadata_load_yaml_file(self, tiny_metacooler, tmp_path):
         meta_file = tmp_path / "meta.yaml"
@@ -1820,8 +1839,10 @@ class TestMetadataCLI:
         assert r.exit_code == 0
         list_r = _run(["metadata", "list", str(tiny_metacooler)])
         assert list_r.exit_code == 0
-        data = json.loads(list_r.output)
-        assert data == {"lab": "RSG", "pipeline": "metacooler"}
+        assert _user_metadata(list_r.output) == {
+            "lab": "RSG",
+            "pipeline": "metacooler",
+        }
 
     def test_metadata_load_yml_extension(self, tiny_metacooler, tmp_path):
         meta_file = tmp_path / "meta.yml"
@@ -1830,8 +1851,7 @@ class TestMetadataCLI:
         assert r.exit_code == 0
         list_r = _run(["metadata", "list", str(tiny_metacooler)])
         assert list_r.exit_code == 0
-        data = json.loads(list_r.output)
-        assert data == {"run_id": "run001"}
+        assert _user_metadata(list_r.output) == {"run_id": "run001"}
 
     def test_metadata_load_multiple_keys(self, tiny_metacooler, tmp_path):
         meta_file = tmp_path / "multi.json"
@@ -1840,8 +1860,7 @@ class TestMetadataCLI:
         assert r.exit_code == 0
         list_r = _run(["metadata", "list", str(tiny_metacooler)])
         assert list_r.exit_code == 0
-        data = json.loads(list_r.output)
-        assert data == {"k1": "v1", "k2": "v2", "k3": "99"}
+        assert _user_metadata(list_r.output) == {"k1": "v1", "k2": "v2", "k3": "99"}
 
     def test_metadata_load_nested_dict(self, tiny_metacooler, tmp_path):
         meta_file = tmp_path / "nested.json"
@@ -1852,8 +1871,7 @@ class TestMetadataCLI:
         assert r.exit_code == 0
         list_r = _run(["metadata", "list", str(tiny_metacooler)])
         assert list_r.exit_code == 0
-        data = json.loads(list_r.output)
-        assert data == {
+        assert _user_metadata(list_r.output) == {
             "outer": {"inner": "42", "flag": "True"},
             "tags": ["1", "2", "three"],
         }

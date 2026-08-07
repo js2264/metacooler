@@ -127,6 +127,15 @@ def _append_empty_genome(path: Path, name: str = "MAG_EMPTY") -> None:
             "n_contigs": np.append(np.asarray(g["n_contigs"][:]).astype(np.int32), 0),
             "n_bins": np.append(np.asarray(g["n_bins"][:]).astype(np.int64), 0),
         }
+        # Extend every *other* column too — a table with one short column is a
+        # different bug from the one under test, and `validate` rejects it
+        # first. `create` writes qc_* columns here, and a user genomes table
+        # may add arbitrary ones.
+        for key in g:
+            if key in columns:
+                continue
+            values = np.asarray(g[key][:])
+            columns[key] = np.append(values, values.dtype.type(0))
         for key, data in columns.items():
             del g[key]
             g.create_dataset(key, data=data)
