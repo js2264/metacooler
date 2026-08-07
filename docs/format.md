@@ -245,6 +245,13 @@ drop them from their output instead of carrying them forward, and `merge`
 ignores `qc_*` columns when it compares the inputs' `/genomes` tables for
 compatibility — two libraries over one assembly legitimately differ there.
 
+!!! note "P(s) is a companion file, not part of the format"
+    `create pairs` also writes a per-MAG P(s) curve, but as a plain TSV beside
+    the map (`gut_T0.metacool` → `gut_T0.ps.tsv`), never inside the HDF5. It is
+    measured at base-pair resolution from the read positions, so it holds
+    detail the binned file cannot represent, and it is a plotting input rather
+    than something any reader of the map needs. See [`ps`](cli.md#ps).
+
 ## Cooler compatibility detail
 
 The compatibility mechanism relies on two things written by metacooler at file

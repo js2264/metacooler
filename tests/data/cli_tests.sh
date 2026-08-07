@@ -512,6 +512,22 @@ cooler info qc_stored.metacool > /dev/null && echo "  OK    qc --store: still op
 ## ps
 # ================================================================================
 
+## `create pairs` already wrote the fine-grained, per-MAG table beside its
+## output — measured on read positions, so it resolves below the 1 kb grid.
+head -n 3 assembly_1_rep1_1kb.ps.tsv
+## Recomputing it from the same pairs must reproduce that file byte for byte.
+metacooler ps assembly_1_rep1_1kb.metacool --pairs ../contacts_1_rep1.pairs.gz \
+    --by genome -o ps_recomputed.tsv -q
+assert_identical "ps --pairs == create pairs sidecar" \
+    assembly_1_rep1_1kb.ps.tsv ps_recomputed.tsv
+## …and the pairs-derived curve reaches distances the binned one cannot.
+python -c "
+import pandas as pd
+pairs = pd.read_csv('ps_recomputed.tsv', sep='\t')
+assert pairs['dist'].min() < 1000, pairs['dist'].min()
+print('  OK    ps --pairs: resolves below the bin size')
+"
+
 metacooler ps assembly_1_rep1_1kb.metacool -q | head -n 5
 metacooler ps assembly_1_rep1_1kb.metacool -q -o ps_pooled.tsv --plot ps_pooled.png
 metacooler ps assembly_1_rep1_1kb.metacool -q --by genome -o ps_by_genome.tsv --plot ps_by_genome.png

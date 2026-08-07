@@ -30,6 +30,16 @@ from metacooler.io._utils import (
 )
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
+from metacooler.ps import (
+    DEFAULT_BINS_PER_DECADE,
+    PSCounts,
+    assemble,
+    pairs_distance_grid,
+    position_pair_denominators,
+    ps_table_path,
+    tally_intra_contig,
+    write_ps_table,
+)
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
     QC_GENOME_COLUMNS,
@@ -1150,42 +1160,30 @@ def _finite_position_mask(col: pd.Series) -> np.ndarray:
     return col.notna().to_numpy()
 
 
-def _bin_pairs_chunk(
+def _decode_pairs_chunk(
     chunk: pd.DataFrame,
     contig_name_to_id: dict[str, int],
-    chrom_offset: np.ndarray,
-    binsize: int | None,
-    bin_starts: np.ndarray | None,
     stats: _PairsDropStats | None = None,
-    qc: ContactQC | None = None,
-    contig_genome_id: np.ndarray | None = None,
-) -> pd.DataFrame | None:
-    """Bin a single pairs chunk into aggregated ``(bin1_id, bin2_id, count)`` pixels.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Turn a raw pairs chunk into usable ``(contig1, contig2, pos1, pos2)`` arrays.
 
-    Supports both fixed-binsize mode (arithmetic) and fragment-level mode
-    (binary search via ``np.searchsorted``).  Returns ``None`` when the chunk
-    contains no valid pairs after contig filtering.
+    Everything that reads a pairs file goes through here — the binning pass of
+    :func:`from_pairs` and the standalone ``ps --pairs`` — so "which pairs are
+    usable" is decided once.  A second implementation would be free to disagree
+    about an unrecognised contig name or an empty position field, and the two
+    curves would then be normalised by different denominators without anything
+    saying so.
 
     Args:
         chunk: Raw pairs DataFrame with columns ``chrom1``, ``pos1``,
             ``chrom2``, ``pos2``.
         contig_name_to_id: Mapping from contig name to integer ID.
-        chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
-        binsize: Fixed bin size, or ``None`` for fragment-level bins.
-        bin_starts: Flattened array of bin start positions; required when
-            ``binsize`` is ``None``.
         stats: Optional accumulator updated with the number of pairs seen and
             dropped, so the caller can report them once at end of stream.
-        qc: Optional contact-quality tally, updated from the *raw positions* of
-            this chunk.  Doing it here is what makes the intra-contig
-            short/long split exact: after binning, the only distances left are
-            multiples of the bin size.
-        contig_genome_id: Genome id of every contig, required when *qc* is
-            given.
 
     Returns:
-        Aggregated pixel DataFrame or ``None`` if the chunk is empty after
-        filtering.
+        ``(c1, c2, p1, p2)`` for the usable rows — contig ids, and 0-based
+        positions clamped at 0 — or ``None`` if the chunk has no usable row.
     """
     # Fast contig-name → integer-ID encoding.  Unrecognised contigs map to
     # NaN and are coerced to -1 so they can be dropped in one vectorised pass.
@@ -1228,14 +1226,64 @@ def _bin_pairs_chunk(
             "%d pairs clamped: negative 0-based positions encountered in chunk",
             int(neg_mask.sum()),
         )
-    p1 = np.maximum(raw_p1, 0)
-    p2 = np.maximum(raw_p2, 0)
+    return c1, c2, np.maximum(raw_p1, 0), np.maximum(raw_p2, 0)
 
-    if qc is not None:
-        assert contig_genome_id is not None, "contig_genome_id required with qc"
-        g1 = contig_genome_id[c1]
-        g2 = contig_genome_id[c2]
-        qc.tally(c1, c2, g1, g2, np.abs(p2 - p1))
+
+def _bin_pairs_chunk(
+    chunk: pd.DataFrame,
+    contig_name_to_id: dict[str, int],
+    chrom_offset: np.ndarray,
+    binsize: int | None,
+    bin_starts: np.ndarray | None,
+    stats: _PairsDropStats | None = None,
+    qc: ContactQC | None = None,
+    ps: PSCounts | None = None,
+    contig_genome_id: np.ndarray | None = None,
+) -> pd.DataFrame | None:
+    """Bin a single pairs chunk into aggregated ``(bin1_id, bin2_id, count)`` pixels.
+
+    Supports both fixed-binsize mode (arithmetic) and fragment-level mode
+    (binary search via ``np.searchsorted``).  Returns ``None`` when the chunk
+    contains no valid pairs after contig filtering.
+
+    Args:
+        chunk: Raw pairs DataFrame with columns ``chrom1``, ``pos1``,
+            ``chrom2``, ``pos2``.
+        contig_name_to_id: Mapping from contig name to integer ID.
+        chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
+        binsize: Fixed bin size, or ``None`` for fragment-level bins.
+        bin_starts: Flattened array of bin start positions; required when
+            ``binsize`` is ``None``.
+        stats: Optional accumulator updated with the number of pairs seen and
+            dropped, so the caller can report them once at end of stream.
+        qc: Optional contact-quality tally, updated from the *raw positions* of
+            this chunk.  Doing it here is what makes the intra-contig
+            short/long split exact: after binning, the only distances left are
+            multiples of the bin size.
+        ps: Optional P(s) tally, updated from the same raw positions and for
+            the same reason — a curve built after binning cannot resolve
+            anything below one bin.
+        contig_genome_id: Genome id of every contig, required when *qc* or *ps*
+            is given.
+
+    Returns:
+        Aggregated pixel DataFrame or ``None`` if the chunk is empty after
+        filtering.
+    """
+    decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats)
+    if decoded is None:
+        return None
+    c1, c2, p1, p2 = decoded
+
+    if qc is not None or ps is not None:
+        assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
+        # One subtraction serves both tallies; neither reads it where the two
+        # ends sit on different contigs.
+        distance = np.abs(p2 - p1)
+        if qc is not None:
+            qc.tally(c1, c2, contig_genome_id[c1], contig_genome_id[c2], distance)
+        if ps is not None:
+            tally_intra_contig(ps, contig_genome_id, c1, c2, distance)
 
     if binsize is not None:
         # Fixed-size bins: clamp so an out-of-range position never overflows
@@ -1561,6 +1609,7 @@ def _stream_binned_pairs(
     pairs_kwargs: dict,
     stats: _PairsDropStats | None = None,
     qc: ContactQC | None = None,
+    ps: PSCounts | None = None,
     contig_genome_id: np.ndarray | None = None,
 ) -> Iterable[pd.DataFrame]:
     """Stream a pairs file and yield binned pixel DataFrames with progress.
@@ -1579,8 +1628,9 @@ def _stream_binned_pairs(
             reports them as the denominator it did *not* use.
         qc: Optional contact-quality tally, forwarded to
             :func:`_bin_pairs_chunk`.
-        contig_genome_id: Genome id of every contig, required when *qc* is
-            given.
+        ps: Optional P(s) tally, forwarded likewise.
+        contig_genome_id: Genome id of every contig, required when *qc* or *ps*
+            is given.
 
     Yields:
         Aggregated pixel DataFrames (``bin1_id``, ``bin2_id``, ``count``).
@@ -1612,6 +1662,7 @@ def _stream_binned_pairs(
                 bin_starts,
                 stats,
                 qc,
+                ps,
                 contig_genome_id,
             )
             if result is not None and not result.empty:
@@ -1835,6 +1886,9 @@ def from_pairs(
     sort_in_memory: bool | None = None,
     qc: bool = True,
     qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
+    ps: bool = True,
+    ps_bins_per_decade: int = DEFAULT_BINS_PER_DECADE,
+    force: bool = False,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
@@ -1890,6 +1944,16 @@ def from_pairs(
             happening anyway — and only possible *here*, because binning
             discards the sub-bin distances the short/long split needs.
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        ps: Accumulate a per-genome P(s) curve from the same pass and write it
+            beside the output as ``<name>.ps.tsv`` (see :mod:`metacooler.ps`).
+            Measured on read positions, so it resolves distances the binned map
+            cannot — which is the whole reason to do it here rather than
+            afterwards.  Costs one ``searchsorted`` and one ``bincount`` per
+            chunk over the intra-contig rows.
+        ps_bins_per_decade: Log-grid resolution of the P(s) curve.
+        force: Overwrite an existing ``<name>.ps.tsv``.  The ``.metacool``
+            itself is guarded by the caller (the CLI checks it before any work
+            starts).
     """
     uri = Path(uri)
     if pairs_kwargs is None:
@@ -1906,6 +1970,11 @@ def from_pairs(
             "binsize and bins are mutually exclusive: pass binsize to tile "
             "fixed-size bins, or bins to use a pre-defined bin table."
         )
+    # Guard the P(s) sidecar before the streaming pass, not after it: finding
+    # out that the table cannot be written is worth seconds, not hours.
+    ps_path = ps_table_path(uri) if ps else None
+    if ps_path is not None:
+        check_output_path(ps_path, force)
     timer = time.perf_counter()
 
     # --- Parse contig map and optional genomes metadata table ---
@@ -2019,6 +2088,10 @@ def from_pairs(
         if qc
         else None
     )
+    contig_genome_id = contigs_df["genome_id"].to_numpy(dtype=np.int64)
+    contig_length = contigs_df["length"].to_numpy(dtype=np.int64)
+    ps_edges = pairs_distance_grid(contig_length, ps_bins_per_decade) if ps else None
+    ps_tally = PSCounts(len(genomes_df), ps_edges) if ps_edges is not None else None
     raw_pixels: Iterable[pd.DataFrame] = _stream_binned_pairs(
         pairs,
         contig_name_to_id,
@@ -2029,7 +2102,8 @@ def from_pairs(
         pairs_kwargs,
         drop_stats,
         qc_tally,
-        contigs_df["genome_id"].to_numpy(dtype=np.int64) if qc else None,
+        ps_tally,
+        contig_genome_id if (qc or ps) else None,
     )
     pixel_source: Iterable[pd.DataFrame]
     if sort_in_memory is None:
@@ -2105,6 +2179,24 @@ def from_pairs(
         # --- Validate ---
         logger.info("Validating created metacool file")
         validate(staged)
+
+    # --- P(s) sidecar ---
+    # Outside the staged block: it is a companion file, not part of the
+    # .metacool, and the atomic rename above has already happened.
+    if ps_tally is not None and ps_edges is not None and ps_path is not None:
+        write_ps_table(
+            ps_path,
+            assemble(
+                genomes_df["name"].to_numpy(),
+                ps_edges,
+                ps_tally.matrix,
+                position_pair_denominators(
+                    contig_length, contig_genome_id, len(genomes_df), ps_edges
+                ),
+            ),
+            force=force,
+        )
+
     with h5py.File(uri, "r") as f:
         nnz = int(f.attrs.get("nnz"))
         total = int(f.attrs.get("sum", 0))

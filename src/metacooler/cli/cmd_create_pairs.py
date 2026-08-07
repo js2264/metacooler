@@ -10,6 +10,7 @@ import rich_click as click
 from metacooler.cli._options import check_output
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
+from metacooler.ps import DEFAULT_BINS_PER_DECADE
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 
@@ -73,6 +74,25 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     "disproportionately more.",
 )
 @click.option(
+    "--ps/--no-ps",
+    default=True,
+    show_default=True,
+    help=(
+        "Accumulate a per-MAG [b]P(s)[/b] curve from the same pass over the "
+        "pairs and write it beside the output as [cyan]<output>.ps.tsv[/cyan]. "
+        "Measured on read positions, so it resolves distances the binned map "
+        "cannot. No plot is drawn — pass the table to "
+        "[cyan]metacooler ps[/cyan] or your own plotting."
+    ),
+)
+@click.option(
+    "--ps-bins-per-decade",
+    type=int,
+    default=DEFAULT_BINS_PER_DECADE,
+    show_default=True,
+    help="Number of log-spaced distance bins per decade in the P(s) table.",
+)
+@click.option(
     "--sort-strategy",
     "sort_strategy",
     type=click.Choice(["auto", "memory", "external"]),
@@ -105,6 +125,8 @@ def cmd_create_pairs(
     metadata: Path | None,
     qc: bool,
     qc_threshold: str,
+    ps: bool,
+    ps_bins_per_decade: int,
 ) -> None:
     """
     Create a metacool file from a pairs file, bins, and contig assignments.
@@ -162,4 +184,7 @@ def cmd_create_pairs(
         metadata=meta,
         qc=qc,
         qc_distance_threshold=qc_distance_threshold,
+        ps=ps,
+        ps_bins_per_decade=ps_bins_per_decade,
+        force=force,
     )

@@ -178,6 +178,8 @@ metacooler create pairs --pairs P --bins B --contigs C -o OUT.metacool [OPTIONS]
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* anything is binned — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. See [Filtering with `--filter`](#filter). `genomes.n_bins` is not available here. |
 | `--qc / --no-qc` | on | Tally contact-quality statistics while the pairs are binned and store them in `metadata.qc` plus the `/genomes` `qc_*` columns. See [`qc`](#qc). Costs a few vectorised operations per chunk, and is the only way to get an *exact* short/long split — binning throws the sub-bin distances away. |
 | `--qc-threshold` | `10000` | Distance separating short- from long-range intra-contig signal. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--ps / --no-ps` | on | Accumulate a **per-MAG P(s) curve** from the same pass and write it beside the output as `<output>.ps.tsv`. Measured on read positions, so it resolves distances the binned map cannot. No plot is drawn. See [`ps`](#ps). |
+| `--ps-bins-per-decade` | `10` | Log-grid resolution of the P(s) table. |
 | `--chunksize` | `50000000` | Pairs processed per chunk. This is chunk *granularity*, not read memory (the pyarrow read block is capped separately). Under `external` sorting each chunk becomes a temporary cooler at a fixed per-call cost that scales with contig count, so smaller chunks cost disproportionately more. |
 | `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (`memory` unless the binned pixels exceed 100 M rows), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
 | `-f, --force` | off | Overwrite the output if it already exists. |
@@ -600,17 +602,18 @@ same MAG or not) are what [`qc`](#qc) counts instead.
 |--------|---------|-------------|
 | `-o, --output` | stdout | TSV destination. |
 | `--plot` | — | Also render the curve here (`.png`, `.pdf`, `.svg`). |
+| `--pairs` | — | Measure from this pairs file instead of the binned pixel table (plain text, `.gz`, `.bgz` — read by the same streamer `create pairs` uses). See [Two sources](#ps-sources). |
 | `--by` | `all` | `all` pools every selected contig into one curve; `genome` emits one curve per MAG. |
 | `--genomes` | — | Restrict to these genomes, **comma-separated or repeated**. |
 | `--contigs` | — | Restrict to these contigs, same syntax. |
 | `--filter` | — | Narrow the selection by property. Repeatable. See [Filtering with `--filter`](#filter). |
 | `--bins-per-decade` | `10` | Log-grid resolution. |
-| `--min-distance` | bin size | Upper edge of the leading `[0, min)` bin, which holds the diagonal. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--min-distance` | 1 bp with `--pairs`, else the bin size | Upper edge of the leading `[0, min)` bin, which holds separation 0. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--max-distance` | longest span | Largest separation to report. Same suffixes. |
 | `--value` | `prob` | Column plotted on the y axis: `prob` or `avg_contacts`. |
 | `--header / --no-header` | header on | Write a header row in the TSV. |
 | `--dpi` | `300` | Output image resolution. |
-| `--chunksize` | `50000000` | Pixels processed per chunk. |
+| `--chunksize` | `50000000` | Pixels (or pairs, under `--pairs`) processed per chunk. |
 | `-f, --force` | off | Overwrite existing outputs. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -618,11 +621,10 @@ same MAG or not) are what [`qc`](#qc) counts instead.
 
 | Column | Meaning |
 |--------|---------|
-| `group` | `all`, or the genome name under `--by genome`. |
-| `dist_min`, `dist_max` | Half-open distance-bin edges, in bp. |
-| `dist_mid` | Geometric centre of the bin — the x coordinate to plot against. |
+| `genome` | The MAG name under `--by genome`; `all` when the curves are pooled. |
+| `dist` | Geometric centre of the log-spaced distance bin, in bp — the x coordinate to plot against. |
 | `n_contacts` | Contacts observed at that separation. |
-| `n_bin_pairs` | Bin pairs that *could* have contributed one. |
+| `n_bin_pairs` | Opportunities: pairs of bins (or of positions, under `--pairs`) that *could* have contributed one. |
 | `avg_contacts` | `n_contacts / n_bin_pairs`. |
 | `prob` | `avg_contacts` normalised so the curve integrates to 1 over the reported range. |
 
@@ -631,11 +633,29 @@ offers only `n - d` pairs at separation *d*, so a raw count of long-range
 contacts is starved by construction and would look like a decay even on
 uniform data. Dividing it out is also what makes `--by genome` curves
 comparable between a 5 Mb MAG and a 300 kb one, and `prob` is what makes two
-libraries of different depth comparable. Distance bins that no pair of bins can
-populate (common on a coarse grid) are omitted rather than reported as zero.
+libraries of different depth comparable. Distance bins that nothing could
+populate are omitted rather than reported as a rate of zero.
+
+#### Two sources { #ps-sources }
+
+| | distances | `n_bin_pairs` counts | starts at |
+|---|---|---|---|
+| **pixels** (default) | between bin midpoints | pairs of **bins**, `n - d` per contig | one bin |
+| **pairs** (`--pairs`) | between read positions | pairs of **positions**, `L - s` per contig | 1 bp |
+
+A binned map cannot say anything below its own resolution: every sub-bin
+contact has already been collapsed onto the diagonal. Since the short-range
+head of P(s) is exactly where a metaHi-C library shows undigested fragments and
+self-religation, `create pairs` measures the curve while it still has the read
+positions, and writes it as `<output>.ps.tsv` — the same table `--pairs`
+recomputes, byte for byte. Reach for `--pairs` when you need that resolution on
+a file created earlier, or with a different distance grid or selection.
 
 ```bash
-# Pooled curve to stdout
+# The fine-grained curve create pairs already wrote, per MAG
+head gut_T0.ps.tsv
+
+# Pooled curve to stdout, from the binned map
 metacooler ps gut_T0.metacool
 
 # One curve per MAG, table + figure
@@ -645,8 +665,12 @@ metacooler ps gut_T0.metacool --by genome -o ps_by_mag.tsv --plot ps_by_mag.png
 metacooler ps gut_T0.metacool --by genome \
     --filter "genomes.length > 1Mb" --bins-per-decade 20 --plot ps_big_mags.pdf
 
-# Raw mean contacts per bin pair instead of the normalised probability
+# Raw mean contacts per opportunity instead of the normalised probability
 metacooler ps gut_T0.metacool --value avg_contacts --plot ps_raw.png
+
+# Base-pair resolution from the original pairs, for one MAG, plotted
+metacooler ps gut_T0.metacool --pairs contacts.pairs.gz \
+    --genomes MAG_01 --plot MAG_01_ps.png -o MAG_01_ps.tsv
 ```
 
 ### `show` { #show }

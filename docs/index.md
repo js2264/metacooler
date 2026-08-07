@@ -71,7 +71,9 @@ metacooler info gut_T0.metacool
 # Contact quality: the 3D ratio and its breakdown
 metacooler qc gut_T0.metacool --table
 
-# P(s), one curve per MAG
+# P(s), one curve per MAG — create pairs already wrote gut_T0.ps.tsv at
+# base-pair resolution; this re-reads it from the binned map, or from the
+# original pairs with --pairs
 metacooler ps gut_T0.metacool --by genome --plot ps.png
 
 # Genome-level heatmap

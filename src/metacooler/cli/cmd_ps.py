@@ -40,6 +40,19 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     ),
 )
 @click.option(
+    "--pairs",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help=(
+        "Measure from this pairs file instead of the binned pixel table "
+        "(plain text, [cyan].gz[/cyan], [cyan].bgz[/cyan] — read exactly as "
+        "[cyan]create pairs[/cyan] reads it). Distances then come from read "
+        "positions, so the curve starts at 1 bp instead of at one bin. The "
+        "metacool is still needed: it supplies the contig\u2192genome "
+        "assignment, the contig lengths, and the selection."
+    ),
+)
+@click.option(
     "--by",
     type=click.Choice(["all", "genome"]),
     default="all",
@@ -77,8 +90,9 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     default=None,
     help=(
         "Upper edge of the leading [cyan][0, min)[/cyan] distance bin, which "
-        "holds the diagonal. Defaults to the file's bin size. Accepts "
-        "[cyan]bp/kb/Mb/Gb[/cyan] suffixes."
+        "holds the diagonal. Defaults to 1 bp with [cyan]--pairs[/cyan], and "
+        "to the file's bin size without. Accepts [cyan]bp/kb/Mb/Gb[/cyan] "
+        "suffixes."
     ),
 )
 @click.option(
@@ -86,8 +100,8 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     type=str,
     default=None,
     help=(
-        "Largest separation to report. Defaults to the longest intra-contig "
-        "separation in the selection. Accepts [cyan]bp/kb/Mb/Gb[/cyan] suffixes."
+        "Largest separation to report. Defaults to the longest separation the "
+        "selected contigs can offer. Accepts [cyan]bp/kb/Mb/Gb[/cyan] suffixes."
     ),
 )
 @click.option(
@@ -97,7 +111,7 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     show_default=True,
     help=(
         "Column plotted on the y axis. [cyan]prob[/cyan]: unit-area normalised "
-        "P(s). [cyan]avg_contacts[/cyan]: mean contacts per bin pair."
+        "P(s). [cyan]avg_contacts[/cyan]: mean contacts per opportunity."
     ),
 )
 @click.option(
@@ -118,7 +132,7 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     type=int,
     default=DEFAULT_CHUNKSIZE,
     show_default=True,
-    help="Number of pixels to process per chunk.",
+    help="Number of pixels (or pairs, under --pairs) to process per chunk.",
 )
 @force_option
 @verbose_option
@@ -127,6 +141,7 @@ def cmd_ps(
     metacool_path: str,
     output: Path | None,
     plot: Path | None,
+    pairs: Path | None,
     by: str,
     genomes: list[str],
     contigs: list[str],
@@ -146,9 +161,15 @@ def cmd_ps(
 
     Only contacts whose two ends sit on the same contig take part — those are
     the ones a genomic distance is defined for.  Each distance bin reports the
-    contacts observed, the number of bin pairs that could have produced one,
-    and their ratio, so the decay is not confounded by the shrinking number of
-    long-range bin pairs a contig offers.
+    contacts observed, the number of opportunities that could have produced one
+    (bin pairs, or position pairs under ``--pairs``), and their ratio, so the
+    decay is not confounded by the shrinking number of long-range pairs a
+    contig offers.
+
+    Read from the binned map by default, which cannot resolve anything below
+    one bin; pass ``--pairs`` to measure the same curve from read positions.
+    ``create pairs`` already writes that finer table beside its output as
+    ``<output>.ps.tsv``.
     """
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.filters import parse_size
@@ -171,6 +192,7 @@ def cmd_ps(
         uri=metacool_path,
         out=output,
         plot=plot,
+        pairs=pairs,
         by=cast(Literal["all", "genome"], by),
         genomes=genomes or None,
         contigs=contigs or None,
