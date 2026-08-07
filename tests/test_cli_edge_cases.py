@@ -14,6 +14,7 @@ is present on PATH (e.g. when running ``pytest`` directly inside a venv).
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import h5py
@@ -442,7 +443,7 @@ class TestCreateCLI:
             ]
         )
         assert r.exit_code != 0
-        assert "must contain a JSON/YAML object" in r.output
+        assert "must contain a JSON/YAML object" in _flat(r.output)
 
     def test_create_drop_unassigned(
         self, tiny_contigs_table, tiny_bins_bed, tiny_pairs, tmp_path
@@ -622,6 +623,10 @@ class TestDumpCLI:
 
     # --- `dump … | head` is a normal end of pipeline, not a failure ---
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="needs `head` and SIGPIPE; Windows has neither",
+    )
     def test_dump_into_a_closed_pipe_reports_nothing(self):
         """``dump … | head`` used to print ``Error: [Errno 32] Broken pipe``.
 

@@ -47,8 +47,12 @@ from metacooler.ops.aggregate import aggregate
 from metacooler.schema import COOLER_FORMAT, MetaCoolerFormatError, check, validate
 
 # External cooler binary — intentionally subprocess, NOT CliRunner.
-# These tests verify third-party cooler CLI compatibility.
-_COOLER = str(Path(sys.executable).parent / "cooler")
+# These tests verify third-party cooler CLI compatibility. It sits next to the
+# interpreter (bin/ on POSIX, Scripts/ on Windows), but only Windows spells it
+# with an extension, so resolve the name rather than assuming it.
+_COOLER = shutil.which("cooler", path=str(Path(sys.executable).parent)) or str(
+    Path(sys.executable).parent / "cooler"
+)
 
 # Static .metacool used as a source for all module-scoped mutation fixtures.
 # Using a static file avoids re-creating a metacool per test.
