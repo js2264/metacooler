@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat as _flat
 
 from metacooler.api import MetaCooler
 from metacooler.io._utils import chrom_codes
@@ -505,7 +506,9 @@ def test_cli_ps_stdout(tiny_metacooler):
     result = CliRunner().invoke(cli, ["ps", str(tiny_metacooler), "-q"])
     assert result.exit_code == 0, result.output
     header, *rows = result.output.strip().splitlines()
-    assert header.split("\t") == list(PS_COLUMNS)
+    # rstrip("\r"): pandas writes "\n", but a text stdout on Windows translates
+    # it, so the last field of every line would otherwise carry a stray CR.
+    assert header.rstrip("\r").split("\t") == list(PS_COLUMNS)
     assert rows
 
 
@@ -571,4 +574,4 @@ def test_cli_ps_rejects_a_bad_distance(tiny_metacooler):
         cli, ["ps", str(tiny_metacooler), "--min-distance", "far", "-q"]
     )
     assert result.exit_code != 0
-    assert "not a number" in result.output
+    assert "not a number" in _flat(result.output)

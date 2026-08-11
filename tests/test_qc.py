@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat as _flat
 
 from metacooler.api import MetaCooler
 from metacooler.io.create import from_cool, from_pairs
@@ -447,7 +448,7 @@ def test_cli_qc_rejects_a_bad_threshold(tiny_metacooler):
         cli, ["qc", str(tiny_metacooler), "--threshold", "ten-kb", "-q"]
     )
     assert result.exit_code != 0
-    assert "not a number" in result.output
+    assert "not a number" in _flat(result.output)
 
 
 def test_cli_qc_per_genome_tsv(tmp_path: Path, tiny_metacooler):
