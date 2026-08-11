@@ -2,20 +2,28 @@ name: CI
 
 on:
   push:
-    branches:
-      - devel
-      - main
   pull_request:
-    branches:
-      - devel
-      - main
+
+# A rapid series of pushes to the same ref only bills the last one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        # Full Python matrix on Linux; one representative version elsewhere
+        # (macOS runners bill at 10x, Windows at 2x).
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
       fail-fast: false
 
     steps:
@@ -46,6 +54,9 @@ jobs:
         run: uv run metacooler --version
 
       - name: Run tests with coverage
+        # Explicit bash: the default shell on windows-latest is pwsh, which
+        # does not treat a trailing backslash as a line continuation.
+        shell: bash
         run: |
           uv run pytest tests/ \
             --cov=metacooler \
@@ -54,7 +65,7 @@ jobs:
             -v
 
       - name: Upload coverage reports
-        if: matrix.python-version == '3.12'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v6
         with:
           files: ./coverage.xml

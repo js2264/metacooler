@@ -478,6 +478,76 @@ metacooler show assembly_1_rep1_1kb.metacool --level genome -f -o show_genome.pn
 ls -1 show_*.png
 
 # ================================================================================
+## qc
+# ================================================================================
+
+## `create` already stored a block measured on the raw read positions.
+metacooler metadata get assembly_1_rep1_1kb.metacool -k qc
+## The per-genome columns live in /genomes and dump like any other column.
+metacooler dump --table genomes --header assembly_1_rep1_1kb.metacool | head -n 3
+## Recomputing from the pixel table gives the same totals with a coarser
+## intra-contig split, and says so via "source": "pixels".
+metacooler qc assembly_1_rep1_1kb.metacool -q
+metacooler qc assembly_1_rep1_1kb.metacool --table --threshold 5kb -q
+metacooler qc assembly_1_rep1_1kb.metacool --per-genome qc_per_genome.tsv -q > qc_pixels.json
+head -n 3 qc_per_genome.tsv
+## Every category is a share of the same total, so the four sum back to it.
+python -c "
+import json
+b = json.load(open('qc_pixels.json'))
+parts = ['intra_contig_short', 'intra_contig_long', 'inter_contig_intra_genome', 'inter_genome']
+assert sum(b[k] for k in parts) == b['n_contacts'], b
+print('  OK    qc: categories sum to n_contacts')
+"
+## -o refuses to clobber, like every other writer (expected error).
+metacooler qc assembly_1_rep1_1kb.metacool -o qc_pixels.json -q || echo "  (expected: output exists, use --force)"
+## --store writes the block back; the file must stay a valid metacool AND a
+## valid cooler afterwards.
+cp assembly_1_rep1_1kb.metacool qc_stored.metacool
+metacooler qc qc_stored.metacool --store -q > /dev/null
+metacooler check qc_stored.metacool
+cooler info qc_stored.metacool > /dev/null && echo "  OK    qc --store: still opens as a cooler"
+
+# ================================================================================
+## ps
+# ================================================================================
+
+## `create pairs` already wrote the fine-grained, per-MAG table beside its
+## output — measured on read positions, so it resolves below the 1 kb grid.
+head -n 3 assembly_1_rep1_1kb.ps.tsv
+## Recomputing it from the same pairs must reproduce that file byte for byte.
+metacooler ps assembly_1_rep1_1kb.metacool --pairs ../contacts_1_rep1.pairs.gz \
+    --by genome -o ps_recomputed.tsv -q
+assert_identical "ps --pairs == create pairs sidecar" \
+    assembly_1_rep1_1kb.ps.tsv ps_recomputed.tsv
+## …and the pairs-derived curve reaches distances the binned one cannot.
+python -c "
+import pandas as pd
+pairs = pd.read_csv('ps_recomputed.tsv', sep='\t')
+assert pairs['dist'].min() < 1000, pairs['dist'].min()
+print('  OK    ps --pairs: resolves below the bin size')
+"
+
+metacooler ps assembly_1_rep1_1kb.metacool -q | head -n 5
+metacooler ps assembly_1_rep1_1kb.metacool -q -o ps_pooled.tsv --plot ps_pooled.png
+metacooler ps assembly_1_rep1_1kb.metacool -q --by genome -o ps_by_genome.tsv --plot ps_by_genome.png
+metacooler ps assembly_1_rep1_1kb.metacool -q --genomes MAG_05,MAG_06 --bins-per-decade 5 -o ps_two_mags.tsv
+metacooler ps assembly_1_rep1_1kb.metacool -q --filter "genomes.length > 100kb" --value avg_contacts --plot ps_big.png -o ps_big.tsv
+## Summing the per-genome curves returns the pooled one: same contacts, same
+## possible bin pairs, just grouped differently.
+python -c "
+import pandas as pd
+pooled = pd.read_csv('ps_pooled.tsv', sep='\t')
+by_genome = pd.read_csv('ps_by_genome.tsv', sep='\t')
+assert pooled['n_contacts'].sum() == by_genome['n_contacts'].sum()
+assert pooled['n_bin_pairs'].sum() == by_genome['n_bin_pairs'].sum()
+print('  OK    ps: --by genome partitions the pooled curve')
+"
+## Both outputs refuse to clobber (expected error).
+metacooler ps assembly_1_rep1_1kb.metacool -q -o ps_pooled.tsv || echo "  (expected: output exists, use --force)"
+ls -1 ps_*.png ps_*.tsv
+
+# ================================================================================
 ## check
 # ================================================================================
 

@@ -10,6 +10,7 @@ import rich_click as click
 from metacooler.cli._options import check_output
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
+from metacooler.ps import DEFAULT_BINS_PER_DECADE
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 
@@ -73,6 +74,25 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     "disproportionately more.",
 )
 @click.option(
+    "--ps/--no-ps",
+    default=True,
+    show_default=True,
+    help=(
+        "Accumulate a per-MAG [b]P(s)[/b] curve from the same pass over the "
+        "pairs and write it beside the output as [cyan]<output>.ps.tsv[/cyan]. "
+        "Measured on read positions, so it resolves distances the binned map "
+        "cannot. No plot is drawn — pass the table to "
+        "[cyan]metacooler ps[/cyan] or your own plotting."
+    ),
+)
+@click.option(
+    "--ps-bins-per-decade",
+    type=int,
+    default=DEFAULT_BINS_PER_DECADE,
+    show_default=True,
+    help="Number of log-spaced distance bins per decade in the P(s) table.",
+)
+@click.option(
     "--sort-strategy",
     "sort_strategy",
     type=click.Choice(["auto", "memory", "external"]),
@@ -103,16 +123,25 @@ def cmd_create_pairs(
     verbose: bool,
     quiet: bool,
     metadata: Path | None,
+    qc: bool,
+    qc_threshold: str,
+    ps: bool,
+    ps_bins_per_decade: int,
 ) -> None:
     """
     Create a metacool file from a pairs file, bins, and contig assignments.
     """
     from metacooler.cli.logging_utils import setup_logging
+    from metacooler.filters import parse_size
     from metacooler.io.create import from_pairs
 
     setup_logging(verbose, command_name="metacooler create pairs", quiet=quiet)
 
     check_output(output, force)
+    try:
+        qc_distance_threshold = int(parse_size(qc_threshold))
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--qc-threshold") from exc
 
     # Map --sort-strategy to sort_in_memory bool
     sort_in_memory: bool | None = {"auto": None, "memory": True, "external": False}[
@@ -153,4 +182,9 @@ def cmd_create_pairs(
         chunksize=chunksize,
         sort_in_memory=sort_in_memory,
         metadata=meta,
+        qc=qc,
+        qc_distance_threshold=qc_distance_threshold,
+        ps=ps,
+        ps_bins_per_decade=ps_bins_per_decade,
+        force=force,
     )

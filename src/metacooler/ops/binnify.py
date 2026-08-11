@@ -15,6 +15,7 @@ from metacooler.io._utils import (
     resolve_count_dtype,
     to_upper_triangle,
 )
+from metacooler.qc import strip_qc_columns, strip_qc_metadata
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -602,10 +603,16 @@ def _write_rebinned_metacool(
     genome_offset = np.concatenate([[0], np.cumsum(genome_counts)]).astype(np.int64)
 
     # Provenance: keep the source file's metadata and append this re-binning.
-    metadata = dict(source_metadata or {})
+    # The QC block is the exception — its short/long intra-contig split is a
+    # statement about the source resolution, so carrying it onto a coarser grid
+    # would attach numbers to a file they were never measured on. Same for the
+    # per-genome qc_* columns of the tables below.
+    metadata = strip_qc_metadata(source_metadata)
     history = list(metadata.get("binnify", []))
     history.append({"source": str(source_uri), "binsize": int(binsize), "level": level})
     metadata["binnify"] = history
+    genomes = strip_qc_columns(genomes)
+    contigs = strip_qc_columns(contigs)
 
     # Pixel chunks arrive sorted and de-duplicated but the chunk sequence is not
     # globally ordered, so ordered=False (cooler's merge pass sums duplicate bin

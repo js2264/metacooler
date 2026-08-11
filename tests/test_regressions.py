@@ -23,6 +23,8 @@ import h5py
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat as _flat
+from _cli_output import squash as _squash
 from click.testing import CliRunner
 
 from metacooler.api import MetaCooler
@@ -127,6 +129,15 @@ def _append_empty_genome(path: Path, name: str = "MAG_EMPTY") -> None:
             "n_contigs": np.append(np.asarray(g["n_contigs"][:]).astype(np.int32), 0),
             "n_bins": np.append(np.asarray(g["n_bins"][:]).astype(np.int64), 0),
         }
+        # Extend every *other* column too — a table with one short column is a
+        # different bug from the one under test, and `validate` rejects it
+        # first. `create` writes qc_* columns here, and a user genomes table
+        # may add arbitrary ones.
+        for key in g:
+            if key in columns:
+                continue
+            values = np.asarray(g[key][:])
+            columns[key] = np.append(values, values.dtype.type(0))
         for key, data in columns.items():
             del g[key]
             g.create_dataset(key, data=data)
@@ -420,8 +431,8 @@ class TestMetadataAndProvenance:
         """
         result = runner.invoke(cli, [args[0], args[1], str(tiny_mmetacool), *args[2:]])
         assert result.exit_code != 0
-        assert "mmetacool collection" in result.output
-        assert "entries/entry1" in result.output
+        assert "mmetacool collection" in _flat(result.output)
+        assert "entries/entry1" in _squash(result.output)
         # And the root was left untouched.
         with h5py.File(tiny_mmetacool, "r") as f:
             assert "metadata" not in f.attrs
@@ -436,7 +447,7 @@ class TestMetadataAndProvenance:
             cli, ["metadata", "load", str(meta_file), str(tiny_mmetacool)]
         )
         assert result.exit_code != 0
-        assert "mmetacool collection" in result.output
+        assert "mmetacool collection" in _flat(result.output)
 
     def test_metadata_file_cannot_hijack_the_provenance_key(
         self,

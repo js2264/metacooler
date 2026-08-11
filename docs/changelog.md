@@ -77,6 +77,55 @@
 
 ### Added
 
+- **`qc`**: contact-quality statistics — where a library's contacts actually
+  land. Every contact is classified into one of four categories
+  (`intra_contig_short` / `intra_contig_long`, split at `--threshold`, default
+  10 kb; `inter_contig_intra_genome`; `inter_genome`), from which the headline
+  **3D ratio** (`trans_contig_ratio`, the share of contacts joining two
+  different contigs) and the intra-/inter-MAG breakdown follow. `create pairs`
+  and `create cool` now compute the block during creation at essentially no
+  cost — they are already streaming every pair or pixel — and store it in
+  `metadata.qc` plus five per-genome `qc_*` columns of `/genomes`, including
+  `qc_intra_genome_ratio`, a per-MAG "how self-contained is this bin?" score.
+  Pass `--no-qc` to skip it. The standalone `metacooler qc` command recomputes
+  the same block from any existing file's pixel table (`--table`,
+  `--per-genome FILE.tsv`, `--store`). The two sources agree on every total;
+  only the intra-contig short/long split differs, because binning discards the
+  sub-bin distances — which is why `create pairs` measures it on raw read
+  positions and records `source="pairs"`. `binnify` and `merge` drop the block
+  and the columns rather than carry stale numbers onto a different pixel table,
+  and `merge` ignores `qc_*` when comparing input `/genomes` tables, so two
+  libraries over one assembly still merge. See [`qc`](cli.md#qc).
+- **`ps`**: P(s), contact probability as a function of genomic distance, as a
+  TSV (`-o`) and/or a log-log figure (`--plot`), pooled or one curve per MAG
+  (`--by genome`), with the usual `--genomes`/`--contigs`/`--filter`
+  selection. Columns are `genome`, `dist`, `n_contacts`, `n_bin_pairs`,
+  `avg_contacts`, `prob`. Each log-spaced distance bin reports the contacts
+  observed *and* the number of opportunities that could have produced one, so
+  the decay is not confounded by the shrinking number of long-range pairs a
+  contig offers, and a normalised `prob` column that integrates to 1 makes
+  libraries of different depth comparable. Only intra-contig contacts take
+  part — the ones a genomic distance is defined for. The bin-pair denominator
+  is counted with a single global `searchsorted` per distance edge over a
+  contig-folded key, and the position-pair one in closed form per contig, so
+  neither costs a per-contig Python loop on a metagenome. See
+  [`ps`](cli.md#ps).
+- **P(s) at base-pair resolution, measured during creation.** A curve read off
+  a binned map cannot resolve anything below one bin, which is precisely where
+  a metaHi-C library shows its undigested fragments and self-religation. So
+  `create pairs` now accumulates a **per-MAG** curve from the raw read
+  positions during the pass it already makes over the pairs, and writes it
+  beside the output as `<output>.ps.tsv` (`--no-ps` opts out,
+  `--ps-bins-per-decade` sets the grid). No plot is drawn. Measured cost on
+  4 M pairs: none outside run-to-run noise — one `searchsorted` and one
+  `bincount` per chunk over the intra-contig rows, and a closed-form
+  denominator computed once.
+- **`ps --pairs`** recomputes that fine-grained curve for a file created
+  earlier, with a different grid or selection. The pairs file goes through the
+  same reader `create pairs` uses, so compression and column handling are
+  identical by construction, and the output is byte-for-byte the table
+  `create` wrote. The map still supplies the contig→genome assignment, the
+  contig lengths, and the selection.
 - **`--filter`**, a repeatable predicate selector on `create pairs`,
   `create cool`, `extract`, `dump`, and `show`, for choosing genomes and contigs
   by *property* rather than by name: `--filter "genomes.length > 1Mb"`,

@@ -669,6 +669,67 @@ def _finalize_metacool_file(
                 f.attrs["genome-assembly"] = assembly_name
 
 
+def store_qc(
+    path: str | Path,
+    summary: dict,
+    per_genome: pd.DataFrame | None = None,
+    *,
+    group_path: str = "/",
+) -> None:
+    """Write a QC block into an existing metacool file.
+
+    The single writer for both producers — ``create`` (right after
+    :func:`_finalize_metacool_file`) and ``metacooler qc --store`` on a file
+    that already exists — so the two cannot disagree about where the numbers
+    live or what they are called.
+
+    Two things are written:
+
+    - ``metadata["qc"]``, merged into whatever the ``metadata`` attribute
+      already holds, so a user's own keys survive;
+    - one ``/genomes`` column per :data:`metacooler.qc.QC_GENOME_COLUMNS`,
+      replacing any column of that name left by an earlier run.
+
+    Args:
+        path: Metacool file to annotate, in place.
+        summary: The block from :meth:`metacooler.qc.ContactQC.summary`.
+        per_genome: Per-genome table from
+            :meth:`metacooler.qc.ContactQC.genome_table`, or ``None`` to write
+            the file-level block only.
+        group_path: HDF5 group of the map, for an mmetacool entry.
+
+    Raises:
+        ValueError: If *per_genome* does not have one row per ``/genomes`` row.
+    """
+    import json
+
+    from metacooler.qc import QC_GENOME_COLUMNS, QC_METADATA_KEY
+
+    with h5py.File(path, "r+") as f:
+        grp = f[group_path.lstrip("/")] if group_path.strip("/") else f
+
+        raw = grp.attrs.get("metadata", "{}")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        metadata = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        metadata[QC_METADATA_KEY] = summary
+        grp.attrs["metadata"] = json.dumps(metadata)
+
+        if per_genome is None:
+            return
+        genomes = grp["genomes"]
+        n_genomes = len(genomes["name"])
+        if len(per_genome) != n_genomes:
+            raise ValueError(
+                f"QC table has {len(per_genome)} row(s) but /genomes has "
+                f"{n_genomes}; refusing to write columns that would not line up."
+            )
+        for column in QC_GENOME_COLUMNS:
+            if column in genomes:
+                del genomes[column]
+            genomes.create_dataset(column, data=per_genome[column].to_numpy())
+
+
 def _filter_by_genomes_and_contigs(
     mc: MetaCooler,
     genomes: Sequence[str] | None = None,

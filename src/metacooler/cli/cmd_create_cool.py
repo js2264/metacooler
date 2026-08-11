@@ -82,6 +82,8 @@ def cmd_create_cool(
     force: bool,
     verbose: bool,
     quiet: bool,
+    qc: bool,
+    qc_threshold: str,
 ) -> None:
     """Create a metacool file from an existing cool file.
 
@@ -89,11 +91,16 @@ def cmd_create_cool(
     hierarchy. Bins and pixels from the input cool file are preserved exactly.
     """
     from metacooler.cli.logging_utils import setup_logging
+    from metacooler.filters import parse_size
     from metacooler.io.create import from_cool
 
     setup_logging(verbose, command_name="metacooler create cool", quiet=quiet)
 
     check_output(output, force)
+    try:
+        qc_distance_threshold = int(parse_size(qc_threshold))
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--qc-threshold") from exc
 
     # Map --sort-strategy to sort_in_memory bool
     sort_in_memory: bool | None = {"auto": None, "memory": True, "external": False}[
@@ -124,4 +131,6 @@ def cmd_create_cool(
         metadata=meta,
         nproc=nproc,
         sort_in_memory=sort_in_memory,
+        qc=qc,
+        qc_distance_threshold=qc_distance_threshold,
     )
