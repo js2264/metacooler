@@ -11,6 +11,18 @@ from pathlib import Path
 
 import rich_click as click
 
+# Help text for the ``--contigs-format`` option, shared by every command that
+# reads a contig-to-genome assignment table (``create pairs``, ``create cool``,
+# ``reassign``).  One copy, so the four formats cannot drift apart between the
+# command that writes a file and the command that re-labels it.
+CONTIGS_FORMAT_HELP = """
+    Format of the contig assignment table. Four formats are supported: [dim]\\[default: contigs][/dim]\n
+    - [yellow]contigs[/yellow]: TSV [white][bold]with a header row[/white][/bold]. Column 1 must be named `contig_name` and column 2 `genome_name`. Additional columns are stored verbatim.\n
+    - [yellow]contig_genome[/yellow]: Two-column TSV (`contig<TAB>genome`) [white][bold]with no header[/white][/bold]. First value is contig name, second is genome assignment.\n
+    - [yellow]metator[/yellow]: MetaTOR output table (ie `contig_data_final.txt`). Expects a header with columns `Name` (contig) and `Final_bin` (genome). Other columns ignored.\n
+    - [yellow]I,J(,noheader)[/yellow]: Column-index spec (1-based). Use column `I` for contigs and `J` for genomes. Header expected by default. Append `,noheader` (e.g., `1,5,noheader`) to treat the first row as data.
+    """
+
 
 def parse_comma_list(ctx, param, value):
     """Parse a comma-separated or repeated multi-value option into a flat list.

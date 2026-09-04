@@ -43,6 +43,31 @@ STORAGE_MODES = frozenset({"symmetric-upper", "square"})
 # offset array (see ``validate``).
 GENOME_GROUPED_ORDERINGS = frozenset({"genome-then-length", "genome-then-alpha"})
 
+# ``contig-ordering`` value for a file whose row order is inherited from an
+# earlier layout and is no longer described by any creation strategy.  Written
+# by ``reassign --layout keep`` when the new assignment breaks genome grouping:
+# keeping ``genome-then-alpha`` there would claim an invariant the file no
+# longer has (and ``validate`` below would refuse the file for it), while
+# ``alpha``/``fasta`` would claim a different one it never had.
+CUSTOM_ORDERING = "custom"
+
+# The ``--layout`` vocabulary of ``reassign``: the two orderings it can lay a
+# file out with, plus the two policy words that choose between re-ordering and
+# leaving the rows alone.  Here rather than in ``io.reassign`` so the CLI can
+# build its ``click.Choice`` at import time without pulling the io layer (and
+# with it cooler and pyfaidx) into every ``metacooler --help``.
+Layout = Literal["auto", "keep", "genome-then-alpha", "genome-then-length"]
+LAYOUT_CHOICES: tuple[str, ...] = (
+    "auto",
+    "keep",
+    "genome-then-alpha",
+    "genome-then-length",
+)
+# The subset of ``io.create._build_contig_order`` strategies a reassignment can
+# use: ``fasta`` and ``cool`` are creation-time orders that need a source file
+# to read them from, so they are not on offer.
+ContigOrderStrategy = Literal["genome-then-alpha", "genome-then-length"]
+
 # Column dtypes for metacooler-specific tables.
 # ``n_bins`` is deliberately absent from GENOMES_DTYPE: the column is inserted
 # into the genomes table by ``io.create._compute_all_offsets`` *after* the

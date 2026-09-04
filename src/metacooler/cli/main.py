@@ -194,7 +194,7 @@ click.rich_click.COMMAND_GROUPS = {
     "metacooler": [
         {
             "name": "Create and edit",
-            "commands": ["create", "merge", "binnify", "zoomify"],
+            "commands": ["create", "reassign", "merge", "binnify", "zoomify"],
         },
         {
             "name": "Extract and view",
@@ -256,6 +256,7 @@ from metacooler.cli import (  # noqa: E402, F401
     cmd_network,
     cmd_ps,
     cmd_qc,
+    cmd_reassign,
     cmd_rm,
     cmd_show,
     cmd_stack,

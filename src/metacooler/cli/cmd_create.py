@@ -7,6 +7,7 @@ from pathlib import Path
 import rich_click as click
 
 from metacooler.cli._options import (
+    CONTIGS_FORMAT_HELP,
     filter_option,
     force_option,
     quiet_option,
@@ -14,14 +15,6 @@ from metacooler.cli._options import (
 )
 from metacooler.cli.main import cli
 from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD
-
-_CONTIGS_FORMAT_HELP = """
-    Format of the contig assignment table. Four formats are supported: [dim]\\[default: contigs][/dim]\n
-    - [yellow]contigs[/yellow]: TSV [white][bold]with a header row[/white][/bold]. Column 1 must be named `contig_name` and column 2 `genome_name`. Additional columns are stored verbatim.\n
-    - [yellow]contig_genome[/yellow]: Two-column TSV (`contig<TAB>genome`) [white][bold]with no header[/white][/bold]. First value is contig name, second is genome assignment.\n
-    - [yellow]metator[/yellow]: MetaTOR output table (ie `contig_data_final.txt`). Expects a header with columns `Name` (contig) and `Final_bin` (genome). Other columns ignored.\n
-    - [yellow]I,J(,noheader)[/yellow]: Column-index spec (1-based). Use column `I` for contigs and `J` for genomes. Header expected by default. Append `,noheader` (e.g., `1,5,noheader`) to treat the first row as data.
-    """
 
 
 def shared_options(f):
@@ -54,7 +47,7 @@ def shared_options(f):
             type=str,
             default="contigs",
             show_default=False,
-            help=_CONTIGS_FORMAT_HELP,
+            help=CONTIGS_FORMAT_HELP,
         ),
         click.option(
             "--genomes",

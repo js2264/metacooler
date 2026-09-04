@@ -64,6 +64,7 @@ class TestInit:
             "from_pairs",
             "from_cool",
             # transforms and readers
+            "reassign",
             "extract",
             "flatten",
             "merge",

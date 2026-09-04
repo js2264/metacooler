@@ -118,9 +118,9 @@ work correctly.
 
 `genome_offset` is written for every file, but it only *delimits* contiguous
 per-genome blocks under a genome-grouped `contig-ordering` (`genome-then-length`,
-`genome-then-alpha`, `genomeid-then-alpha`). Under `fasta`, `alpha` or `cool`
-ordering a genome's contigs may be scattered, so readers must fall back to
-filtering `/contigs/genome_id` rather than slicing with `genome_offset`.
+`genome-then-alpha`). Under `fasta`, `alpha`, `cool` or `custom` ordering a
+genome's contigs may be scattered, so readers must fall back to filtering
+`/contigs/genome_id` rather than slicing with `genome_offset`.
 
 ### Identity check
 
@@ -199,7 +199,10 @@ print(metacooler.is_mmetacooler("gut_T0.mmetacool"))  # True
 
 The order of contigs in `/contigs` and `/bins` is fixed at creation time and
 stored in the `contig-ordering` attribute. Merging two files requires identical
-ordering.
+ordering. `reassign` is the one command that can change it after the fact: a
+re-grouping rewrites the rows into the named strategy, and `--layout keep`
+downgrades the attribute to `custom` rather than let the file keep claiming a
+grouping its rows no longer have.
 
 | Strategy | Description |
 |----------|-------------|
@@ -208,6 +211,7 @@ ordering.
 | `fasta` | Preserve the order of contigs as they appear in the FASTA or pairs header. |
 | `alpha` | All contigs sorted alphabetically, ignoring genome assignment. |
 | `cool` | Preserve the exact contig order of the input cooler. `create cool` only. |
+| `custom` | Row order inherited from an earlier layout and no longer described by any strategy. Written by `reassign --layout keep` when the new assignment breaks genome grouping; not a value `create` can produce. |
 
 ---
 

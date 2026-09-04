@@ -253,6 +253,129 @@ metacooler create cool \
     -o sample.metacool
 ```
 
+### `reassign` { #reassign }
+
+Re-attribute contigs to genomes (MAGs) in a file that already exists, from a
+new contig-to-genome table — a re-binning, a curation pass, a merge of two
+MAGs. The contact matrix is **never recomputed**: the contigs, their lengths
+and their bins are those of the source file and every pixel keeps its count.
+**API:** `metacooler.reassign` (`metacooler.io.reassign.reassign`).
+
+```console
+metacooler reassign METACOOL_PATH --contigs TABLE -o OUT.metacool [OPTIONS]
+metacooler reassign METACOOL_PATH --contigs TABLE --inplace [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--contigs` | *required* | New contig-to-genome table. It need not list every contig — see `--missing`. Only its two name columns are read; extra columns are ignored. |
+| `--contigs-format` | `contigs` | Same choices as `create pairs`: `contigs`, `contig_genome`, `metator`, or an `I,J[,noheader]` column spec. |
+| `-o, --output` | *required* | Output `.metacool` path. Required unless `--inplace`. |
+| `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file. Only possible when no contig has to move (see `--layout`). |
+| `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. |
+| `--missing` | `keep` | What to do with a contig the table does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
+| `--layout` | `auto` | `auto`, `keep`, `genome-then-alpha`, or `genome-then-length` — see below. |
+| `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
+| `--qc / --no-qc` | on | Recompute the contact-quality block when the source carries one. With `--no-qc` the stale block is dropped and not replaced. |
+| `--chunksize` | `50000000` | Source pixels read and remapped per chunk, on the re-ordering path only. |
+| `-f, --force` | off | Overwrite the output if it already exists. |
+| `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+What is rewritten, and what is not:
+
+- `/genomes` is *derived* from the assignment, so the whole table is rebuilt:
+  rows appear and disappear as genomes are created and emptied, every
+  `genome_id` is renumbered (`__unbinned__` first, then alphabetical), and
+  `length`, `n_contigs` and `n_bins` are recomputed. So is
+  `indexes/genome_offset`.
+- `/contigs` keeps its rows and every extra column; only `genome_id` changes.
+- `/bins` and `/pixels` are untouched unless the layout has to be restored
+  (below).
+
+#### The layout, and why a reassignment can cost a full rewrite { #reassign-layout }
+
+Under a genome-grouped `contig-ordering` (`genome-then-length`,
+`genome-then-alpha` — the defaults) the contigs are *physically* laid out in
+ascending `genome_id` order. That is what makes `genome_offset` delimit a
+genome's contig block and a genome's bins a contiguous range, which
+[`show`](#show), [`ps`](#ps) and `MetaCooler.genome_extent()` all rely on. Move
+one contig between two non-adjacent MAGs and the layout no longer holds —
+[`check`](#check) rejects the file, and it is right to.
+
+Restoring it means permuting the contigs, hence the bins, hence every pixel's
+bin ids: an O(nnz) rewrite. `--layout` is the choice between paying that and
+giving up the guarantee:
+
+| `--layout` | What it does | Cost |
+|------------|--------------|------|
+| `auto` | Re-group a file whose `contig-ordering` is genome-grouped; leave the order of any other file (`fasta`, `alpha`, `cool`) alone, since it never made the promise. | Whichever of the two below applies. |
+| `keep` | Never re-order. The file is recorded as `contig-ordering="custom"`, because it can no longer claim to be grouped. | O(n_contigs) — the file is copied and four datasets are rewritten. |
+| `genome-then-alpha`, `genome-then-length` | Re-group with that strategy, whatever the source used. | O(nnz) — bins are permuted and pixels remapped and re-sorted. |
+
+A re-grouping that turns out to reproduce the order the file already has is
+detected and skipped, so merging two adjacent MAGs, renaming one, or unbinning
+a contig usually costs nothing. `--inplace` is available exactly when no
+re-ordering is needed, and is refused (before writing anything) when one is.
+
+!!! warning "`--layout keep` gives up contiguous genomes"
+    Under `contig-ordering="custom"` a genome's contigs may be scattered
+    through `/contigs`, so `genome_offset` no longer delimits them and anything
+    that needs one bin range per genome fails loudly rather than returning a
+    range that includes foreign bins:
+
+    ```console
+    $ metacooler show out.metacool --genomes MAG_01 -o mag01.png
+    Error: Genome 'MAG_01' is not contiguous in bin space under contig-ordering
+    'custom'; a single bin range cannot represent it. […]
+    ```
+
+    Selecting by contig *membership* is unaffected: `dump --genomes`,
+    `extract --genomes`, `MetaCooler.bins_for_genome()` and
+    `MetaCooler.genome_bin_ids()` all still work. Re-run with
+    `--layout genome-then-alpha` to get the contiguity back.
+
+#### What a reassignment invalidates
+
+- **The QC block.** Three of its four categories (`inter_contig_intra_genome`,
+  `inter_genome`, and every per-genome `qc_*` column) are defined by the
+  contig-to-genome assignment, so the source block cannot be carried over. With
+  `--qc` (the default) it is recomputed from the new assignment, at the source's
+  own distance threshold; with `--no-qc` it is dropped and
+  [`qc --store`](#qc) can add it back later.
+- **Per-genome metadata columns.** Columns from the source `/genomes` table are
+  carried over for the genomes that survive, and a genome whose contig set
+  changed keeps values (completeness, contamination, …) that were computed for
+  a different set of contigs. Pass `--genomes` with a fresh table to replace
+  them. `/contigs` columns are always still true — contigs are not modified.
+- **`merge` compatibility.** [`merge`](#merge) requires identical contigs,
+  genomes and ordering, so a reassigned file no longer merges with un-reassigned
+  replicates. Reassign every replicate with the same table, or merge first and
+  reassign the result.
+
+!!! note "`reassign` never adds or removes a contig"
+    A name in the table that is not a contig of the file is ignored with a
+    warning (and a table matching *no* contig at all is refused — that is a
+    wrong table, or a wrong `--contigs-format`). To *drop* contigs, and the
+    pixels that touch them, use [`extract`](#extract).
+
+```bash
+# Incremental: move two contigs into MAG_07, leave everything else alone
+metacooler reassign gut_T0.metacool --contigs fixes.tsv -o gut_T0_curated.metacool
+
+# A fresh MetaTOR run is authoritative: anything it does not bin becomes unbinned
+metacooler reassign gut_T0.metacool \
+    --contigs contig_data_final.txt --contigs-format metator \
+    --missing unbinned \
+    --genomes mag_quality_v2.tsv \
+    -o gut_T0_v2.metacool
+
+# Relabel a 400 GB file without rewriting its pixel table
+metacooler reassign huge.metacool --contigs fixes.tsv --layout keep --inplace
+
+# One entry of a collection; the output is a standalone map
+metacooler reassign reps.mmetacool::entries/rep1 --contigs fixes.tsv -o rep1_v2.metacool
+```
+
 ### `merge` { #merge }
 
 Sum the pixel counts of two or more metacool files that share **identical**

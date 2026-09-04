@@ -1825,6 +1825,8 @@ def _staged_output(final: Path) -> Iterator[Path]:
 def _remap_bins(
     bins: pd.DataFrame,
     contig_order: list[str],
+    *,
+    keep_extra_columns: bool = False,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Remap a bins DataFrame to new contig IDs and return the old→new bin mapping.
 
@@ -1834,6 +1836,14 @@ def _remap_bins(
     Args:
         bins: Original bins DataFrame (``chrom`` column contains contig names).
         contig_order: List of contig names defining the new ordering.
+        keep_extra_columns: Carry every column beyond ``chrom``/``start``/``end``
+            through the permutation instead of dropping it.  ``from_cool`` leaves
+            this off — it is *importing* a foreign cooler, whose per-bin columns
+            (a ``weight`` from a balancing run on the source's own bin ids) it
+            makes no claim about.  ``reassign`` turns it on, because there the
+            permutation is the only thing that happens: the bins themselves are
+            unchanged, so a balancing weight still describes its bin and dropping
+            it would silently unbalance the file.
 
     Returns:
         ``(bins_remapped, old_to_new_bin)`` where *bins_remapped* contains only
@@ -1852,7 +1862,11 @@ def _remap_bins(
     # sentinel to discard pixels touching dropped contigs.
     kept_mask = bins_work["chrom"].notna().values
     original_kept_indices = np.where(kept_mask)[0]
-    bins_remapped = bins_work.loc[kept_mask, ["chrom", "start", "end"]].copy()
+    core = ["chrom", "start", "end"]
+    extras = (
+        [c for c in bins_work.columns if c not in core] if keep_extra_columns else []
+    )
+    bins_remapped = bins_work.loc[kept_mask, core + extras].copy()
     bins_remapped = bins_remapped.astype(
         {"chrom": np.int32, "start": np.int32, "end": np.int32}
     )
