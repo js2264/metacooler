@@ -12,10 +12,14 @@ Two file types exist:
 
 ## Commands
 
-Uses `uv` (not pip directly) and `ty` as the type checker (**not mypy**).
+Uses `uv` (not pip directly) and `ty` as the type checker (**not mypy**). The dev
+dependencies are an *extra*, not a PEP 735 dependency group, so it is `uv sync
+--extra dev`: `uv sync --dev` resolves a group that does not exist, installs
+nothing, and leaves `uv run pytest` falling through to whatever `pytest` is on
+`PATH` — which fails on `import numpy` from outside the venv.
 
 ```bash
-uv sync --dev                                  # install with dev deps
+uv sync --extra dev                            # install with dev deps
 
 uv run pytest tests/ -x -v                     # run tests (fail fast); --cov is on by default via pyproject
 uv run pytest tests/test_create_correctness.py -x       # single test file

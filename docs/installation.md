@@ -24,7 +24,7 @@ Clone the repository and install with all development dependencies:
 ```bash
 git clone https://github.com/js2264/metacooler
 cd metacooler
-uv sync --dev
+uv sync --extra dev
 ```
 
 This installs `ruff`, `pytest`, `pre-commit`, and `ty` in addition to the runtime dependencies.
