@@ -7,6 +7,7 @@ are re-exported at the top level, so `metacooler.from_pairs(...)` and
 | Top-level name | Defined in |
 |----------------|------------|
 | `from_pairs`, `from_cool` | `metacooler.io.create` |
+| `collect` | `metacooler.io.collect` |
 | `extract` | `metacooler.io.extract` |
 | `flatten` | `metacooler.io.flatten` |
 | `merge` | `metacooler.io.merge` |
@@ -26,6 +27,16 @@ Note that `network` and `dump_table` name their output parameter `out`, not
     options:
       heading: "Create metacool files"
       toc_label: "Create metacool files"
+
+::: metacooler.io.collect
+    options:
+      heading: "Collecting single-genome cool files"
+      toc_label: "Collecting single-genome cool files"
+      members:
+        - collect
+        - collected_contig_name
+        - CONTIG_NAME_SEPARATOR
+        - COLLECT_ORDERINGS
 
 ::: metacooler.io.merge.merge
     options:

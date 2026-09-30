@@ -21,7 +21,7 @@ A few conventions hold across the whole CLI:
 | `-v, --verbose` | Enable debug logging. Available on every command. |
 | `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
-| `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `extract`, `dump`, and `show`. |
+| `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `collect`, `extract`, `dump`, and `show`. |
 
 !!! warning "A bare `.mmetacool` path is rejected"
     A `.mmetacool` file is a *collection*, not a single contact map. Every
@@ -251,6 +251,133 @@ metacooler create cool \
     --contigs contig_data_final.txt --contigs-format metator \
     --genomes mag_quality.tsv \
     -o sample.metacool
+```
+
+### `collect` { #collect }
+
+Collect single-genome cool files — one per species, strain, or MAG — into one
+`.metacool` file, **one genome per input**. No contig-to-genome table is needed:
+the file a contig comes from *is* its genome. **API:** `metacooler.collect`
+(`metacooler.io.collect.collect`).
+
+```console
+metacooler collect A.cool B.cool [...] -o OUT.metacool [OPTIONS]
+```
+
+Inputs are `.cool` files, or one resolution of an `.mcool` each
+(`E_coli.mcool::resolutions/1000`). Every input becomes a genome named after its
+file stem (`E_coli.cool` → `E_coli`) unless `--names` says otherwise, and
+**every contig is renamed `<genome>__<contig>`**, so the `chromosome` or
+`contig_1` that so many assemblies share cannot collide.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o, --output` | *required* | Output `.metacool` path. It may not be one of the inputs. |
+| `--names` | file stems | Genome name for each input, in input order — comma-separated or repeated. Names (or, without `--names`, file stems) must be unique. |
+| `--genomes` | — | Optional genome metadata TSV (first column `genome_name`, matched against the genome names); extra columns land in `/genomes`. A genome with no row keeps empty metadata, a row matching no input is ignored, and both are reported as warnings. |
+| `--contigs` | — | Optional per-contig metadata TSV (first column `contig_name`); extra columns land in `/contigs`. See [The contigs table](#collect-contigs-table) below. |
+| `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
+| `--filter` | — | Keep only the genomes/contigs matching an expression, before anything is written — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. Unlike in `create`, `genomes.n_bins` is available: the bins come with the inputs. See [Filtering with `--filter`](#filter). |
+| `--contig-order` | `cool` | Order of the contigs *within* each genome: `cool` keeps each input's own order, `genome-then-length` puts the longest first, `genome-then-alpha` sorts them by name. Genomes themselves are always laid out alphabetically, in `genome_id` order. |
+| `--assembly-name` | — | Name for the collection, stored as `genome-assembly`. |
+| `--qc / --no-qc` | on | Tally contact-quality statistics off the pixel stream being copied (`source="pixels"`, as in `create cool`). See [`qc`](#qc). |
+| `--qc-threshold` | `10000` | Distance separating short- from long-range intra-contig signal. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--sort-strategy` | `auto` | Only matters when `--contig-order` reorders an input's contigs: `auto` (in memory unless one such input exceeds 100 M pixels), `memory` (in RAM, one input at a time), or `external` (cooler's external sort). |
+| `--chunksize` | `50000000` | Pixels read per chunk (peak-memory control), and the smallest chunk handed to cooler. |
+| `-f, --force` | off | Overwrite the output if it already exists. An input is never overwritten. |
+| `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+!!! warning "The inter-genome blocks are empty"
+    Every input was binned on its own, usually from its own library, so no
+    contact *between* two inputs was ever observed and the collected map holds
+    none. It is not the map you would get by aligning one metagenomic library to
+    the combined assembly — that is [`create pairs`](#create-pairs). Sequencing
+    depth also differs between genomes exactly as it did between the inputs. In
+    the QC block, `inter_genome` is 0 and every genome's `qc_intra_genome_ratio`
+    is 1, by construction.
+
+**All inputs must share one bin size** — or all have variable
+(restriction-fragment) bins — because a metacool file has a single bin table:
+
+```console
+$ metacooler collect E_coli_1kb.cool B_subtilis_5kb.cool -o species.metacool
+Error: The inputs are not binned alike, but a metacool file has a single bin
+table:
+  E_coli_1kb.cool: 1000 bp
+  B_subtilis_5kb.cool: 5000 bp
+Collect maps of one resolution — pick the same resolution from each .mcool
+(file.mcool::resolutions/<binsize>), or coarsen the finer ones first ('cooler
+coarsen').
+```
+
+A few inputs are refused outright, each with a message saying what to do
+instead: a `.metacool` file or `.mmetacool` entry (it already holds several
+genomes, which collecting would squash into one — `flatten` or
+`extract --split` it first), the root of an `.mcool` (the message lists its
+resolutions), and a cooler stored as a full `square` matrix.
+
+- **No sort under the default order.** Genomes are laid out one after another,
+  so each input is a single block of bins and its pixels only move within it.
+  Under `--contig-order cool` every block stays sorted, and the whole collection
+  is written in one streaming pass **without sorting anything**. The other
+  orderings re-sort only the inputs whose contigs they actually moved, one at a
+  time.
+- **Round trip.** Under `cool`, `extract --genomes E_coli` gives back
+  `E_coli.cool`, bin for bin and pixel for pixel; only the contig names carry
+  their `E_coli__` prefix. A contig that already starts with its genome's prefix
+  is not prefixed twice, so collecting such an extracted file again keeps its
+  names.
+- **Contig lengths** come from each input's bins, as in `create cool`.
+  Balancing weights (`bins/weight`) are not carried over; re-balance the result
+  with `cooler balance` if you need them.
+- **Pixel counts** keep their width: `int32` inputs stay `int32`, and one
+  `int64` (or float) input widens the whole column rather than being truncated.
+
+#### The contigs table { #collect-contigs-table }
+
+`--contigs` attaches per-contig metadata — coverage, GC content, taxonomy — to
+the collected contigs. It is a TSV with a header whose first column is
+`contig_name`; every column other than `contig_name` and `genome_name` is
+stored in `/contigs`.
+
+```text
+contig_name	genome_name	coverage	gc
+chromosome	E_coli	120.4	0.51
+plasmid1	E_coli	310.2	0.47
+chromosome	B_subtilis	98.0	0.44
+```
+
+- A row may name a contig **as in its input cool** (`chromosome`) or **as
+  collected** (`E_coli__chromosome`).
+- The `genome_name` column is optional. It says which genome a row describes,
+  which is what makes a name several inputs share — `chromosome` above —
+  unambiguous. Without it, such a name is an error rather than a guess.
+- A `genome_name` is **checked, never used to re-assign**: a row placing a
+  contig under a genome it does not come from is an error, since `collect`
+  assigns every contig to the genome of its input file. A row about a genome
+  that is not being collected is simply ignored, so one master table can serve
+  several collections.
+- Rows matching no contig are ignored and reported; a contig described twice
+  keeps its last row. A column named `name`, `length`, or `genome_id` is stored
+  as `user_name`, `user_length`, `user_genome_id`.
+- Values must be ASCII: cooler reads every column of `/contigs`. See
+  [Names must be ASCII](format.md#names-must-be-ascii).
+
+```bash
+# One genome per cool file, named after the files
+metacooler collect E_coli.cool B_subtilis.cool S_aureus.cool -o species.metacool
+
+# One resolution from each .mcool, with explicit genome names
+metacooler collect \
+    E_coli.mcool::resolutions/1000 B_subtilis.mcool::resolutions/1000 \
+    --names Escherichia_coli,Bacillus_subtilis \
+    -o species_1kb.metacool
+
+# Genome and contig metadata, and no contig under 5 kb
+metacooler collect *.cool \
+    --genomes species.tsv --contigs contig_metadata.tsv \
+    --filter "contigs.length >= 5kb" \
+    -o species.metacool
 ```
 
 ### `merge` { #merge }

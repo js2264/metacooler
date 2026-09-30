@@ -19,6 +19,7 @@ nav = [
      { "Guides" = [
          { "Creating from pairs" = "guides/from-pairs.md" },
          { "Importing from cooler" = "guides/from-cool.md" },
+         { "Collecting single-genome cools" = "guides/collect.md" },
          { "Multi-resolution files" = "guides/multireso.md" },
          { "Exporting data" = "guides/export.md" }
      ]},

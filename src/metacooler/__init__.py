@@ -23,6 +23,7 @@ __all__ = [
     # creation
     "from_pairs",
     "from_cool",
+    "collect",
     # transforms and readers
     "extract",
     "flatten",
@@ -84,6 +85,10 @@ def __getattr__(name: str) -> object:
         from metacooler.io.create import from_cool as _from_cool
 
         return _from_cool
+    if name == "collect":
+        from metacooler.io.collect import collect as _collect
+
+        return _collect
     if name == "extract":
         from metacooler.io.extract import extract as _extract
 
