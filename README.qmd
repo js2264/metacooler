@@ -20,11 +20,9 @@ An extension of the [cooler](https://github.com/open2c/cooler) format for multi-
 pip install metacooler
 ```
 
-Or with development dependencies:
-
-```console
-pip install metacooler[dev]
-```
+For development, clone the repository and run `uv sync`, which installs the
+runtime dependencies plus the `dev` dependency group (pytest, ruff, ty,
+pre-commit).
 
 ## Quick start
 

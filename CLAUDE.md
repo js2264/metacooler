@@ -15,7 +15,7 @@ Two file types exist:
 Uses `uv` (not pip directly) and `ty` as the type checker (**not mypy**).
 
 ```bash
-uv sync --dev                                  # install with dev deps
+uv sync                                        # install with the dev dependency group
 
 uv run pytest tests/ -x -v                     # run tests (fail fast); --cov is on by default via pyproject
 uv run pytest tests/test_create_correctness.py -x       # single test file

@@ -24,20 +24,15 @@ Clone the repository and install with all development dependencies:
 ```bash
 git clone https://github.com/js2264/metacooler
 cd metacooler
-uv sync --dev
+uv sync
 ```
 
-This installs `ruff`, `pytest`, `pre-commit`, and `ty` in addition to the runtime dependencies.
+The development toolchain (`ruff`, `pytest`, `pre-commit`, `ty`) is declared as
+a [dependency group](https://packaging.python.org/en/latest/specifications/dependency-groups/),
+which `uv sync` installs by default. With pip ≥ 25.1, the equivalent is
+`pip install -e . --group dev`.
 
 ## Optional dependencies
-
-### Plotly backend
-
-An optional Plotly backend for interactive heatmaps (not yet exposed in the CLI):
-
-```bash
-pip install "metacooler[plotly]"
-```
 
 ### Documentation
 
