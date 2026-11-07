@@ -42,6 +42,13 @@ def parse_metacooler_range(mc: MetaCooler, range_str: str) -> tuple[int, int]:
     genome_names = mc.genomes["name"].tolist()
     contig_names = mc.contigs["name"].tolist()
 
+    # A coordinate suffix only makes sense on a contig, so when the label is
+    # both (``binnify --level genome`` names each ligated contig after its
+    # genome) the suffix decides: "G_a:1-6000" is a contig range, which used to
+    # be refused because the genome branch was tried first.
+    if ":" in range_str and label in contig_names:
+        return mc._clr.extent(range_str)
+
     if label in genome_names:
         if ":" in range_str:
             raise ValueError(

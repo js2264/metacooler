@@ -73,6 +73,67 @@ def _require_mmetacool(path: Path) -> Path:
     return path
 
 
+def _check_entry_name(name: str) -> str:
+    """Refuse an entry name HDF5 would read as a path.
+
+    ``--names x/y`` used to create ``/entries/x/y``: a nested group that
+    ``list_metacoolers`` reports as an entry named ``x``, which is no map at
+    all, while the command exited 0.
+
+    Args:
+        name: Proposed entry name.
+
+    Returns:
+        *name*, unchanged.
+
+    Raises:
+        ValueError: If *name* is empty, ``.``/``..``, or contains ``/``.
+    """
+    if not name or name in (".", "..") or "/" in name:
+        raise ValueError(
+            f"Invalid entry name {name!r}: entry names must be non-empty, "
+            "contain no '/', and not be '.' or '..'."
+        )
+    return name
+
+
+def _copy_map(src: h5py.Group, dst_parent: h5py.Group, name: str) -> None:
+    """Copy one validated map into *dst_parent* as *name*.
+
+    The ``/chroms`` link is rewritten to the relative ``contigs`` afterwards: an
+    absolute ``/contigs`` (legal in a standalone file written by another tool)
+    is copied verbatim and then dangles inside ``/entries/<name>``.
+
+    Args:
+        src: Group holding the source map (a file root or an entry).
+        dst_parent: Destination ``entries`` group.
+        name: Entry name, already checked.
+    """
+    src.file.copy(src, dst_parent, name=name)
+    entry = dst_parent[name]
+    if "chroms" in entry or entry.get("chroms", getlink=True) is not None:
+        del entry["chroms"]
+    entry["chroms"] = h5py.SoftLink("contigs")
+
+
+def _require_metacool_source(uri: str) -> None:
+    """Validate a source map before it is copied into a collection.
+
+    A plain ``.cool``, or a whole ``.mmetacool``, used to be copied in as an
+    "entry" with exit status 0, for ``check`` to report afterwards that
+    cooler could not open it.
+
+    Args:
+        uri: ``file.metacool`` or ``file.mmetacool::entries/<name>``.
+
+    Raises:
+        MetaCoolerFormatError: If *uri* is not a valid metacool map.
+    """
+    from metacooler.schema import validate
+
+    validate(uri)
+
+
 def create_mmetacool(
     output: Path,
     entries: dict[str, Path],
@@ -97,15 +158,17 @@ def create_mmetacool(
             f"Output file already exists: {output}. Pass force=True to overwrite."
         )
     for name, src in entries.items():
+        _check_entry_name(name)
         if not Path(src).exists():
             raise FileNotFoundError(f"Source file not found for entry {name!r}: {src}")
+        _require_metacool_source(str(src))
 
     with h5py.File(output, "w") as dst:
         init_mmetacool_attrs(dst)
         for name, src in entries.items():
             logger.info("Adding entry %r from %s", name, src)
             with h5py.File(src, "r") as src_f:
-                src_f.copy(src_f["/"], dst["entries"], name=name)
+                _copy_map(src_f["/"], dst["entries"], name)
 
     logger.info("Created mmetacool with %d entries: %s", len(entries), output)
 
@@ -129,8 +192,10 @@ def add_entry(
         ValueError: If *mmetacool* is not a valid mmetacool file.
         KeyError: If *name* already exists and *overwrite* is False.
     """
+    _check_entry_name(name)
     if not Path(metacool).exists():
         raise FileNotFoundError(f"Source file not found: {metacool}")
+    _require_metacool_source(str(metacool))
     mmetacool = _require_mmetacool(mmetacool)
 
     with h5py.File(mmetacool, "a") as dst:
@@ -142,7 +207,7 @@ def add_entry(
                 )
             del grp[name]
         with h5py.File(metacool, "r") as src_f:
-            src_f.copy(src_f["/"], grp, name=name)
+            _copy_map(src_f["/"], grp, name)
     logger.info("Added entry %r to %s", name, mmetacool)
 
 
@@ -187,6 +252,7 @@ def copy_entry(
         ValueError: If *src* and *dst* are the same, or *mmetacool* is not a
             valid mmetacool file.
     """
+    _check_entry_name(dst)
     if src == dst:
         raise ValueError("Source and destination cannot be the same.")
     mmetacool = _require_mmetacool(mmetacool)
@@ -201,7 +267,7 @@ def copy_entry(
                     f"Destination entry {dst!r} already exists. Use overwrite=True."
                 )
             del grp[dst]
-        f.copy(grp[src], grp, name=dst)
+        _copy_map(grp[src], grp, dst)
     logger.info("Copied entry %r → %r in %s", src, dst, mmetacool)
 
 
@@ -231,6 +297,7 @@ def move_entry(
         ValueError: If *src* and *dst* are the same, or *mmetacool* is not a
             valid mmetacool file.
     """
+    _check_entry_name(dst)
     if src == dst:
         raise ValueError("Source and destination cannot be the same.")
     mmetacool = _require_mmetacool(mmetacool)
@@ -291,6 +358,7 @@ def copy_entry_cross_file(
         ValueError: If source and destination resolve to the same file, or
             either is not a valid mmetacool file.
     """
+    _check_entry_name(dst_name)
     if Path(src_file).resolve() == Path(dst_file).resolve():
         raise ValueError(
             f"Source and destination are the same file: {src_file}. "
@@ -310,6 +378,6 @@ def copy_entry_cross_file(
                         f"Destination entry {dst_name!r} already exists in {dst_file}."
                     )
                 del grp[dst_name]
-            sf.copy(sf[f"entries/{src_name}"], grp, name=dst_name)
+            _copy_map(sf[f"entries/{src_name}"], grp, dst_name)
 
     logger.info("Copied %s::%s → %s::%s", src_file, src_name, dst_file, dst_name)

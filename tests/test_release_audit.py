@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Literal
 
 import cooler
 import h5py
@@ -19,17 +20,28 @@ import pandas as pd
 import pytest
 from _cli_output import flat as _flat
 from click.testing import CliRunner
+from scipy import sparse
 
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
 from metacooler.io._utils import check_output_path, cooler_writer_module
 from metacooler.io.create import from_cool
 from metacooler.io.merge import merge
+from metacooler.io.mmetacool import create_mmetacool
+from metacooler.ops.aggregate import (
+    _aggregate_sparse,
+    _write_aggregated_cool,
+    aggregate,
+)
 from metacooler.ops.binnify import binnify
-from metacooler.schema import MetaCoolerFormatError, validate
+from metacooler.ops.range import parse_metacooler_range
+from metacooler.ops.zoomify import zoomify
+from metacooler.schema import MetaCoolerFormatError, list_metacoolers, validate
+
+Level = Literal["contig", "genome"]
 
 
-def _run(*args: str):
+def _run(*args: object):
     return CliRunner().invoke(cli, [str(a) for a in args])
 
 
@@ -239,6 +251,7 @@ class TestMerge:
         contigs where every other command took under 10 s.
         """
         module = cooler_writer_module()
+        assert module is not None
         real = module.write_bins
         seen: list[bool] = []
 
@@ -347,7 +360,7 @@ class TestPositionsPastContigEnd:
         assert any("2 past the end" in r.getMessage() for r in caplog.records)
 
 
-def _create(tmp_path: Path, contigs: Path, pairs: Path, bins: Path, *extra: str):
+def _create(tmp_path: Path, contigs: Path, pairs: Path, bins: Path, *extra: object):
     out = tmp_path / "o.metacool"
     result = _run(
         "create", "pairs", "--pairs", pairs, "--bins", bins,
@@ -369,7 +382,8 @@ class TestFromCoolStorageMode:
         lower = pix[pix.bin1_id != pix.bin2_id].rename(
             columns={"bin1_id": "bin2_id", "bin2_id": "bin1_id"}
         )
-        both = pd.concat([pix, lower]).sort_values(["bin1_id", "bin2_id"])
+        both = pd.DataFrame(pd.concat([pix, lower], ignore_index=True))
+        both = both.sort_values(by=["bin1_id", "bin2_id"])
         square = tmp_path / "square.cool"
         cooler.create_cooler(
             str(square), clr.bins()[:], both, symmetric_upper=False, ordered=True
@@ -545,3 +559,154 @@ class TestValidateStructure:
             e["chroms"] = h5py.SoftLink(target)
         with pytest.raises(MetaCoolerFormatError, match="must resolve to this map"):
             validate(f"{tiny_mmetacool}::entries/entry1")
+
+
+@pytest.fixture
+def empty_metacool(tmp_path: Path, tiny_contigs_table: Path, tiny_bins_bed: Path):
+    """A valid metacool with zero pixels (header-only pairs)."""
+    pairs = tmp_path / "empty.pairs"
+    pairs.write_text("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+    out = tmp_path / "empty.metacool"
+    from metacooler.io.create import from_pairs
+
+    from_pairs(
+        uri=out, bins=tiny_bins_bed, pairs=pairs,
+        contig_genome_map=tiny_contigs_table, ps=False,
+    )  # fmt: skip
+    return out
+
+
+class TestZeroPixelSources:
+    """A valid zero-pixel metacool crashed binnify, zoomify and aggregate.
+
+    Each handed cooler's unordered writer an empty stream (or one of empty
+    frames), which fails with "No objects to concatenate" / IndexError.
+    """
+
+    @pytest.mark.parametrize("level", ["contig", "genome"])
+    def test_binnify(self, tmp_path: Path, empty_metacool: Path, level: Level):
+        out = tmp_path / "b.metacool"
+        binnify(empty_metacool, out, binsize=200, level=level)
+        validate(out)
+
+    def test_zoomify(self, tmp_path: Path, empty_metacool: Path):
+        out = tmp_path / "z.mmetacool"
+        zoomify(empty_metacool, out, levels=2)
+        assert len(list_metacoolers(out)) == 2
+
+    @pytest.mark.parametrize("level", ["contig", "genome"])
+    def test_aggregate(self, tmp_path: Path, empty_metacool: Path, level: Level):
+        out = tmp_path / "a.cool"
+        aggregate(empty_metacool, out, level=level)
+        assert len(cooler.Cooler(str(out)).pixels()[:]) == 0
+
+
+class TestAggregate:
+    def test_genome_longer_than_int32_is_refused(
+        self, tmp_path: Path, tiny_metacooler: Path
+    ):
+        """A >2^31 bp genome got a negative chrom length; fetch() then failed."""
+        f = tmp_path / "big.metacool"
+        shutil.copy(tiny_metacooler, f)
+        with h5py.File(f, "a") as h:
+            lengths = h["genomes"]["length"][:]
+            lengths[0] = 2_700_000_000
+            h["genomes"]["length"][...] = lengths
+        mc = MetaCooler(f, validate=False)
+        with pytest.raises(ValueError, match="exceed the 2,147,483,647 bp"):
+            _write_aggregated_cool(mc, tmp_path / "g.cool", level="genome")
+
+    def test_sparse_aggregate_keeps_float_counts(
+        self, tmp_path: Path, tiny_metacooler: Path
+    ):
+        """``show``'s aggregate cast float counts to int64, flooring them."""
+        f = tmp_path / "f.metacool"
+        shutil.copy(tiny_metacooler, f)
+        _scale_counts_to_float(f, 0.5)
+        mc = MetaCooler(f)
+        agg = _aggregate_sparse(mc, "genome")
+        upper = float(sparse.triu(agg).sum())
+        assert upper == pytest.approx(_pixel_sum(f))
+
+
+class TestExtractSplitPrefix:
+    def test_only_a_trailing_cool_is_stripped(
+        self, tmp_path: Path, tiny_metacooler: Path
+    ):
+        """``-o sample.rep1`` wrote ``sample_<g>.cool`` (Path.stem), colliding
+        with ``-o sample.rep2``."""
+        for rep in ("rep1", "rep2"):
+            result = _run(
+                "extract", tiny_metacooler, "--genomes", "MAG_1", "--split",
+                "-o", tmp_path / f"sample.{rep}",
+            )  # fmt: skip
+            assert result.exit_code == 0, result.output
+        assert (tmp_path / "sample.rep1_MAG_1.cool").exists()
+        assert (tmp_path / "sample.rep2_MAG_1.cool").exists()
+        result = _run(
+            "extract", tiny_metacooler, "--genomes", "MAG_1", "--split",
+            "-o", tmp_path / "x.cool",
+        )  # fmt: skip
+        assert (tmp_path / "x_MAG_1.cool").exists()
+
+
+class TestCollectionInputs:
+    """``stack``/``create_mmetacool``/``add_entry`` copied anything in, exit 0."""
+
+    def test_a_plain_cool_is_refused(
+        self, tmp_path: Path, tiny_metacooler: Path, tiny_cool: Path
+    ):
+        out = tmp_path / "s.mmetacool"
+        result = _run("stack", tiny_metacooler, tiny_cool, "--names", "a,b", "-o", out)
+        assert result.exit_code != 0
+        assert not out.exists()
+
+    def test_a_slash_in_an_entry_name_is_refused(
+        self, tmp_path: Path, tiny_metacooler: Path
+    ):
+        out = tmp_path / "s.mmetacool"
+        result = _run(
+            "stack", tiny_metacooler, tiny_metacooler, "--names", "a,x/y", "-o", out
+        )
+        assert result.exit_code != 0
+        assert "Invalid entry name 'x/y'" in _flat(result.output)
+
+    def test_an_absolute_chroms_link_is_made_relative(
+        self, tmp_path: Path, tiny_metacooler: Path
+    ):
+        """An absolute ``/contigs`` link is legal standalone but dangles in an entry."""
+        src = tmp_path / "abs.metacool"
+        shutil.copy(tiny_metacooler, src)
+        with h5py.File(src, "a") as h:
+            del h["chroms"]
+            h["chroms"] = h5py.SoftLink("/contigs")
+        validate(src)
+        out = tmp_path / "s.mmetacool"
+        create_mmetacool(out, {"a": src, "b": tiny_metacooler})
+        validate(f"{out}::entries/a")
+        assert MetaCooler(f"{out}::entries/a").chroms()["name"].tolist()
+
+
+class TestMetaCoolerApi:
+    def test_root_and_repr_of_an_entry(self, tiny_mmetacool: Path):
+        mc = MetaCooler(f"{tiny_mmetacool}::entries/entry1")
+        assert mc.root == "/entries/entry1"
+        assert "entries/entry1" in repr(mc)
+
+    def test_info_keeps_a_fractional_sum(self, tmp_path: Path, tiny_metacooler):
+        f = tmp_path / "f.metacool"
+        shutil.copy(tiny_metacooler, f)
+        _scale_counts_to_float(f, 0.3)
+        assert MetaCooler(f).info["sum"] == pytest.approx(_pixel_sum(f))
+
+    def test_contig_range_on_a_genome_level_file(
+        self, tmp_path: Path, tiny_metacooler: Path
+    ):
+        """Every contig is also a genome there, and ``G:1-200`` was refused."""
+        g = tmp_path / "g.metacool"
+        binnify(tiny_metacooler, g, binsize=200, level="genome")
+        mc = MetaCooler(g)
+        assert parse_metacooler_range(mc, "MAG_1:1-400") == (
+            mc.contig_extent("MAG_1")[0],
+            mc.contig_extent("MAG_1")[0] + 2,
+        )

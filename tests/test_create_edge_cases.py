@@ -363,6 +363,7 @@ class TestCoolerWriterShims:
         from metacooler.io._utils import cooler_writer_module, cooler_writer_shims
 
         module = cooler_writer_module()
+        assert module is not None
         before = (module.write_bins, module.get_binsize)
         with cooler_writer_shims(1000):
             assert module.write_bins is not before[0]
@@ -373,6 +374,7 @@ class TestCoolerWriterShims:
         from metacooler.io._utils import cooler_writer_module, cooler_writer_shims
 
         module = cooler_writer_module()
+        assert module is not None
         before = (module.write_bins, module.get_binsize)
         with pytest.raises(RuntimeError), cooler_writer_shims(None):
             raise RuntimeError("boom")

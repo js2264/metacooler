@@ -425,7 +425,7 @@ metacooler extract METACOOL_PATH --genomes G -o OUT.cool [OPTIONS]
 | `--genomes` | — | Genome name(s) to extract. |
 | `--contigs` | — | Contig name(s) to extract (single-file mode only). |
 | `--filter` | — | Keep only the genomes/contigs matching an expression. Repeatable; narrows `--genomes`/`--contigs`, or selects from the whole file on its own. See [Filtering with `--filter`](#filter). |
-| `--split` | off | Write one `.cool` per genome (genome-only); `--output` becomes a prefix. Cannot be combined with `--contigs`. |
+| `--split` | off | Write one `.cool` per genome (genome-only); `--output` becomes a prefix (a trailing `.cool` is dropped, nothing else). Cannot be combined with `--contigs`. |
 | `-f, --force` | off | Overwrite existing output(s), including per-genome files with `--split`. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 

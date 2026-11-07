@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import gzip
 import importlib
+import itertools
 import logging
 import os
 import re
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import h5py
 import numpy as np
@@ -690,9 +691,47 @@ def write_cooler(
     """
     import cooler
 
+    if kwargs.get("ordered") is False and not isinstance(pixels, pd.DataFrame | dict):
+        pixels, was_empty = _skip_empty_frames(cast("Iterable[pd.DataFrame]", pixels))
+        if was_empty:
+            # cooler's unordered writer concatenates its per-chunk files and
+            # fails with "No objects to concatenate" when there are none; an
+            # empty table is trivially sorted, so write it on the ordered path.
+            kwargs["ordered"] = True
     resolved = binsize if binsize is not None else infer_binsize(bins)
     with cooler_writer_shims(resolved):
         cooler.create_cooler(str(path), bins=bins, pixels=pixels, **kwargs)
+
+
+def _skip_empty_frames(
+    pixels: Iterable[pd.DataFrame],
+) -> tuple[pd.DataFrame | Iterator[pd.DataFrame], bool]:
+    """Drop empty frames from a pixel stream, reporting if nothing was left.
+
+    Only the first non-empty frame is pulled to decide, so a lazy stream stays
+    lazy.  A zero-pixel source (a valid, if unusual, metacool) reached
+    ``binnify``, ``zoomify`` and ``aggregate`` as either an empty stream or one
+    of empty frames, and both crashed cooler's unordered writer.
+
+    Args:
+        pixels: An iterable of pixel DataFrames.
+
+    Returns:
+        ``(stream, was_empty)``; when *was_empty*, *stream* is a single empty
+        frame that ``cooler.create_cooler`` accepts.
+    """
+    frames = (df for df in pixels if len(df))
+    first = next(frames, None)
+    if first is None:
+        empty = pd.DataFrame(
+            {
+                "bin1_id": np.array([], dtype=np.int64),
+                "bin2_id": np.array([], dtype=np.int64),
+                "count": np.array([], dtype=np.int32),
+            }
+        )
+        return empty, True
+    return itertools.chain([first], frames), False
 
 
 def _finalize_metacool_file(

@@ -45,12 +45,32 @@ def _bin_to_level_mapping(
 
 
 def _level_chroms(mc: MetaCooler, level: Literal["contig", "genome"]) -> pd.DataFrame:
-    """Return the output "chromosomes" (``name``, ``length``) for *level*."""
+    """Return the output "chromosomes" (``name``, ``length``) for *level*.
+
+    Raises:
+        ValueError: For an unknown *level*, or a chromosome too long for the
+            ``int32`` coordinates cooler stores.  A whole genome easily is --
+            ``__unbinned__`` reaches several Gbp on a large metagenome -- and
+            the cast used to wrap to a negative length that broke every
+            ``fetch`` on the output.
+    """
     if level == "contig":
-        return mc.contigs[["name", "length"]]
-    if level == "genome":
-        return mc.genomes[["name", "length"]]
-    raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+        chroms = mc.contigs[["name", "length"]]
+    elif level == "genome":
+        chroms = mc.genomes[["name", "length"]]
+    else:
+        raise ValueError(f"level must be 'contig' or 'genome', got {level!r}")
+    limit = int(np.iinfo(np.int32).max)
+    too_long = chroms["length"].to_numpy(dtype=np.int64) > limit
+    if too_long.any():
+        names = chroms["name"][too_long].tolist()
+        raise ValueError(
+            f"{len(names)} {level}(s) exceed the {limit:,} bp a cooler can store "
+            f"as one chromosome: {names[:5]}. A {level}-level .cool cannot "
+            f"represent them; select the others with 'extract --genomes' first, "
+            f"or use 'network --level {level}', which has no length limit."
+        )
+    return chroms
 
 
 def _aggregate_sparse(
@@ -72,19 +92,23 @@ def _aggregate_sparse(
     mapping = _bin_to_level_mapping(mc, level)  # also validates *level*
     n = len(mc.contigs) if level == "contig" else len(mc.genomes)
 
+    # int64 so scipy's duplicate-summing in .tocsr() cannot overflow int32 (a
+    # genome pair can exceed 2**31 contacts on real metagenomic data); float64
+    # for float counts, which an integer cast used to floor toward zero.
+    pixels = mc._clr.pixels()
+    src_dtype = pixels[:0]["count"].dtype
+    dtype = np.int64 if np.issubdtype(src_dtype, np.integer) else np.float64
+
     # Reduce each chunk into a running aggregate instead of buffering every
     # chunk: peak memory stays bounded by the output matrix plus one chunk,
     # rather than growing with the whole pixel table (~24 bytes/pixel).
-    agg = sparse.csr_matrix((n, n), dtype=np.int64)
-    pixels = mc._clr.pixels()
+    agg = sparse.csr_matrix((n, n), dtype=dtype)
     n_pix = len(pixels)
     for i in range(0, n_pix, chunksize):
         chunk = pixels[i : i + chunksize]
         c1 = mapping[chunk["bin1_id"].values]
         c2 = mapping[chunk["bin2_id"].values]
-        # int64 so scipy's duplicate-summing in .tocsr() cannot overflow int32
-        # (a genome pair can exceed 2**31 contacts on real metagenomic data).
-        vals = chunk["count"].values.astype(np.int64)
+        vals = chunk["count"].values.astype(dtype)
 
         c1, c2 = to_upper_triangle(c1, c2)
 
@@ -93,11 +117,7 @@ def _aggregate_sparse(
         agg = agg + sparse.coo_matrix((vals, (c1, c2)), shape=(n, n)).tocsr()
 
     agg = (
-        agg
-        + agg.T
-        - sparse.diags(
-            agg.diagonal().astype(np.int64), offsets=0, format="csr", dtype=np.int64
-        )
+        agg + agg.T - sparse.diags(agg.diagonal(), offsets=0, format="csr", dtype=dtype)
     )
     return agg
 
