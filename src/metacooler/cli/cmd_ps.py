@@ -172,7 +172,7 @@ def cmd_ps(
     ``<output>.ps.tsv``.
     """
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.filters import parse_size
+    from metacooler.filters import parse_distance
     from metacooler.ops.ps import ps
 
     setup_logging(verbose, command_name="metacooler ps", quiet=quiet)
@@ -184,7 +184,7 @@ def cmd_ps(
         if raw is None:
             return None
         try:
-            return int(parse_size(raw))
+            return parse_distance(raw)
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint=hint) from exc
 

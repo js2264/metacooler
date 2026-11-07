@@ -846,3 +846,94 @@ class TestQcUnbinned:
         for key in ("inter_genome", "inter_contig_intra_genome", "n_contacts"):
             assert created[key] == again[key]
 
+
+class TestShowLog10:
+    def test_log10_is_log10_of_one_plus_count(self):
+        """log10(count) mapped a count of 1 to 0, the colour of an empty pixel."""
+        from metacooler.ops.show import _transform_matrix
+
+        out = _transform_matrix(np.array([[0.0, 1.0], [9.0, 99.0]]), "log10")
+        np.testing.assert_allclose(out, [[0.0, np.log10(2)], [1.0, 2.0]])
+
+
+class TestFilterMissingText:
+    def test_negated_operators_skip_missing_text(self):
+        """Missing text reads back as "" and ``!=``/``!~`` used to match it."""
+        from metacooler.filters import filter_mask, parse_filter
+
+        df = pd.DataFrame({"tax": ["Bacillota", "", "Pseudomonadota", "  "]})
+        for expr, expected in [
+            ("contigs.tax != Bacillota", [False, False, True, False]),
+            ("contigs.tax !~ ^Bac", [False, False, True, False]),
+            ("contigs.tax =~ .*", [True, False, True, False]),
+        ]:
+            mask = filter_mask(df, [parse_filter(expr)], table="contigs")
+            assert mask.tolist() == expected, expr
+
+
+class TestValidateDuplicatePixels:
+    def test_a_repeated_pixel_is_refused(self, tmp_path: Path, tiny_metacooler):
+        """``<=`` on bin2 let a duplicated (bin1, bin2) row pass validate and check."""
+        f = tmp_path / "dup.metacool"
+        shutil.copy(tiny_metacooler, f)
+        with h5py.File(f, "a") as h:
+            px = h["pixels"]
+            cols = {k: px[k][:] for k in px}
+            for k, v in cols.items():
+                del px[k]
+                px.create_dataset(k, data=np.insert(v, 5, v[5]))
+            idx = h["indexes"]["bin1_offset"][:]
+            idx[cols["bin1_id"][5] + 1 :] += 1
+            h["indexes"]["bin1_offset"][...] = idx
+            h.attrs["nnz"] = int(h.attrs["nnz"]) + 1
+            h.attrs["sum"] = int(h.attrs["sum"]) + int(cols["count"][5])
+        with pytest.raises(MetaCoolerFormatError, match="is repeated"):
+            validate(f)
+        result = _run("check", "--deep", f)
+        assert result.exit_code != 0
+        assert "duplicate pixel" in _flat(result.output)
+
+
+class TestDistanceOptions:
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["qc", "{m}", "--threshold", "inf", "--table"],
+            ["qc", "{m}", "--threshold", "nan", "--table"],
+            ["ps", "{m}", "--max-distance", "1e30"],
+            ["ps", "{m}", "--min-distance", "-5"],
+        ],
+        ids=lambda a: " ".join(a[2:4]),
+    )
+    def test_unusable_distances_are_a_usage_error(self, tiny_metacooler, args):
+        """``inf``/``1e30`` escaped as OverflowError/TypeError tracebacks."""
+        result = _run(*[a.format(m=tiny_metacooler) for a in args])
+        assert result.exit_code == 2, result.output
+        assert "not a usable distance" in _flat(result.output)
+
+
+class TestReservedQcKey:
+    def test_metadata_file_may_not_carry_qc(
+        self, tmp_path: Path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
+    ):
+        """create overwrote a user's ``qc`` key with the QC block, silently."""
+        meta = tmp_path / "m.yaml"
+        meta.write_text("qc: passed\n")
+        result, _ = _create(
+            tmp_path, tiny_contigs_table, tiny_pairs, tiny_bins_bed,
+            "--metadata", meta,
+        )  # fmt: skip
+        assert result.exit_code == 2
+        assert "'qc' key" in _flat(result.output)
+
+    def test_store_tolerates_a_non_object_qc_value(
+        self, tmp_path: Path, tiny_metacooler
+    ):
+        """``qc --store`` raised AttributeError on a string ``qc`` value."""
+        f = tmp_path / "f.metacool"
+        shutil.copy(tiny_metacooler, f)
+        with h5py.File(f, "a") as h:
+            h.attrs["metadata"] = '{"qc": "passed"}'
+        result = _run("qc", f, "--store")
+        assert result.exit_code == 0, result.output
+        assert isinstance(MetaCooler(f).metadata["qc"], dict)

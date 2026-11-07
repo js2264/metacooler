@@ -146,4 +146,11 @@ def load_metadata_file(path: str | Path | None) -> dict[str, Any]:
             "Metadata file must not contain a 'commands' key — "
             "that key is reserved for provenance tracking."
         )
+    if "qc" in meta:
+        # create overwrote it with the contact-quality block without a word,
+        # and qc --store crashed on a non-object value.
+        raise click.BadParameter(
+            "Metadata file must not contain a 'qc' key — that key is reserved "
+            "for the contact-quality statistics metacooler records."
+        )
     return stringify_values(meta)
