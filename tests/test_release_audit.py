@@ -12,12 +12,18 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import cooler
+import h5py
+import numpy as np
 import pytest
 from _cli_output import flat as _flat
 from click.testing import CliRunner
 
+from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
-from metacooler.io._utils import check_output_path
+from metacooler.io._utils import check_output_path, cooler_writer_module
+from metacooler.io.merge import merge
+from metacooler.ops.binnify import binnify
 from metacooler.schema import validate
 
 
@@ -144,6 +150,112 @@ class TestForceKeepsPreviousOutputUntilSuccess:
         assert _run(*args).exit_code == 0
         result = _run(*args, "-f", "--assembly-name", "second")
         assert result.exit_code == 0, result.output
-        import metacooler
+        assert MetaCooler(out).info["assembly"] == "second"
 
-        assert metacooler.MetaCooler(out).info["assembly"] == "second"
+
+def _scale_counts_to_float(path: Path, factor: float) -> None:
+    """Rewrite ``pixels/count`` as float64 times *factor* (a rescaled map)."""
+    with h5py.File(path, "a") as f:
+        counts = f["pixels"]["count"][:].astype(np.float64) * factor
+        del f["pixels"]["count"]
+        f["pixels"].create_dataset("count", data=counts)
+        f.attrs["sum"] = float(counts.sum())
+
+
+def _pixel_sum(uri: str | Path) -> float:
+    return float(cooler.Cooler(str(uri)).pixels()[:]["count"].sum())
+
+
+class TestMerge:
+    def test_float_counts_are_not_truncated(self, tmp_path: Path, tiny_metacooler):
+        """``merge`` forced ``count`` to int64, flooring every float count."""
+        a, b = tmp_path / "a.metacool", tmp_path / "b.metacool"
+        for p in (a, b):
+            shutil.copy(tiny_metacooler, p)
+            _scale_counts_to_float(p, 0.3)
+        out = tmp_path / "m.metacool"
+        merge([a, b], out)
+        assert _pixel_sum(out) == pytest.approx(_pixel_sum(a) + _pixel_sum(b))
+
+    def test_integer_counts_widen_to_int64(self, tmp_path: Path, tiny_metacooler):
+        out = tmp_path / "m.metacool"
+        merge([tiny_metacooler, tiny_metacooler], out)
+        with h5py.File(out, "r") as f:
+            assert f["pixels"]["count"].dtype == np.int64
+
+    def test_cli_does_not_restore_the_stale_qc_block(
+        self, tmp_path: Path, tiny_metacooler
+    ):
+        """The CLI re-merged every input's metadata, putting ``qc`` back.
+
+        ``io.merge`` strips the block (it describes one input, not the sum), but
+        the CLI then copied every input key into the output: a merged file of
+        twice the contacts reported the first input's ``n_contacts``.
+        """
+        assert "qc" in MetaCooler(tiny_metacooler).metadata
+        out = tmp_path / "m.metacool"
+        result = _run("merge", tiny_metacooler, tiny_metacooler, "-o", out)
+        assert result.exit_code == 0, result.output
+        meta = MetaCooler(out).metadata
+        assert "qc" not in meta
+        assert "merge" in meta["commands"][-1]
+
+    def test_bin_size_survives_single_bin_contigs(
+        self, tmp_path: Path, tiny_metacooler
+    ):
+        """With every contig one bin, cooler inferred ``bin-size=None``.
+
+        The merged file then claimed variable bins, so ``zoomify`` refused it
+        and ``binnify`` applied the variable-bin resolution rule.
+        """
+        coarse = tmp_path / "coarse.metacool"
+        binnify(tiny_metacooler, coarse, binsize=2000)
+        assert MetaCooler(coarse).info["bin-size"] == 2000
+        out = tmp_path / "m.metacool"
+        merge([coarse, coarse], out)
+        info = MetaCooler(out).info
+        assert info["bin-size"] == 2000
+        assert info["bin-type"] == "fixed"
+
+    def test_entry_uris_are_accepted(self, tmp_path: Path, tiny_mmetacool: Path):
+        """The CLI accepts entry URIs, but ``merge`` opened them as plain paths."""
+        e1 = f"{tiny_mmetacool}::entries/entry1"
+        e2 = f"{tiny_mmetacool}::entries/entry2"
+        out = tmp_path / "m.metacool"
+        result = _run("merge", e1, e2, "-o", out)
+        assert result.exit_code == 0, result.output
+        assert _pixel_sum(out) == _pixel_sum(e1) + _pixel_sum(e2)
+        validate(out)
+
+    def test_goes_through_the_writer_shims(
+        self, tmp_path: Path, tiny_metacooler, monkeypatch
+    ):
+        """``merge_coolers`` ran ``cooler.create`` without the shims.
+
+        Every other writer suppresses cooler's per-contig enum build and
+        ``get_binsize`` loop; merge alone paid both, taking 65 s at 150 k
+        contigs where every other command took under 10 s.
+        """
+        module = cooler_writer_module()
+        real = module.write_bins
+        seen: list[bool] = []
+
+        def spy(*args, chrom_as_enum=True, **kwargs):
+            seen.append(chrom_as_enum)
+            return real(*args, chrom_as_enum=chrom_as_enum, **kwargs)
+
+        def forbidden(bins):
+            raise AssertionError("cooler's per-contig get_binsize was called")
+
+        monkeypatch.setattr(module, "write_bins", spy)
+        monkeypatch.setattr(module, "get_binsize", forbidden)
+        merge([tiny_metacooler, tiny_metacooler], tmp_path / "m.metacool")
+        assert seen and not any(seen)
+
+    def test_api_refuses_an_input_as_output(self, tmp_path: Path, tiny_metacooler):
+        a = tmp_path / "a.metacool"
+        shutil.copy(tiny_metacooler, a)
+        before = a.read_bytes()
+        with pytest.raises(ValueError, match="same file as the input"):
+            merge([a, tiny_metacooler], a)
+        assert a.read_bytes() == before
