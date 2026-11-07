@@ -24,8 +24,12 @@ from scipy import sparse
 
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
-from metacooler.io._utils import check_output_path, cooler_writer_module
-from metacooler.io.create import from_cool
+from metacooler.io._utils import (
+    check_output_path,
+    chrom_codes,
+    cooler_writer_module,
+)
+from metacooler.io.create import from_cool, from_pairs
 from metacooler.io.merge import merge
 from metacooler.io.mmetacool import create_mmetacool
 from metacooler.ops.aggregate import (
@@ -34,8 +38,10 @@ from metacooler.ops.aggregate import (
     aggregate,
 )
 from metacooler.ops.binnify import binnify
+from metacooler.ops.ps import contact_probability
 from metacooler.ops.range import parse_metacooler_range
 from metacooler.ops.zoomify import zoomify
+from metacooler.ps import bin_pair_denominators, distance_edges
 from metacooler.schema import MetaCoolerFormatError, list_metacoolers, validate
 
 Level = Literal["contig", "genome"]
@@ -710,3 +716,133 @@ class TestMetaCoolerApi:
             mc.contig_extent("MAG_1")[0],
             mc.contig_extent("MAG_1")[0] + 2,
         )
+
+
+class TestPsBinnedCurve:
+    """The binned-map P(s) used bin pairs as opportunities and full log widths.
+
+    The diagonal bin pair counted as a full opportunity though it holds half
+    the position pairs (halving the first point), and ``prob`` was normalised
+    over ``hi - lo`` of every log bin although a binned map only realises
+    separations at bin-distance steps -- so it grew with --bins-per-decade
+    (pixel/pairs ratio 1.07 -> 1.28 -> 1.52 for bpd 5 -> 10 -> 20).
+    """
+
+    def test_weighted_denominators_match_brute_force(
+        self, tiny_variable_bin_metacooler
+    ):
+        mc = MetaCooler(tiny_variable_bin_metacooler)
+        bins = mc.bins()
+        contig = chrom_codes(bins).astype(np.int64)
+        start = bins["start"].to_numpy(dtype=np.int64)
+        end = bins["end"].to_numpy(dtype=np.int64)
+        mids, w = (start + end) // 2, end - start
+        edges = distance_edges(int(mids.max()), 50, 10)
+        key = contig * (int(mids.max()) + int(edges[-1]) + 1) + mids
+        got = bin_pair_denominators(key, np.zeros(len(key), np.int64), 1, edges, w)[0]
+
+        expected = np.zeros(len(edges) - 1)
+        for i in range(len(bins)):
+            for j in range(i, len(bins)):
+                if contig[i] != contig[j]:
+                    continue
+                weight = w[i] * (w[i] + 1) // 2 if i == j else w[i] * w[j]
+                d = abs(mids[j] - mids[i])
+                k = np.searchsorted(edges, d, side="right") - 1
+                if k < len(expected):
+                    expected[k] += weight
+        np.testing.assert_allclose(got, expected)
+        # Every unordered position pair of every contig, exactly once.
+        lengths = mc.contigs["length"].to_numpy(dtype=np.int64)
+        assert got.sum() == (lengths * (lengths + 1) // 2).sum()
+
+    @pytest.fixture
+    def uniform(self, tmp_path: Path):
+        """One contig with a constant contact rate per position pair."""
+        rng = np.random.default_rng(0)
+        length = 20_000
+        pos = rng.integers(1, length + 1, size=(200_000, 2))
+        pairs = tmp_path / "u.pairs"
+        pairs.write_text(
+            f"#chromsize: c1 {length}\n"
+            "#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n"
+            + "".join(f"r\tc1\t{a}\tc1\t{b}\t+\t+\n" for a, b in pos)
+        )
+        table = tmp_path / "c.tsv"
+        table.write_text("contig_name\tgenome_name\nc1\tM\n")
+        out = tmp_path / "u.metacool"
+        from_pairs(
+            uri=out, bins=None, binsize=1000, pairs=pairs,
+            contig_genome_map=table, ps=False, qc=False,
+        )  # fmt: skip
+        return out, pairs
+
+    def test_a_uniform_map_gives_a_flat_curve(self, uniform):
+        out, pairs = uniform
+        pixel = contact_probability(out)["avg_contacts"].to_numpy()
+        assert pixel[0] == pytest.approx(np.median(pixel[1:]), rel=0.05)
+        # Same unit on both paths: contacts per position pair.
+        reads = contact_probability(out, pairs=pairs)["avg_contacts"].to_numpy()
+        assert np.median(pixel) == pytest.approx(np.median(reads), rel=0.02)
+
+    def test_dist_sits_on_the_separations_a_bin_can_hold(self, uniform):
+        out, pairs = uniform
+        pixel = contact_probability(out)
+        assert pixel["dist"].iloc[1:4].tolist() == [1000.0, 2000.0, 3000.0]
+        reads = contact_probability(out, pairs=pairs)
+        assert reads["dist"].iloc[1:3].tolist() == [1.0, 2.0]
+
+    def test_prob_does_not_depend_on_bins_per_decade(self):
+        data = Path(__file__).parent / "data"
+        m = data / "assembly_1_rep1_1kb.metacool"
+        pairs = data / "contacts_1_rep1.pairs.gz"
+
+        def ratio(bpd: int) -> float:
+            def at(t, s):
+                t = t[t["dist"] > 0]
+                x, y = np.log10(t["dist"]), t["prob"]
+                return float(np.interp(np.log10(s), x, y))
+
+            px = contact_probability(m, bins_per_decade=bpd)
+            pr = contact_probability(m, pairs=pairs, bins_per_decade=bpd)
+            return at(px, 10_000) / at(pr, 10_000)
+
+        for bpd in (5, 10, 20):
+            assert ratio(bpd) == pytest.approx(1.0, abs=0.08)
+
+
+class TestQcUnbinned:
+    """``__unbinned__`` was classified as one genome.
+
+    A contact between two different unassigned contigs counted as
+    inter_contig_intra_genome, inflating intra_genome_fraction by every contact
+    among the unbinned contigs -- often most of a real assembly.
+    """
+
+    def test_two_unbinned_contigs_are_inter_genome(self):
+        from metacooler.qc import ContactQC, unbinned_genome_id
+
+        names = ["__unbinned__", "MAG_1"]
+        tally = ContactQC(2, 1000, unbinned_genome=unbinned_genome_id(names))
+        # contigs 0,1 unbinned; 2,3 in MAG_1
+        c1 = np.array([0, 0, 2, 0])
+        c2 = np.array([1, 0, 3, 2])
+        g = np.array([0, 0, 1, 1])
+        tally.tally(c1, c2, g[c1], g[c2], np.array([0, 50, 0, 0]))
+        s = tally.summary()
+        assert s["version"] == 2
+        assert s["inter_genome"] == 2  # unbinned-unbinned, unbinned-MAG
+        assert s["inter_contig_intra_genome"] == 1  # the two MAG_1 contigs
+        assert s["intra_contig_short"] == 1
+        assert s["intra_genome_fraction"] == pytest.approx(0.5)
+        assert s["trans_contig_ratio"] == pytest.approx(0.75)  # unchanged rule
+
+    def test_create_and_recompute_agree(self, tmp_path: Path, tiny_metacooler):
+        """The pixel recompute applies the same rule as creation."""
+        from metacooler.ops.qc import qc as run_qc
+
+        created = MetaCooler(tiny_metacooler).metadata["qc"]
+        again = run_qc(tiny_metacooler).summary
+        for key in ("inter_genome", "inter_contig_intra_genome", "n_contacts"):
+            assert created[key] == again[key]
+

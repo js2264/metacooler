@@ -47,6 +47,7 @@ from metacooler.qc import (
     BinMaps,
     ContactQC,
     bin_maps,
+    unbinned_genome_id,
 )
 from metacooler.schema import (
     CONTIGS_DTYPE,
@@ -2240,7 +2241,12 @@ def from_pairs(
     )
     drop_stats = _PairsDropStats()
     qc_tally = (
-        ContactQC(len(genomes_df), qc_distance_threshold, source="pairs")
+        ContactQC(
+            len(genomes_df),
+            qc_distance_threshold,
+            source="pairs",
+            unbinned_genome=unbinned_genome_id(genomes_df["name"]),
+        )
         if qc
         else None
     )
@@ -2555,7 +2561,14 @@ def from_cool(
         str(cool_path), clr.info["nnz"], old_to_new_bin, nproc, count_dtype
     )
     qc_tally = (
-        ContactQC(len(genomes), qc_distance_threshold, source="pixels") if qc else None
+        ContactQC(
+            len(genomes),
+            qc_distance_threshold,
+            source="pixels",
+            unbinned_genome=unbinned_genome_id(genomes["name"]),
+        )
+        if qc
+        else None
     )
     if qc_tally is not None:
         raw_pixels = _tally_pixel_qc(

@@ -14,23 +14,33 @@ same thing however it was measured:
 Only contacts whose two ends sit on the same contig take part — those are the
 ones a genomic distance is defined for.
 
-The two resolutions differ in what the denominator counts, and that is the
+Both resolutions count opportunities in the same unit -- pairs of *positions*
+(base pairs) that could have produced a contact -- so ``avg_contacts`` is a
+contact rate per position pair either way, and the two are directly
+comparable.  What differs is where the separation is measured, which is the
 whole reason to prefer pairs:
 
 ``pixels``
-    Pairs of *bins* at that separation.  A contig of *n* bins offers ``n - d``
-    of them at separation *d*.  Nothing below the bin size is resolvable: every
-    sub-bin contact lands on the diagonal.
+    Between *bin midpoints*.  A bin pair ``(i, j)`` of widths ``w_i, w_j``
+    holds ``w_i * w_j`` position pairs, and a diagonal one ``w (w + 1) / 2``
+    (unordered, self-pairs included).  Nothing below the bin size is
+    resolvable: every sub-bin contact lands on the diagonal.  Counting bin
+    pairs instead -- as this path once did -- weighs the diagonal as a full
+    opportunity when it holds half as many position pairs, halving the first
+    point, and makes variable-width bins incomparable.
 ``pairs``
-    Pairs of *positions* at that separation.  A contig of *L* bp offers
-    ``L - s`` of them at separation *s*, so the curve runs from 1 bp up, which
-    is where the short-range artifacts a metaHi-C library is judged on live
-    (undigested fragments, self-religation).
+    Between read positions.  A contig of *L* bp offers ``L - s`` position
+    pairs at separation *s*, so the curve runs from 1 bp up, which is where the
+    short-range artifacts a metaHi-C library is judged on live (undigested
+    fragments, self-religation).
 
-Both are "how many opportunities existed", so ``avg_contacts`` is a contact
-rate per opportunity in both cases, and ``prob`` normalises it to unit area so
-that libraries of different depth — and curves measured either way — are
-comparable.
+``prob`` normalises ``avg_contacts`` to unit area.  Each distance bin's share
+of that area is the separation it *represents*: ``hi - lo`` on the pairs path,
+but on the pixel path only the bin-distance steps that fall inside it -- a
+binned map realises separations at multiples of the bin size, so at short
+range most log bins hold none.  Weighing them by ``hi - lo`` regardless (as
+this path once did) understated the area by exactly the empty bins, and so
+made ``prob`` grow with ``--bins-per-decade``.
 """
 
 from __future__ import annotations
@@ -228,8 +238,14 @@ def bin_pair_denominators(
     groups: np.ndarray,
     n_groups: int,
     edges: np.ndarray,
+    widths: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Count the pairs of *bins* that could contact, per group and distance bin.
+    """Count the opportunities a binned map offers, per group and distance bin.
+
+    With *widths*, an opportunity is a pair of *positions*: a bin pair
+    ``(i, j)`` counts ``w_i * w_j``, and a diagonal one ``w (w + 1) / 2`` --
+    the unit :func:`position_pair_denominators` uses, so the two paths agree.
+    Without, every bin pair counts 1 (and the diagonal 1 per bin).
 
     Uses the same folded key trick as the rest of the codebase: with the contig
     id multiplied above every coordinate, ``(contig, midpoint)`` ordering is
@@ -246,11 +262,20 @@ def bin_pair_denominators(
         groups: Output group of every selected bin.
         n_groups: Number of output groups.
         edges: Distance-bin edges.
+        widths: Width in bp of every selected bin, to count position pairs.
 
     Returns:
         ``(n_groups, len(edges) - 1)`` float64 array.
     """
     index = np.arange(len(key), dtype=np.int64)
+    w = (
+        np.ones(len(key), dtype=np.float64)
+        if widths is None
+        else np.asarray(widths, dtype=np.float64)
+    )
+    # prefix[k] = sum of w[:k], so the partners j in (i, upper) of bin i weigh
+    # prefix[upper] - prefix[i + 1] in total -- still one vectorised pass.
+    prefix = np.concatenate([[0.0], np.cumsum(w)])
 
     # Cumulative counts at each edge: pairs strictly closer than the edge.
     cumulative = np.zeros((n_groups, len(edges)), dtype=np.float64)
@@ -260,15 +285,16 @@ def bin_pair_denominators(
         # First bin whose key is >= key_j + edge; the fold guarantees it never
         # reaches into the next contig.
         upper = np.searchsorted(key, key + np.int64(edge), side="left")
-        partners = (upper - index - 1).astype(np.float64)
+        partners = w * (prefix[upper] - prefix[index + 1])
         cumulative[:, i] = np.bincount(groups, weights=partners, minlength=n_groups)[
             :n_groups
         ]
 
     counts = np.diff(cumulative, axis=1)
-    # The diagonal: one "pair" per bin, at separation 0, which the strictly-
-    # increasing-key count above cannot see (a bin is not its own partner).
-    counts[:, 0] += np.bincount(groups, minlength=n_groups)[:n_groups]
+    # The diagonal, at separation 0, which the strictly-increasing-key count
+    # above cannot see (a bin is not its own partner).
+    diagonal = w if widths is None else w * (w + 1.0) / 2.0
+    counts[:, 0] += np.bincount(groups, weights=diagonal, minlength=n_groups)[:n_groups]
     return counts
 
 
@@ -322,6 +348,9 @@ def assemble(
     edges: np.ndarray,
     observed: np.ndarray,
     possible: np.ndarray,
+    *,
+    continuous: np.ndarray | None = None,
+    step: int = 1,
 ) -> pd.DataFrame:
     """Turn the two count matrices into the :data:`PS_COLUMNS` table.
 
@@ -329,7 +358,19 @@ def assemble(
         group_names: One name per row of *observed* / *possible*.
         edges: Distance-bin edges.
         observed: ``(n_groups, n_dbins)`` contacts.
-        possible: ``(n_groups, n_dbins)`` opportunities.
+        possible: ``(n_groups, n_dbins)`` opportunities, in position pairs.
+        continuous: For a binned curve, the position-pair opportunities the
+            same contigs would offer if separations were continuous
+            (:func:`position_pair_denominators` over the same edges).  The
+            ratio ``possible / continuous`` is the share of each distance bin
+            the binned map actually realises, and scales that bin's weight in
+            the ``prob`` normalisation.  ``None`` for a pairs curve, where the
+            two coincide.
+        step: Spacing of the separations a distance bin can hold: 1 bp for
+            pairs, the bin size for a fixed-bin map.  ``dist`` is the
+            geometric centre of the first and last such separation in
+            ``[lo, hi)``, not of the edges: ``[1, 2)`` holds only s = 1 and
+            used to be plotted at 1.41, shifting the short-range head right.
 
     Returns:
         Long-format DataFrame, one row per (group, distance bin), sorted by
@@ -338,12 +379,25 @@ def assemble(
     """
     group_names = np.asarray(group_names)
     n_groups, n_dbins = observed.shape
-    lo = edges[:-1]
-    hi = edges[1:]
+    lo = edges[:-1].astype(np.int64)
+    hi = edges[1:].astype(np.int64)
+    first = -(-lo // step) * step  # smallest multiple of step >= lo
+    last = ((hi - 1) // step) * step  # largest multiple of step < hi
+    # A bin between two steps (a partial last bin's midpoint lands there).
+    off_grid = first > last
+    first = np.where(off_grid, lo, first)
+    last = np.where(off_grid, hi - 1, last)
     # Geometric centre, the natural x on a log axis; the leading [0, min) bin
-    # has none, so it gets the arithmetic one.
-    dist = np.where(lo > 0, np.sqrt(np.maximum(lo, 1) * hi), hi / 2.0)
-    width = (hi - lo).astype(np.float64)
+    # holds separation 0, which a log axis cannot place, so it gets hi / 2.
+    dist = np.where(
+        lo > 0,
+        np.sqrt(np.maximum(first, 1) * np.maximum(last, 1).astype(np.float64)),
+        hi / 2.0,
+    )
+    width = np.broadcast_to((hi - lo).astype(np.float64), (n_groups, n_dbins))
+    if continuous is not None:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            width = np.where(continuous > 0, width * possible / continuous, 0.0)
 
     frame = pd.DataFrame(
         {
@@ -351,7 +405,7 @@ def assemble(
             "dist": np.tile(dist, n_groups),
             "n_contacts": observed.ravel(),
             "n_bin_pairs": possible.ravel(),
-            "_width": np.tile(width, n_groups),
+            "_width": np.asarray(width).ravel(),
         }
     )
     frame = frame[frame["n_bin_pairs"] > 0].copy()
