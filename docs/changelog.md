@@ -114,6 +114,32 @@
 
 ### Added
 
+- **`collect`**: zip single-genome cool files — one per species, strain, or
+  MAG — into one `.metacool` file, **one genome per input**, with no
+  contig-to-genome table to write. Inputs are `.cool` files or one resolution
+  of an `.mcool` each (`E_coli.mcool::resolutions/1000`); a genome is named
+  after its file stem, or by `--names`. Every contig is renamed
+  `<genome>__<contig>`, so the `chromosome` or `contig_1` that many assemblies
+  share cannot collide — without stacking a second prefix on a contig that
+  already carries its genome's, so `collect → extract → collect` is stable.
+  `--genomes` decorates the genome rows as in `create`; `--contigs` attaches
+  per-contig metadata, naming a contig as in its input or as collected, with an
+  optional `genome_name` column that disambiguates a shared name and is checked
+  rather than used to re-assign a contig; `--metadata`, `--filter` (including
+  `genomes.n_bins`, since the bins come with the inputs), `--assembly-name`,
+  and `--qc` work as in `create cool`. Inputs must share one bin size, or all be
+  variable-binned; a metacool, an `.mcool` root, and a `square` cooler are
+  refused with a message saying what to use instead. Every input occupies one
+  contiguous block of bins, so under the default `--contig-order cool` (each
+  input keeps its own contig order) the pixels are streamed into place **with no
+  sort at all**, and `extract --genomes X` gives back input X bin for bin and
+  pixel for pixel. `genome-then-length` and `genome-then-alpha` re-sort only
+  the inputs whose contigs they move, one at a time, falling back to cooler's
+  external sort past 100 M pixels. The inter-genome blocks of a collected map
+  are empty by construction — no contact between two inputs was ever observed —
+  which the docs spell out. Exposed as `metacooler.collect`. See
+  [`collect`](cli.md#collect) and the new guide,
+  [Collecting single-genome cools](guides/collect.md).
 - **`qc`**: contact-quality statistics — where a library's contacts actually
   land. Every contact is classified into one of four categories
   (`intra_contig_short` / `intra_contig_long`, split at `--threshold`, default

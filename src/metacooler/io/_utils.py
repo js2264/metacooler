@@ -455,6 +455,32 @@ def _refuse_input_as_output(path: Path, inputs: Iterable[str | Path | None]) -> 
             )
 
 
+def check_output_not_an_input(output: str | Path, inputs: Sequence[str | Path]) -> None:
+    """Refuse an output path that names one of the command's own inputs.
+
+    Must run *before* :func:`check_output_path`: under ``--force`` that guard
+    deletes an existing output up front, so ``-o`` pointing at an input would
+    destroy the input before a single byte of it had been read, and the command
+    would then fail on the file it had just removed.
+
+    Args:
+        output: Output path about to be written.
+        inputs: Input paths or ``file::group`` URIs; only the file part counts.
+
+    Raises:
+        ValueError: If *output* resolves to the same file as any input.
+    """
+    from metacooler.uri import parse_uri
+
+    target = Path(output).resolve()
+    for uri in inputs:
+        if parse_uri(str(uri))[0].resolve() == target:
+            raise ValueError(
+                f"Output {str(output)!r} is also the input {str(uri)!r}; choose "
+                "another output path. An input is never overwritten."
+            )
+
+
 def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:
     """Pick a lossless on-disk dtype for a ``pixels/count`` column being copied.
 

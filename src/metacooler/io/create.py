@@ -57,7 +57,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
     from typing import Literal
 
 
@@ -550,6 +550,8 @@ def _build_genomes_table(
     contig_lengths: dict[str, int],
     contig_genome_map: dict[str, str],
     extra_genomes_df: pd.DataFrame | None = None,
+    *,
+    report_divergence: bool = True,
 ) -> pd.DataFrame:
     """Build the ``/genomes`` DataFrame from contig data.
 
@@ -565,6 +567,11 @@ def _build_genomes_table(
             genome name.  Columns colliding with metacooler's own
             (``name``, ``length``, ``n_contigs``, ``n_bins``) are renamed with a
             ``user_`` prefix.
+        report_divergence: Warn when *extra_genomes_df* and the contig
+            assignments cover different genomes (see
+            :func:`_report_genome_table_divergence`).  ``collect`` turns this
+            off: its genomes come from the input files rather than from a
+            contigs table, so it reports the mismatch itself, in those terms.
 
     Returns:
         DataFrame with columns ``name``, ``length``, ``n_contigs``, and
@@ -601,7 +608,7 @@ def _build_genomes_table(
 
     # The genomes table only decorates the derived rows; say so out loud
     # whenever the two tables cover different sets of genomes.
-    if extra_genomes_df is not None:
+    if extra_genomes_df is not None and report_divergence:
         _report_genome_table_divergence(sorted_names, extra_genomes_df)
 
     # Merge extra columns from the genomes file if provided
@@ -727,6 +734,13 @@ def _apply_create_filters(
     extra_genomes_df: pd.DataFrame | None,
     filters: Sequence[str] | None,
     bins_df: pd.DataFrame | None = None,
+    *,
+    genome_n_bins: Mapping[str, int] | None = None,
+    report_divergence: bool = True,
+    dropped_effect: str = (
+        "are tiled into no bins, and their contacts are discarded while binning "
+        "(reported in the drop summary below)"
+    ),
 ) -> tuple[dict[str, int], pd.DataFrame | None]:
     """Drop the contigs that fail the ``--filter`` predicates, before binning.
 
@@ -755,6 +769,13 @@ def _apply_create_filters(
         bins_df: Optional bins DataFrame (string ``chrom`` names) to narrow in
             lockstep, so a pre-defined bin table cannot keep bins for a contig
             that was just dropped.
+        genome_n_bins: Bin count of every genome, for a caller whose bins
+            exist before anything is filtered (``collect``: they come with the
+            input files).  When given, ``genomes.n_bins`` becomes filterable
+            like any other column, instead of being refused with a hint.
+        report_divergence: Forwarded to :func:`_build_genomes_table`.
+        dropped_effect: What happens to a dropped contig, completing the
+            sentence logged after filtering ("the N dropped contig(s) ...").
 
     Returns:
         ``(contig_lengths, bins_df)`` with the failing contigs removed.
@@ -779,7 +800,11 @@ def _apply_create_filters(
     # order — which is computed from the *surviving* contigs anyway.
     order = list(contig_lengths)
     genomes_df = _build_genomes_table(
-        order, contig_lengths, contig_genome_map, extra_genomes_df
+        order,
+        contig_lengths,
+        contig_genome_map,
+        extra_genomes_df,
+        report_divergence=report_divergence,
     )
     contigs_df = _build_contigs_table(
         order, contig_lengths, contig_genome_map, genomes_df, contig_df
@@ -787,13 +812,18 @@ def _apply_create_filters(
     contigs_df = contigs_df.assign(
         genome=contigs_df["genome_id"].map(genomes_df["name"])
     )
-    hints = {
-        "n_bins": (
+    hints: dict[str, str] = {}
+    if genome_n_bins is not None:
+        # Same position _compute_all_offsets gives the column in the output.
+        genomes_df.insert(
+            3, "n_bins", genomes_df["name"].map(genome_n_bins).astype(np.int64)
+        )
+    else:
+        hints["n_bins"] = (
             "no bin has been tiled yet, so a genome's bin count is not known "
             "during 'create'. Filter on genomes.length or genomes.n_contigs "
             "instead, or filter the finished file with 'extract'"
         )
-    }
 
     keep_genomes = set(
         genomes_df.loc[
@@ -819,13 +849,13 @@ def _apply_create_filters(
     n_genomes_after = len({contig_genome_map.get(c, "__unbinned__") for c in filtered})
     logger.info(
         "--filter kept %d of %d contig(s) in %d of %d genome(s); the %d dropped "
-        "contig(s) are tiled into no bins, and their contacts are discarded "
-        "while binning (reported in the drop summary below).",
+        "contig(s) %s.",
         len(filtered),
         n_before,
         n_genomes_after,
         n_genomes_before,
         n_before - len(filtered),
+        dropped_effect,
     )
     if bins_df is not None:
         bins_df = bins_df[bins_df["chrom"].isin(filtered)].copy()

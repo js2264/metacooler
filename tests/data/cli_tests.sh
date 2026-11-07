@@ -89,6 +89,36 @@ cooler info ../assembly_1_rep1_DpnII.cool
 metacooler info assembly_1_rep1_DpnII_from-cool.metacool
 
 # ================================================================================
+## Collect single-genome cools into one metacool (one genome per input)
+# ================================================================================
+
+printf 'genome_name\tsource\nA1\tassembly_1\nA2\tassembly_2\n' > collected_species.tsv
+metacooler collect ../assembly_1_rep1_1kb.cool ../assembly_2_rep1_1kb.cool --names A1,A2 --genomes collected_species.tsv --output collected_1kb.metacool
+metacooler info collected_1kb.metacool
+metacooler dump -t genomes -H collected_1kb.metacool
+metacooler dump -t contigs -H collected_1kb.metacool | head -n 5
+
+## Under the default --contig-order cool, extracting a genome gives back its
+## input: the same bins and pixels (only the contig names carry the A2__ prefix).
+metacooler extract collected_1kb.metacool --genomes A2 --output collected_A2.cool
+cooler dump -t pixels ../assembly_2_rep1_1kb.cool > dump_pixels_collect_original
+cooler dump -t pixels collected_A2.cool > dump_pixels_collect_round_trip
+assert_identical "collect -> extract round trip" dump_pixels_collect_original dump_pixels_collect_round_trip
+
+## Reordering contigs within a genome re-sorts only what moved; the map is the same.
+metacooler collect ../assembly_1_rep1_1kb.cool ../assembly_2_rep1_1kb.cool --names A1,A2 --contig-order genome-then-length --sort-strategy external --output collected_1kb_by_length.metacool
+metacooler check --deep collected_1kb_by_length.metacool
+
+## One resolution from each .mcool.
+metacooler collect ../assembly_1_rep1_1kb.mcool::resolutions/5000 ../assembly_2_rep1_1kb.mcool::resolutions/5000 --output collected_5kb.metacool
+metacooler info collected_5kb.metacool
+
+## Refused inputs (expected errors).
+metacooler collect ../assembly_1_rep1_1kb.cool ../assembly_2_rep1_DpnII.cool --output collected_mixed.metacool || echo "  (expected: inputs are not binned alike)"
+metacooler collect ../assembly_1_rep1_1kb.mcool ../assembly_2_rep1_1kb.cool --output collected_mcool.metacool || echo "  (expected: pick one resolution of the .mcool)"
+metacooler collect assembly_1_rep1_1kb.metacool ../assembly_2_rep1_1kb.cool --output collected_metacool.metacool || echo "  (expected: already a metacool file)"
+
+# ================================================================================
 ## Stack / merge
 # ================================================================================
 

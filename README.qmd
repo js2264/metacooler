@@ -46,6 +46,12 @@ metacooler qc output.metacool --table
 metacooler ps output.metacool --pairs contacts.pairs --by genome --plot ps.png
 ```
 
+Already have one `.cool` file per genome? `collect` zips them into a single metacool file, one genome per input:
+
+```console
+metacooler collect E_coli.cool B_subtilis.cool S_aureus.cool -o species.metacool
+```
+
 Every command takes its input as a positional path (or an
 `file.mmetacool::entries/<name>` URI), and shares `-o/--output`, `-f/--force`,
 `-v/--verbose`, and `-q/--quiet`.
@@ -153,6 +159,7 @@ display(Markdown(f"```yaml\n{content}\n```"))
 - **Report contact quality**: the 3D ratio and its intra-contig / intra-MAG / inter-MAG breakdown, tallied at creation time into `metadata.qc` and per-MAG `/genomes` columns, recomputable with `qc`
 - **Export P(s)**: contact probability vs genomic distance, pooled or per MAG, as a table and a log-log plot (`ps`). `create pairs` writes the per-MAG curve at base-pair resolution beside the output as `<output>.ps.tsv`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
-- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
+- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool` and `collect`)
+- **Collect single-genome maps**: `collect` stacks one `.cool` per genome into a metacool file, renaming contigs `<genome>__<contig>` so shared names cannot collide
 - **Unassigned contigs**: default to `__unbinned__` genome
 - **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection

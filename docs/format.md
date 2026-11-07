@@ -209,7 +209,7 @@ ordering.
 | `genome-then-alpha` | Group by genome (alphabetical), contigs alphabetical within each genome. |
 | `fasta` | Preserve the order of contigs as they appear in the FASTA or pairs header. |
 | `alpha` | All contigs sorted alphabetically, ignoring genome assignment. |
-| `cool` | Preserve the exact contig order of the input cooler. `create cool` only. |
+| `cool` | Preserve the exact contig order of the input cooler. `create cool`, and `collect` — where every input is one genome, genomes are laid out in `genome_id` order, and each keeps its input's contig order, so the layout is genome-grouped even though `cool` is not declared as such. |
 
 ---
 

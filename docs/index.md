@@ -116,6 +116,7 @@ The full byte-level specification lives in the
 | Follow an end-to-end example | [Quickstart](quickstart.md) |
 | Understand the data model | [Concepts](concepts.md) |
 | Build a file from pairs or a cooler | [Creating from pairs](guides/from-pairs.md), [from a cooler](guides/from-cool.md) |
+| Combine one cooler per genome into one file | [Collecting single-genome cools](guides/collect.md) |
 | Get data back out | [Exporting data](guides/export.md) |
 | Work at multiple resolutions | [Multi-resolution files](guides/multireso.md) |
 | Look up a command | [CLI reference](cli.md) |
