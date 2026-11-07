@@ -96,7 +96,12 @@ def cmd_create_cool(
 
     setup_logging(verbose, command_name="metacooler create cool", quiet=quiet)
 
-    check_output(output, force)
+    check_output(
+        output,
+        force,
+        inputs=[cool_path, contigs, genomes_table, metadata],
+        defer_removal=True,
+    )
     try:
         qc_distance_threshold = int(parse_size(qc_threshold))
     except ValueError as exc:

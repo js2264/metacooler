@@ -78,7 +78,7 @@ def cmd_network(
 
     setup_logging(verbose, command_name="metacooler network", quiet=quiet)
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     network(
         uri=metacool_path,

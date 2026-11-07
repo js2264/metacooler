@@ -98,7 +98,7 @@ def dump_table(
         # Guard every destination up front so a clash on the last table does
         # not leave the first four already overwritten.
         for tbl in tables:
-            check_output_path(Path(f"{prefix}.{tbl}.tsv"), force)
+            check_output_path(Path(f"{prefix}.{tbl}.tsv"), force, inputs=[uri])
         for tbl in tables:
             out_path = Path(f"{prefix}.{tbl}.tsv")
             dump_table(
@@ -119,7 +119,7 @@ def dump_table(
         return
 
     if out is not None:
-        check_output_path(out, force)
+        check_output_path(out, force, inputs=[uri])
 
     # Resolve contig filter
     selected_contig_ids = resolve_contig_selection(

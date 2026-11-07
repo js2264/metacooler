@@ -77,7 +77,7 @@ def cmd_zoomify(
 
     setup_logging(verbose, command_name="metacooler zoomify", quiet=quiet)
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     zoomify(
         uri=metacool_path,

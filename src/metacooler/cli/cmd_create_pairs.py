@@ -137,7 +137,12 @@ def cmd_create_pairs(
 
     setup_logging(verbose, command_name="metacooler create pairs", quiet=quiet)
 
-    check_output(output, force)
+    check_output(
+        output,
+        force,
+        inputs=[pairs, bins, contigs, genomes_table, fasta, metadata],
+        defer_removal=True,
+    )
     try:
         qc_distance_threshold = int(parse_size(qc_threshold))
     except ValueError as exc:

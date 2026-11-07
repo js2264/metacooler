@@ -80,7 +80,7 @@ def cmd_binnify(
 
     setup_logging(verbose, command_name="metacooler binnify", quiet=quiet)
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     binnify(
         uri=metacool_path,

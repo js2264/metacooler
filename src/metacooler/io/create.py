@@ -1974,7 +1974,7 @@ def from_pairs(
     # out that the table cannot be written is worth seconds, not hours.
     ps_path = ps_table_path(uri) if ps else None
     if ps_path is not None:
-        check_output_path(ps_path, force)
+        check_output_path(ps_path, force, defer_removal=True)
     timer = time.perf_counter()
 
     # --- Parse contig map and optional genomes metadata table ---

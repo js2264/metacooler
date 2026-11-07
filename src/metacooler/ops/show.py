@@ -813,7 +813,7 @@ def show(
         level = "contig"
 
     if out is not None:
-        check_output_path(out, force)
+        check_output_path(out, force, inputs=[uri])
         matplotlib.use("Agg")
 
     panel = (

@@ -126,7 +126,7 @@ def network(
         raise ValueError(f"level must be 'bin', 'contig', or 'genome', got {level!r}")
 
     if out is not None:
-        check_output_path(out, force)
+        check_output_path(out, force, inputs=[uri])
 
     n_pix = len(mc._clr.pixels())
 

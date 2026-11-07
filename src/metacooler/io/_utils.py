@@ -6,6 +6,7 @@ import contextlib
 import gzip
 import importlib
 import logging
+import os
 import re
 import types
 from pathlib import Path
@@ -28,7 +29,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
     from metacooler.api import MetaCooler
 
@@ -312,7 +313,13 @@ def chrom_codes(bins: pd.DataFrame) -> np.ndarray:
     return col.to_numpy(dtype=np.int64)
 
 
-def check_output_path(path: str | Path, force: bool = False) -> None:
+def check_output_path(
+    path: str | Path,
+    force: bool = False,
+    *,
+    inputs: Iterable[str | Path | None] = (),
+    defer_removal: bool = False,
+) -> None:
     """Refuse to overwrite an existing output file unless *force* is set.
 
     Single home for the "output exists" guard shared by the CLI commands and
@@ -321,13 +328,24 @@ def check_output_path(path: str | Path, force: bool = False) -> None:
 
     Args:
         path: Output path about to be written.
-        force: If True, remove an existing file instead of raising.
+        force: If True, an existing file may be replaced instead of raising.
+        inputs: Paths or ``file::group`` URIs the command is about to read.
+            An output that is the same file as any of them is refused even
+            under *force*: removing it would delete the input before it is
+            read (``binnify a.metacool -o a.metacool -f`` used to do exactly
+            that, then fail with "File not found").
+        defer_removal: Leave an existing file in place for the caller to
+            replace on success, instead of removing it now.  For writers that
+            stage their output and rename it over *path* at the end, so a run
+            that fails does not also destroy the previous result.
 
     Raises:
+        ValueError: If *path* is the same file as one of *inputs*.
         FileExistsError: If *path* exists and *force* is False.
         IsADirectoryError: If *path* exists and is a directory.
     """
     path = Path(path)
+    _refuse_input_as_output(path, inputs)
     if not path.exists():
         return
     if path.is_dir():
@@ -336,7 +354,34 @@ def check_output_path(path: str | Path, force: bool = False) -> None:
         raise FileExistsError(
             f"Output file {str(path)!r} already exists. Use --force to overwrite."
         )
-    path.unlink()
+    if not defer_removal:
+        path.unlink()
+
+
+def _refuse_input_as_output(path: Path, inputs: Iterable[str | Path | None]) -> None:
+    """Raise if *path* names the same file as any of *inputs*.
+
+    Args:
+        path: Output path about to be written.
+        inputs: Input paths or URIs; ``None`` and ``"-"`` (stdin) are skipped.
+
+    Raises:
+        ValueError: If *path* and an input resolve to the same file.
+    """
+    from metacooler.uri import parse_uri
+
+    if not path.exists():
+        return
+    for raw in inputs:
+        if raw is None or str(raw) == "-":
+            continue
+        file_path, _ = parse_uri(str(raw))
+        if file_path.exists() and os.path.samefile(file_path, path):
+            raise ValueError(
+                f"Output {str(path)!r} is the same file as the input "
+                f"{str(raw)!r}; writing it would destroy the input before it "
+                "is read. Choose a different output path."
+            )
 
 
 def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:

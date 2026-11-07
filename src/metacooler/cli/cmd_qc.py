@@ -109,8 +109,8 @@ def cmd_qc(
 
     setup_logging(verbose, command_name="metacooler qc", quiet=quiet)
 
-    check_output(output, force)
-    check_output(per_genome_out, force)
+    check_output(output, force, inputs=[metacool_path])
+    check_output(per_genome_out, force, inputs=[metacool_path])
     try:
         distance_threshold = int(parse_size(threshold))
     except ValueError as exc:

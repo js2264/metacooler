@@ -46,6 +46,6 @@ def cmd_flatten(
 
     setup_logging(verbose, command_name="metacooler flatten", quiet=quiet)
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     flatten(uri=metacool_path, output=output)

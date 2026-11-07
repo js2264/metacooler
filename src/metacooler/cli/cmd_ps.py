@@ -177,8 +177,8 @@ def cmd_ps(
 
     setup_logging(verbose, command_name="metacooler ps", quiet=quiet)
 
-    check_output(output, force)
-    check_output(plot, force)
+    check_output(output, force, inputs=[metacool_path, pairs])
+    check_output(plot, force, inputs=[metacool_path, pairs])
 
     def _distance(raw: str | None, hint: str) -> int | None:
         if raw is None:

@@ -53,7 +53,7 @@ def cmd_merge(
     if len(metacool_paths) < 2:
         raise click.UsageError("At least two input files required.")
 
-    check_output(output, force)
+    check_output(output, force, inputs=metacool_paths)
 
     merge(inputs=metacool_paths, output=output)
 

@@ -187,7 +187,7 @@ def dump(
             "--prefix only applies to --table all; use -o/--output instead."
         )
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     dump_table(
         uri=metacool_path,
