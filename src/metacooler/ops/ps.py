@@ -184,7 +184,7 @@ def _from_pixels(
     max_distance: int | None,
     chunksize: int,
 ) -> pd.DataFrame:
-    """P(s) from the binned pixel table: bin-midpoint distances, bin-pair denominators."""
+    """P(s) from the binned pixel table: bin-midpoint distances, position pairs."""
     mc = selection.mc
     bins = mc.bins()
     contig_of_bin = chrom_codes(bins)
@@ -216,8 +216,18 @@ def _from_pixels(
         len(edges) - 1,
         f"{int(edges[-1]):,}",
     )
+    group_selected = group_of_bin[selected]
     possible = bin_pair_denominators(
-        key, group_of_bin[selected], selection.n_groups, edges
+        key, group_selected, selection.n_groups, edges, (ends - starts)[selected]
+    )
+    # What the same contigs would offer at continuous separations: the
+    # yardstick for how much of each distance bin the binned map realises.
+    contig_keep = selection.contig_selected
+    continuous = position_pair_denominators(
+        mc.contigs["length"].to_numpy(dtype=np.int64)[contig_keep],
+        selection.contig_group[contig_keep],
+        selection.n_groups,
+        edges,
     )
 
     tally = PSCounts(selection.n_groups, edges)
@@ -236,7 +246,15 @@ def _from_pixels(
             np.abs(mids[b2] - mids[b1]),
             chunk["count"].to_numpy()[keep],
         )
-    return assemble(selection.group_names, edges, tally.matrix, possible)
+    binsize = mc.binsize
+    return assemble(
+        selection.group_names,
+        edges,
+        tally.matrix,
+        possible,
+        continuous=continuous,
+        step=int(binsize) if binsize else 1,
+    )
 
 
 def _from_pairs_file(
@@ -279,8 +297,9 @@ def _from_pairs_file(
 
     tally = PSCounts(selection.n_groups, edges)
     stats = _PairsDropStats()
+    contig_length = mc.contigs["length"].to_numpy(dtype=np.int64)
     for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
-        decoded = _decode_pairs_chunk(chunk, name_to_id, stats)
+        decoded = _decode_pairs_chunk(chunk, name_to_id, stats, contig_length)
         if decoded is None:
             continue
         c1, c2, p1, p2 = decoded

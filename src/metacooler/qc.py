@@ -25,6 +25,14 @@ The categories partition every contact exactly once:
 ``inter_genome``
     Two contigs assigned to different genomes.
 
+``__unbinned__`` is not a genome: it collects every contig that no binner
+assigned, so two of its contigs share nothing but the absence of an
+assignment.  A contact between two *different* unbinned contigs is therefore
+``inter_genome`` -- each unbinned contig counts as a genome of its own.  Treating
+the bucket as one genome used to inflate ``intra_genome_fraction`` by every
+contact among the unassigned contigs, which on a real assembly are often most
+of them.
+
 The headline number, ``trans_contig_ratio`` (the "3D ratio"), is the share of
 contacts joining two *different* contigs — the signal that assembles a
 metagenome — and is by construction
@@ -48,7 +56,12 @@ logger = logging.getLogger("metacooler")
 # Version of the ``metadata["qc"]`` block written by this module.  Bump it if
 # the meaning of a key changes, so a reader can tell an old block apart from a
 # new one rather than silently comparing two different quantities.
-QC_VERSION = 1
+#   2: contacts between two different __unbinned__ contigs moved from
+#      inter_contig_intra_genome to inter_genome.
+QC_VERSION = 2
+
+# Name of the genome that collects unassigned contigs (see module docstring).
+UNBINNED_GENOME = "__unbinned__"
 
 # Key the block is stored under inside a file's ``metadata`` attribute.
 QC_METADATA_KEY = "qc"
@@ -136,6 +149,12 @@ def bin_maps(bins: pd.DataFrame, contigs: pd.DataFrame) -> BinMaps:
     return BinMaps(contig_of_bin, genome_of_bin, mid)
 
 
+def unbinned_genome_id(names: Sequence[str] | np.ndarray) -> int | None:
+    """Return the row of ``__unbinned__`` in a ``/genomes`` name list, if any."""
+    hits = np.flatnonzero(np.asarray(names).astype(str) == UNBINNED_GENOME)
+    return int(hits[0]) if hits.size else None
+
+
 class ContactQC:
     """Running tally of contacts per category, in total and per genome.
 
@@ -148,6 +167,9 @@ class ContactQC:
         distance_threshold: Intra-contig short/long split, in bp.
         source: ``"pairs"`` when the tally comes from read positions,
             ``"pixels"`` when it comes from binned pixels.
+        unbinned_genome: Row of ``__unbinned__`` in ``/genomes`` (see
+            :func:`unbinned_genome_id`), whose contigs are each classified as
+            a genome of their own; ``None`` if the file has none.
     """
 
     def __init__(
@@ -155,6 +177,7 @@ class ContactQC:
         n_genomes: int,
         distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
         source: Literal["pairs", "pixels"] = "pixels",
+        unbinned_genome: int | None = None,
     ) -> None:
         if distance_threshold < 0:
             raise ValueError(
@@ -163,6 +186,7 @@ class ContactQC:
         self.n_genomes = int(n_genomes)
         self.distance_threshold = int(distance_threshold)
         self.source = source
+        self.unbinned_genome = unbinned_genome
         self.counts = np.zeros(len(QC_CATEGORIES), dtype=np.int64)
         self.per_genome = np.zeros((self.n_genomes, len(QC_CATEGORIES)), dtype=np.int64)
 
@@ -254,6 +278,9 @@ class ContactQC:
         short = same_contig & (distance < self.distance_threshold)
         long_range = same_contig & ~short
         same_genome = genome1 == genome2
+        if self.unbinned_genome is not None:
+            # Two different unassigned contigs share no genome.
+            same_genome &= same_contig | (genome1 != self.unbinned_genome)
         inter_contig_cis = ~same_contig & same_genome
         inter_genome = ~same_genome
 

@@ -1,35 +1,42 @@
 [build-system]
-requires = ["hatchling>=1.18"]
+# 1.27 is the first hatchling that writes PEP 639 License-Expression and
+# License-File metadata from `license` / `license-files`.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "metacooler"
-version = "0.1.0"
+dynamic = ["version"]
 description = "metacooler: Hi-C contact maps for metagenomes — an extension of the cooler format."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Jacques Serizay" }]
 keywords = ["hi-c", "metagenomics", "cooler", "contact-maps", "hdf5"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
+# Lower bounds are exercised by the `lowest` CI job (uv --resolution
+# lowest-direct); raise one only together with the reason it moved.
 dependencies = [
     "cooler>=0.10",
     "h5py>=3.8",
     "numpy>=1.24",
     "pandas>=2.0",
-    "bioframe>=0.4",
-    "rich-click>=1.7",
+    # 1.9 is the first release that accepts `help=` on click arguments.
+    "rich-click>=1.9",
     "rich>=13",
-    "pyfaidx>=0.7",
+    # 0.7.2.2 is the first release that no longer imports pkg_resources.
+    "pyfaidx>=0.7.2.2",
     "matplotlib>=3.7",
     "scipy>=1.10",
     "click>=8.1",
@@ -38,9 +45,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-plotly = ["plotly>=5.18"]
+docs = [
+    "zensical>=0.0.43",
+    "mkdocstrings[python]>=0.25",
+]
+
+[dependency-groups]
+# A dependency group rather than an extra, so `uv sync` (and `uv sync --dev`)
+# installs the toolchain and it never ships as part of the package metadata.
 dev = [
     "biopython>=1.87",
+    "diff-cover>=9",
     "ipython>=8.39.0",
     "jupyter>=1.1.1",
     "pre-commit>=4.6.0",
@@ -49,10 +64,6 @@ dev = [
     "ruff>=0.4",
     "ty>=0.0.38",
 ]
-docs = [
-    "zensical>=0.0.43",
-    "mkdocstrings[python]>=0.25",
-]
 
 [project.scripts]
 metacooler = "metacooler.cli.main:cli"
@@ -60,9 +71,25 @@ metacooler = "metacooler.cli.main:cli"
 [project.urls]
 Homepage = "https://github.com/js2264/metacooler"
 Repository = "https://github.com/js2264/metacooler"
+Documentation = "https://js2264.github.io/metacooler"
+Changelog = "https://js2264.github.io/metacooler/changelog/"
+
+[tool.hatch.version]
+path = "src/metacooler/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/metacooler"]
+
+[tool.hatch.build.targets.sdist]
+# Ship the sources, tests, fixtures and docs; leave out repository tooling that
+# is meaningless outside a git checkout.
+exclude = [
+    "/.github",
+    "/CLAUDE.md",
+    "/uv.lock",
+    "/.pre-commit-config.yaml",
+    "/Makefile",
+]
 
 [tool.ruff]
 line-length = 88

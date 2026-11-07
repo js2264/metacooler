@@ -84,12 +84,17 @@ def extract(
         all_contigs = mc.contigs
         genome_names = mc.genomes["name"]
         output_path = Path(output)
+        # Strip only a trailing ".cool": Path.stem cut at the *last* dot, so
+        # "-o sample.rep1" wrote "sample_<genome>.cool", and a second run with
+        # "-o sample.rep2" collided with (or under --force, overwrote) it.
+        name = output_path.name
+        prefix = name[: -len(".cool")] if name.endswith(".cool") else name
         by_genome: dict[int, list[int]] = {}
         for cid in sorted(selected_contig_ids):
             by_genome.setdefault(int(all_contigs.at[cid, "genome_id"]), []).append(cid)
         for gid, cids in sorted(by_genome.items()):
             g = str(genome_names[gid])
-            out_file = output_path.parent / f"{output_path.stem}_{g}.cool"
+            out_file = output_path.parent / f"{prefix}_{g}.cool"
             if out_file.exists() and not force:
                 raise FileExistsError(
                     f"Output file already exists: {out_file}. Use --force to overwrite."

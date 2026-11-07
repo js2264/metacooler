@@ -112,10 +112,17 @@ class MetaCooler:
         """The file path as a string."""
         return str(self._store)
 
+    def __repr__(self) -> str:
+        return f"<MetaCooler {self.uri!r}>"
+
     @property
     def root(self) -> str:
-        """The HDF5 root path (always ``/`` for metacooler)."""
-        return "/"
+        """HDF5 path of the map inside its file, as ``cooler.Cooler.root``.
+
+        ``/`` for a ``.metacool``; ``/entries/<name>`` for an ``.mmetacool``
+        entry (it used to claim ``/`` for those too).
+        """
+        return self._clr.root
 
     @property
     def store(self) -> Path:
@@ -297,7 +304,10 @@ class MetaCooler:
         ):
             if _key in base:
                 with contextlib.suppress(ValueError, TypeError):
-                    base[_key] = int(base[_key])
+                    as_int = int(base[_key])
+                    # A float-count map has a fractional sum; int() floored it.
+                    if as_int == float(base[_key]):
+                        base[_key] = as_int
         return base
 
     @property

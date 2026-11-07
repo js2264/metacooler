@@ -7,6 +7,7 @@ Single home for the idioms that were previously copy-pasted across
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import rich_click as click
@@ -100,7 +101,13 @@ def filter_option(f):
     )(f)
 
 
-def check_output(path: str | Path | None, force: bool = False) -> None:
+def check_output(
+    path: str | Path | None,
+    force: bool = False,
+    *,
+    inputs: Iterable[str | Path | None] = (),
+    defer_removal: bool = False,
+) -> None:
     """Refuse to overwrite an existing output file unless ``--force`` was given.
 
     Thin CLI-facing wrapper over :func:`metacooler.io._utils.check_output_path`
@@ -110,17 +117,22 @@ def check_output(path: str | Path | None, force: bool = False) -> None:
         path: Output path about to be written.  ``None`` is a no-op (the
             command writes to stdout).
         force: Whether the user passed ``-f/--force``.
+        inputs: Every path or URI the command reads.  An output that is one of
+            them is refused even under ``--force``.
+        defer_removal: The command stages its output and renames it into
+            place on success, so leave an existing file alone until then.
 
     Raises:
-        click.ClickException: If *path* exists and *force* is False.
+        click.ClickException: If *path* exists and *force* is False, or if
+            *path* is one of *inputs*.
     """
     if path is None:
         return
     from metacooler.io._utils import check_output_path
 
     try:
-        check_output_path(path, force)
-    except OSError as exc:
+        check_output_path(path, force, inputs=inputs, defer_removal=defer_removal)
+    except (OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

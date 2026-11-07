@@ -622,7 +622,10 @@ def _transform_matrix(
     if transform == "log1p":
         return np.log1p(arr)
     if transform == "log10":
-        return np.where(arr > 0, np.log10(arr), 0.0)
+        # log10(1 + count), as documented: log10(count) mapped every single-
+        # count pixel to 0 -- indistinguishable from an empty one, and left out
+        # of the default vmax percentile -- and warned on the zeros.
+        return np.log10(1.0 + arr)
     return arr
 
 
@@ -813,7 +816,7 @@ def show(
         level = "contig"
 
     if out is not None:
-        check_output_path(out, force)
+        check_output_path(out, force, inputs=[uri])
         matplotlib.use("Agg")
 
     panel = (

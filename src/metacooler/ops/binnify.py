@@ -77,7 +77,7 @@ def binnify(
     from metacooler.api import MetaCooler
 
     output = Path(output)
-    check_output_path(output, force=force)
+    check_output_path(output, force=force, inputs=[uri])
 
     if binsize <= 0:
         raise ValueError(f"binsize must be a positive integer, got {binsize}.")

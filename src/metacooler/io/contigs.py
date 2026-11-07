@@ -9,7 +9,7 @@ from typing import Literal
 
 import pandas as pd
 
-from metacooler.io._utils import read_user_table
+from metacooler.io._utils import read_user_table, rename_key_columns
 
 logger = logging.getLogger("metacooler")
 
@@ -102,7 +102,9 @@ def parse_contigs_table(
                 f"contigs format expects second column to be 'genome_name', "
                 f"got '{df.columns[1]}'."
             )
-        df = df.rename(columns={"genome_name": "genome_id"})
+        df = rename_key_columns(
+            df, {0: "contig_name", 1: "genome_id"}, kind="Contig table"
+        )
         _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
@@ -128,7 +130,15 @@ def parse_contigs_table(
         df = read_user_table(path, kind="Contig table")
         if "Name" not in df.columns or "Final_bin" not in df.columns:
             raise ValueError("metator format requires 'Name' and 'Final_bin' columns")
-        df = df.rename(columns={"Name": "contig_name", "Final_bin": "genome_id"})
+        columns = list(df.columns)
+        df = rename_key_columns(
+            df,
+            {
+                columns.index("Name"): "contig_name",
+                columns.index("Final_bin"): "genome_id",
+            },
+            kind="Contig table",
+        )
         _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df
@@ -157,28 +167,12 @@ def parse_contigs_table(
                 f"{required_cols} columns in the table, got {df.shape[1]}."
             )
 
-        # Rename *positionally* rather than with ``rename(columns=...)``: a table
-        # that already carries a ``contig_name``/``genome_id`` label elsewhere
-        # would otherwise end up with duplicate labels, and ``df["contig_name"]``
-        # then returns a DataFrame instead of a Series — which silently builds a
-        # garbage mapping instead of raising.
-        new_columns = list(df.columns)
-        new_columns[contig_col - 1] = "contig_name"
-        new_columns[genome_col - 1] = "genome_id"
-        for i, name in enumerate(new_columns):
-            if i in (contig_col - 1, genome_col - 1):
-                continue
-            if name in ("contig_name", "genome_id"):
-                new_columns[i] = f"{name}_col{i + 1}"
-                logger.warning(
-                    "Column %d is named %r, which collides with the column "
-                    "selected by the %r format spec; renamed it to %r.",
-                    i + 1,
-                    name,
-                    fmt,
-                    new_columns[i],
-                )
-        df.columns = new_columns
+        # Positional, never by name: see rename_key_columns.
+        df = rename_key_columns(
+            df,
+            {contig_col - 1: "contig_name", genome_col - 1: "genome_id"},
+            kind="Contig table",
+        )
         _warn_duplicate_contigs(df)
         mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
         return mapping, df

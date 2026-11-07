@@ -10,9 +10,9 @@ format:
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![codecov](https://codecov.io/gh/js2264/metacooler/branch/devel/graph/badge.svg?token=XMYgQxb7KH)](https://codecov.io/gh/js2264/metacooler)
 
-An extension of the [cooler](https://github.com/open2c/cooler) format for multi-genome (metagenomic) Hi-C data. `metacooler` adds a `genomes/` hierarchy on top of cooler's `chroms/bins/pixels` model, while preserving **full backward compatibility**: any `.metacooler` file can be opened with `cooler.Cooler()` out of the box.
+An extension of the [cooler](https://github.com/open2c/cooler) format for multi-genome (metagenomic) Hi-C data. `metacooler` adds a `genomes/` hierarchy on top of cooler's `chroms/bins/pixels` model, while preserving **full backward compatibility**: any `.metacool` file can be opened with `cooler.Cooler()` out of the box.
 
-`metacooler` aims to be a drop-in replacement for `cooler` providing a flexible framework for storing and analyzing metagenomic contact maps.
+`metacooler` builds on `cooler` to provide a framework for storing and analysing metagenomic contact maps: every `.metacool` file is also a valid cooler, so cooler, cooltools and the rest of the ecosystem keep working on it.
 
 ## Installation
 
@@ -20,11 +20,9 @@ An extension of the [cooler](https://github.com/open2c/cooler) format for multi-
 pip install metacooler
 ```
 
-Or with development dependencies:
-
-```console
-pip install metacooler[dev]
-```
+For development, clone the repository and run `uv sync`, which installs the
+runtime dependencies plus the `dev` dependency group (pytest, ruff, ty,
+pre-commit).
 
 ## Quick start
 
