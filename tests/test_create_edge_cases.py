@@ -6,6 +6,7 @@ import bz2
 import gzip
 from pathlib import Path
 
+import cooler
 import h5py
 import pandas as pd
 import pytest
@@ -320,26 +321,75 @@ class TestInferBinsize:
 
 
 class TestCoolerWriterShims:
+    def test_installed_cooler_is_recognised(self):
+        """A cooler that moved its writer must fail here, not degrade silently.
+
+        cooler 0.11 moved ``write_bins`` out of ``create/_create.py``; the shims
+        kept looking there, found nothing, and the quadratic enum build came back
+        with nothing but a debug log line to show for it.
+        """
+        from metacooler.io._utils import cooler_writer_module
+
+        module = cooler_writer_module()
+        assert module is not None, f"cooler {cooler.__version__} not recognised"
+
+    def test_shims_reach_coolers_writer(self, tmp_path, monkeypatch):
+        """Through write_cooler, cooler's own writer sees chrom_as_enum=False."""
+        from metacooler.io._utils import cooler_writer_module, write_cooler
+
+        module = cooler_writer_module()
+        assert module is not None
+        real_write_bins = module.write_bins
+        seen: list[bool] = []
+
+        def spy_write_bins(*args, chrom_as_enum=True, **kwargs):
+            seen.append(chrom_as_enum)
+            return real_write_bins(*args, chrom_as_enum=chrom_as_enum, **kwargs)
+
+        def forbidden_get_binsize(bins):
+            raise AssertionError("cooler's per-contig get_binsize was called")
+
+        monkeypatch.setattr(module, "write_bins", spy_write_bins)
+        monkeypatch.setattr(module, "get_binsize", forbidden_get_binsize)
+        bins = pd.DataFrame(
+            {"chrom": ["a", "a", "b"], "start": [0, 10, 0], "end": [10, 20, 5]}
+        )
+        pixels = pd.DataFrame({"bin1_id": [0, 1], "bin2_id": [1, 2], "count": [3, 4]})
+        write_cooler(tmp_path / "x.cool", bins, pixels)
+        assert seen == [False]
+        assert cooler.Cooler(str(tmp_path / "x.cool")).binsize == 10
+
     def test_restores_cooler_globals(self):
-        from cooler.create import _create as cooler_create
+        from metacooler.io._utils import cooler_writer_module, cooler_writer_shims
 
-        from metacooler.io._utils import cooler_writer_shims
-
-        before = (cooler_create.write_bins, cooler_create.get_binsize)
+        module = cooler_writer_module()
+        assert module is not None
+        before = (module.write_bins, module.get_binsize)
         with cooler_writer_shims(1000):
-            assert cooler_create.write_bins is not before[0]
-            assert cooler_create.get_binsize(None) == 1000
-        assert (cooler_create.write_bins, cooler_create.get_binsize) == before
+            assert module.write_bins is not before[0]
+            assert module.get_binsize(None) == 1000
+        assert (module.write_bins, module.get_binsize) == before
 
     def test_restores_after_exception(self):
-        from cooler.create import _create as cooler_create
+        from metacooler.io._utils import cooler_writer_module, cooler_writer_shims
 
-        from metacooler.io._utils import cooler_writer_shims
-
-        before = (cooler_create.write_bins, cooler_create.get_binsize)
+        module = cooler_writer_module()
+        assert module is not None
+        before = (module.write_bins, module.get_binsize)
         with pytest.raises(RuntimeError), cooler_writer_shims(None):
             raise RuntimeError("boom")
-        assert (cooler_create.write_bins, cooler_create.get_binsize) == before
+        assert (module.write_bins, module.get_binsize) == before
+
+    def test_unrecognised_cooler_warns_once(self, monkeypatch, caplog):
+        import metacooler.io._utils as utils
+
+        monkeypatch.setattr(utils, "cooler_writer_module", lambda: None)
+        monkeypatch.setattr(utils, "_warned_no_writer_module", False)
+        with caplog.at_level("WARNING", logger="metacooler"):
+            for _ in range(2):
+                with utils.cooler_writer_shims(10):
+                    pass
+        assert sum("quadratically" in r.getMessage() for r in caplog.records) == 1
 
     def test_bins_chrom_is_plain_int32(self, tiny_metacooler):
         """The suppressed enum is the one _finalize_metacool_file strips anyway."""
@@ -607,11 +657,11 @@ class TestValidateBinCoords:
         with pytest.raises(ValueError, match="end < start"):
             _validate_bin_coords(df)
 
-    def test_zero_width_warns_but_ok(self, caplog):
+    def test_zero_width_raises(self):
+        """Refused up front: validate() rejected them anyway, after the pass."""
         df = pd.DataFrame({"chrom": ["c"], "start": [100], "end": [100]})
-        with caplog.at_level("WARNING"):
-            _validate_bin_coords(df)  # must not raise
-        assert any("zero-width" in r.message for r in caplog.records)
+        with pytest.raises(ValueError, match="zero-width"):
+            _validate_bin_coords(df)
 
     def test_valid_coords_pass(self):
         df = pd.DataFrame({"chrom": ["c", "c"], "start": [0, 100], "end": [100, 200]})

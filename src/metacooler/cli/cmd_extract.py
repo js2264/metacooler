@@ -89,7 +89,7 @@ def cmd_extract(
     # With --split, *output* is a prefix rather than a file; the per-genome
     # destinations are guarded inside extract() instead.
     if not split:
-        check_output(output, force)
+        check_output(output, force, inputs=[metacool_path])
 
     genome_list = list(genomes)
     if not genome_list and not contigs and not filters:

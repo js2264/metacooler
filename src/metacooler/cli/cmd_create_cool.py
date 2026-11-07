@@ -91,14 +91,19 @@ def cmd_create_cool(
     hierarchy. Bins and pixels from the input cool file are preserved exactly.
     """
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.filters import parse_size
+    from metacooler.filters import parse_distance
     from metacooler.io.create import from_cool
 
     setup_logging(verbose, command_name="metacooler create cool", quiet=quiet)
 
-    check_output(output, force)
+    check_output(
+        output,
+        force,
+        inputs=[cool_path, contigs, genomes_table, metadata],
+        defer_removal=True,
+    )
     try:
-        qc_distance_threshold = int(parse_size(qc_threshold))
+        qc_distance_threshold = parse_distance(qc_threshold)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--qc-threshold") from exc
 

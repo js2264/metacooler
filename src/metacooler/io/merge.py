@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ import h5py
 import numpy as np
 
 from metacooler._version import __version__
+from metacooler.io._utils import check_output_path, cooler_writer_shims
 from metacooler.qc import QC_COLUMN_PREFIX, QC_METADATA_KEY
 from metacooler.schema import (
     COOLER_FORMAT,
@@ -21,12 +23,13 @@ from metacooler.schema import (
     METACOOLER_FORMAT_VERSION,
     validate,
 )
+from metacooler.uri import parse_uri
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 
-def _hash_group(f: h5py.File, group: str) -> str:
+def _hash_group(f: h5py.Group, group: str) -> str:
     """Return an MD5 hex digest of all datasets in a group.
 
     Used to compare ``contigs`` and ``genomes`` tables across files for
@@ -60,7 +63,7 @@ def _hash_group(f: h5py.File, group: str) -> str:
     return h.hexdigest()
 
 
-def _bins_signature(f: h5py.File) -> tuple[int, str]:
+def _bins_signature(f: h5py.Group) -> tuple[int, str]:
     """Return ``(n_bins, digest)`` describing a file's bin geometry.
 
     Only the coordinate columns (``chrom``/``start``/``end``) take part: an
@@ -82,12 +85,47 @@ def _bins_signature(f: h5py.File) -> tuple[int, str]:
     return n_bins, h.hexdigest()
 
 
-def _binsize(f: h5py.File) -> int | None:
+def _binsize(f: h5py.Group) -> int | None:
     """Return the ``bin-size`` attribute of *f*, or ``None`` for variable bins."""
     binsize = f.attrs.get("bin-size")
     if binsize is None or (isinstance(binsize, str) and binsize.lower() == "null"):
         return None
     return int(binsize)
+
+
+@contextlib.contextmanager
+def _open_uri(uri: str) -> Iterator[h5py.Group]:
+    """Open the map a ``file`` or ``file::group`` URI addresses, read-only.
+
+    Args:
+        uri: Path to a ``.metacool`` or an ``.mmetacool`` entry URI.
+
+    Yields:
+        The HDF5 group holding the map (the file root for a plain path).
+    """
+    file_path, group_path = parse_uri(uri)
+    with h5py.File(file_path, "r") as f:
+        yield f[group_path] if group_path != "/" else f
+
+
+def _merged_count_dtype(uris: list[str]) -> np.dtype:
+    """Return ``float64`` if any input stores float counts, else ``int64``.
+
+    ``int64`` is mandatory for integer inputs -- summing replicates readily
+    exceeds the ``int32`` they are usually stored in -- but forcing it on a
+    float input (a balanced or rescaled map) truncates every count toward zero.
+
+    Args:
+        uris: Input URIs.
+
+    Returns:
+        The dtype to sum ``count`` into.
+    """
+    for uri in uris:
+        with _open_uri(uri) as g:
+            if g["pixels"]["count"].dtype.kind == "f":
+                return np.dtype(np.float64)
+    return np.dtype(np.int64)
 
 
 def merge(
@@ -104,8 +142,9 @@ def merge(
     input file.
 
     Args:
-        inputs: Iterable of paths to the input ``.metacool`` files.  At
-            least two files are required.
+        inputs: Iterable of paths to the input ``.metacool`` files, or
+            ``file.mmetacool::entries/<name>`` URIs.  At least two are
+            required.
         output: Destination path for the merged ``.metacool`` file.
 
     Raises:
@@ -116,15 +155,17 @@ def merge(
         MetaCoolerFormatError: If any input file fails the metacooler
             format validation check.
     """
-    inputs = [Path(p) for p in inputs]
+    inputs = [str(p) for p in inputs]
     if len(inputs) < 2:
         raise ValueError("At least two input files required for merge")
+    # cooler writes the output in "w" mode; refuse to truncate an input with it.
+    check_output_path(output, force=True, inputs=inputs, defer_removal=True)
 
     # Validate and compare axes
     first = inputs[0]
     validate(first)
 
-    with h5py.File(first, "r") as f0:
+    with _open_uri(first) as f0:
         contigs_hash = _hash_group(f0, "contigs")
         genomes_hash = _hash_group(f0, "genomes")
         # ``contig-ordering`` may be absent or explicitly null; normalise both
@@ -136,7 +177,7 @@ def merge(
 
     for inp in inputs[1:]:
         validate(inp)
-        with h5py.File(inp, "r") as f:
+        with _open_uri(inp) as f:
             # Order matters: report the ROOT cause, not a downstream symptom.
             # ``/genomes`` carries ``n_bins``, so its hash changes whenever the
             # resolution does — checking it first made every resolution
@@ -173,13 +214,21 @@ def merge(
 
     # Use cooler's merge logic on the pixel tables.  ``dtypes`` is mandatory:
     # without it the summed counts inherit the int32 of the inputs and wrap.
-    uris = [str(p) for p in inputs]
-    cooler.merge_coolers(
-        str(output), uris, mergebuf=int(2e7), dtypes={"count": np.int64}
-    )
+    # merge_coolers calls cooler.create internally, so it needs the same shims
+    # as every other writer (see write_cooler): without them its per-contig
+    # costs made merge alone take minutes at 150 k contigs. They also hand
+    # cooler the inputs' known bin size, which it cannot infer once every
+    # contig is a single bin.
+    with cooler_writer_shims(binsize):
+        cooler.merge_coolers(
+            str(output),
+            inputs,
+            mergebuf=int(2e7),
+            dtypes={"count": _merged_count_dtype(inputs)},
+        )
 
     # Post-process: add back metacooler-specific groups
-    with h5py.File(first, "r") as fsrc, h5py.File(output, "a") as fdst:
+    with _open_uri(first) as fsrc, h5py.File(output, "a") as fdst:
         # Copy genomes, minus the first input's QC columns: the merged pixel
         # table is the sum of every input, so counts copied from one of them
         # would understate it while looking authoritative. Re-run
@@ -221,6 +270,11 @@ def merge(
         fdst.attrs["generated-by"] = f"metacooler-{__version__}"
         fdst.attrs["ngenomes"] = len(fsrc["genomes"]["name"])
         fdst.attrs["contig-ordering"] = ordering
+        # The inputs were checked to share one bin grid, so its description
+        # carries over verbatim rather than being re-inferred from the table.
+        for key in ("bin-size", "bin-type"):
+            if key in fsrc.attrs:
+                fdst.attrs[key] = fsrc.attrs[key]
 
         # Same reasoning as the QC columns above: whatever block an input
         # carried describes that input alone.

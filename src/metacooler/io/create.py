@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import gzip
+import itertools
 import logging
 import os
 import shutil
@@ -46,6 +47,7 @@ from metacooler.qc import (
     BinMaps,
     ContactQC,
     bin_maps,
+    unbinned_genome_id,
 )
 from metacooler.schema import (
     CONTIGS_DTYPE,
@@ -259,11 +261,67 @@ def _drop_nonpositive_contigs(
     return contig_lengths, bins_df
 
 
+def _pairs_input_stream(path: Path):
+    """Open a pairs file as a binary stream, decompressing by file extension.
+
+    The single opener for every reader of a pairs file -- the header scans as
+    well as the body -- so they cannot disagree about which codecs exist.  They
+    used to: the body went through pyarrow (gzip, bz2, zstd, lz4, brotli) while
+    the two header scans opened the file with their own narrower ``open``
+    choices, so a ``.zst`` file -- advertised in the CLI reference -- died with
+    ``UnicodeDecodeError`` before a single pair was read, and ``.bz2`` failed
+    whenever ``#chromsize`` lines were needed.
+
+    pyarrow's codec table has no ``.bgz`` entry, and would hand a bgzipped file
+    to the CSV parser as raw binary (zero recognisable contigs, a structurally
+    valid but empty map); bgzf is gzip-compatible, so it is named explicitly.
+
+    Args:
+        path: Pairs file path.
+
+    Returns:
+        A readable ``pyarrow.NativeFile``; close it when done.
+    """
+    import pyarrow as pa
+
+    if path.suffix == ".bgz":
+        return pa.input_stream(str(path), compression="gzip")
+    return pa.input_stream(str(path))
+
+
+def _iter_pairs_lines(path: Path, block_size: int = 1 << 20) -> Iterator[str]:
+    """Yield the decoded text lines of a (possibly compressed) pairs file.
+
+    pyarrow streams do not implement ``readline``, so lines are split out of
+    fixed-size blocks.  Meant for header scans, which stop early.
+
+    Args:
+        path: Pairs file path.
+        block_size: Bytes decompressed per read.
+
+    Yields:
+        Each line, with its trailing newline.
+    """
+    with contextlib.closing(_pairs_input_stream(path)) as src:
+        carry = b""
+        while True:
+            block = src.read(block_size)
+            if not block:
+                break
+            lines = (carry + block).split(b"\n")
+            carry = lines.pop()
+            for raw in lines:
+                yield raw.decode("utf-8") + "\n"
+        if carry:
+            yield carry.decode("utf-8")
+
+
 def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     """Parse ``#chromsize:`` lines from the header of a pairs file.
 
     Reads lines from the beginning of the file until the first non-comment
-    line is encountered.  Handles plain-text and gzip-compressed files.
+    line is encountered.  Handles every codec :func:`_pairs_input_stream`
+    does.
 
     Args:
         pairs_path: Path to the pairs (or ``.pairs.gz``) file.
@@ -273,22 +331,20 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
         ``None`` if no ``#chromsize:`` lines were found.
     """
     path = Path(pairs_path)
-    opener = gzip.open if path.suffix in (".gz", ".bgz") else open
     lengths = {}
-    with opener(path, "rt") as f:
-        for line in f:
-            if not line.startswith("#"):
-                break
-            if line.startswith("#chromsize:"):
-                parts = line.strip().split()
-                if len(parts) >= 3:
-                    try:
-                        lengths[parts[1]] = int(parts[2])
-                    except ValueError as exc:
-                        raise ValueError(
-                            f"Malformed #chromsize line in {path}: {line.strip()!r} "
-                            f"(length {parts[2]!r} is not an integer)"
-                        ) from exc
+    for line in _iter_pairs_lines(path):
+        if not line.startswith("#"):
+            break
+        if line.startswith("#chromsize:"):
+            parts = line.strip().split()
+            if len(parts) >= 3:
+                try:
+                    lengths[parts[1]] = int(parts[2])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Malformed #chromsize line in {path}: {line.strip()!r} "
+                        f"(length {parts[2]!r} is not an integer)"
+                    ) from exc
     return lengths if lengths else None
 
 
@@ -776,6 +832,35 @@ def _apply_create_filters(
     return filtered, bins_df
 
 
+def _require_assigned_contigs(contig_lengths: dict, n_before: int) -> None:
+    """Refuse a ``--drop-unassigned`` that left no contig at all.
+
+    Without this the run streamed every pair before cooler failed with "not
+    enough values to unpack" -- hours later, and without naming the cause.
+
+    Args:
+        contig_lengths: Contigs remaining after the drop.
+        n_before: Contig count before it.
+
+    Raises:
+        ValueError: If no contig remains.
+    """
+    if not contig_lengths:
+        raise ValueError(
+            f"--drop-unassigned removed all {n_before} contig(s): none is "
+            "assigned to a genome in the contig table. Check that its contig "
+            "names match the FASTA / pairs / bins file."
+        )
+
+
+def _source_assembly(clr: cooler.Cooler) -> str | None:
+    """Return a cooler's ``genome-assembly`` attribute, if it names one."""
+    value = clr.info.get("genome-assembly")
+    if value in (None, "", "unknown"):
+        return None
+    return str(value)
+
+
 def _validate_bin_coords(df: pd.DataFrame) -> None:
     """Sanity-check bin ``start``/``end`` coordinates before writing.
 
@@ -808,7 +893,13 @@ def _validate_bin_coords(df: pd.DataFrame) -> None:
         )
     zero_width = end == start
     if zero_width.any():
-        logger.warning("%d zero-width bin(s) (end == start).", int(zero_width.sum()))
+        # validate() rejects these too, but only after the whole pairs pass has
+        # been paid for; a zero-width bin can never hold a contact anyway.
+        example = df.loc[zero_width].head(3).to_dict("records")
+        raise ValueError(
+            f"{int(zero_width.sum())} bin(s) are zero-width (end == start), "
+            f"e.g. {example}. Remove them from the bins file."
+        )
 
 
 def _read_bins_bed(path: str | Path) -> pd.DataFrame:
@@ -952,8 +1043,7 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
     """Scan the top of a pairs file for its header size and whether data follows.
 
     Reads lines sequentially until the first non-comment line is found.
-    Handles plain text, ``.gz``/``.bgz`` (gzip), and ``.bz2`` compressed
-    files.
+    Handles every codec :func:`_pairs_input_stream` does.
 
     Args:
         path: Path to the pairs file.
@@ -965,27 +1055,17 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
         handing the stream to pyarrow, instead of pattern-matching pyarrow's
         error message (which would also swallow genuine parse failures).
     """
-    import bz2 as _bz2
-    import gzip as _gzip
-
-    if path.suffix in (".gz", ".bgz"):
-        open_fn = _gzip.open
-    elif path.suffix == ".bz2":
-        open_fn = _bz2.open
-    else:
-        open_fn = open
     n = 0
     has_data = False
-    with open_fn(str(path), "rt") as fh:
-        for line in fh:
-            if line.startswith("#"):
-                n += 1
-                continue
-            if not line.strip():
-                # Tolerate stray blank lines between the header and the body.
-                continue
-            has_data = True
-            break
+    for line in _iter_pairs_lines(path):
+        if line.startswith("#"):
+            n += 1
+            continue
+        if not line.strip():
+            # Tolerate stray blank lines between the header and the body.
+            continue
+        has_data = True
+        break
     return n, has_data
 
 
@@ -1048,16 +1128,7 @@ def _stream_pairs(
         },
     )
 
-    # pa.input_stream auto-detects a codec from the file extension, but its codec
-    # table has no ``.bgz`` entry: a bgzipped file would be handed to the CSV
-    # parser as raw binary, yielding zero recognisable contigs and a structurally
-    # valid but empty map. bgzf is gzip-compatible, so name the codec explicitly.
-    if path.suffix == ".bgz":
-        logger.info("Reading %s as gzip (bgzf is gzip-compatible).", path)
-        src = pa.input_stream(str(path), compression="gzip")
-    else:
-        src = pa.input_stream(str(path))
-    with contextlib.closing(src):
+    with contextlib.closing(_pairs_input_stream(path)) as src:
         reader = pa_csv.open_csv(
             src,
             read_options=read_opts,
@@ -1083,6 +1154,7 @@ class _PairsDropStats:
     total: int = 0
     unknown_contig: int = 0
     null_position: int = 0
+    out_of_bounds: int = 0
     unknown_names: set[str] = dataclasses.field(default_factory=set)
 
     def note_unknown_names(self, names: Iterable[str]) -> None:
@@ -1092,33 +1164,42 @@ class _PairsDropStats:
                 return
             self.unknown_names.add(str(name))
 
+    @property
+    def dropped(self) -> int:
+        """Total pairs discarded, across every reason."""
+        return self.unknown_contig + self.null_position + self.out_of_bounds
+
     def report(self) -> None:
         """Log a WARNING summary of everything that was dropped (if anything)."""
-        dropped = self.unknown_contig + self.null_position
+        dropped = self.dropped
         if dropped == 0:
             return
         examples = sorted(self.unknown_names)
         if dropped == self.total:
             logger.warning(
                 "ALL %d pair(s) were discarded (%d on unrecognised contigs, %d with "
-                "a missing position) — the resulting map is empty. Do the contig "
-                "names in the pairs file match the FASTA / contig table? "
+                "a missing position, %d past the end of their contig) — the "
+                "resulting map is empty. Do the contig names and lengths in the "
+                "pairs file match the FASTA / contig table? "
                 "Unrecognised names seen: %s",
                 self.total,
                 self.unknown_contig,
                 self.null_position,
+                self.out_of_bounds,
                 examples,
             )
             return
         logger.warning(
             "Discarded %d of %d pair(s) (%.2f%%): %d on unrecognised contigs "
-            "(e.g. %s), %d with a missing position.",
+            "(e.g. %s), %d with a missing position, %d past the end of their "
+            "contig (are the pairs aligned to this exact assembly?).",
             dropped,
             self.total,
             100.0 * dropped / max(self.total, 1),
             self.unknown_contig,
             examples,
             self.null_position,
+            self.out_of_bounds,
         )
 
 
@@ -1164,6 +1245,7 @@ def _decode_pairs_chunk(
     chunk: pd.DataFrame,
     contig_name_to_id: dict[str, int],
     stats: _PairsDropStats | None = None,
+    contig_length: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Turn a raw pairs chunk into usable ``(contig1, contig2, pos1, pos2)`` arrays.
 
@@ -1180,6 +1262,11 @@ def _decode_pairs_chunk(
         contig_name_to_id: Mapping from contig name to integer ID.
         stats: Optional accumulator updated with the number of pairs seen and
             dropped, so the caller can report them once at end of stream.
+        contig_length: Length of every contig, indexed by contig id.  When
+            given, a pair with either end at or past its contig's end is
+            dropped and counted, as ``cooler cload`` refuses it: binning used
+            to fold it silently into the contig's last bin, and QC counted it
+            as long-range signal.
 
     Returns:
         ``(c1, c2, p1, p2)`` for the usable rows — contig ids, and 0-based
@@ -1220,6 +1307,19 @@ def _decode_pairs_chunk(
     # Convert 1-based pairs positions to 0-based, clamp at 0
     raw_p1 = _positions_to_int64(chunk["pos1"].to_numpy()[valid], "pos1") - 1
     raw_p2 = _positions_to_int64(chunk["pos2"].to_numpy()[valid], "pos2") - 1
+    if contig_length is not None:
+        inside = (raw_p1 < contig_length[c1]) & (raw_p2 < contig_length[c2])
+        if not inside.all():
+            if stats is not None:
+                stats.out_of_bounds += int((~inside).sum())
+            c1, c2, raw_p1, raw_p2 = (
+                c1[inside],
+                c2[inside],
+                raw_p1[inside],
+                raw_p2[inside],
+            )
+            if len(c1) == 0:
+                return None
     neg_mask = (raw_p1 < 0) | (raw_p2 < 0)
     if neg_mask.any():
         logger.warning(
@@ -1229,16 +1329,65 @@ def _decode_pairs_chunk(
     return c1, c2, np.maximum(raw_p1, 0), np.maximum(raw_p2, 0)
 
 
+def _folded_bin_keys(chrom_offset: np.ndarray, starts: np.ndarray) -> np.ndarray:
+    """Return ``(contig_id << 32) | start`` for every bin, as one sorted array.
+
+    Bins are laid out contig by contig, each contig's sorted by start, so the
+    folded key is non-decreasing and a single ``np.searchsorted`` over it finds
+    the bin of any ``(contig, position)``.  Coordinates are guarded to fit
+    ``int32`` at creation, so they never reach the contig bits.
+
+    Args:
+        chrom_offset: First bin of each contig, length ``n_contigs + 1``.
+        starts: Start coordinate of every bin.
+
+    Returns:
+        ``int64`` array of folded keys, one per bin.
+    """
+    contig_of_bin = np.repeat(
+        np.arange(len(chrom_offset) - 1, dtype=np.int64), np.diff(chrom_offset)
+    )
+    return (contig_of_bin << 32) | starts.astype(np.int64)
+
+
+def _fragment_bin_ids(
+    bin_keys: np.ndarray,
+    chrom_offset: np.ndarray,
+    contig: np.ndarray,
+    pos: np.ndarray,
+) -> np.ndarray:
+    """Map ``(contig, 0-based position)`` pairs to variable-width bin ids.
+
+    The bin holding *pos* is the last one of its contig starting at or before
+    it.  A position before the contig's first bin start is clamped into that
+    first bin; one past the last start lands in the last bin, because every key
+    of the next contig is larger.
+
+    Args:
+        bin_keys: Output of :func:`_folded_bin_keys`.
+        chrom_offset: First bin of each contig, length ``n_contigs + 1``.
+        contig: Contig id of each position.
+        pos: 0-based position, within ``[0, contig length)``.
+
+    Returns:
+        ``int64`` bin id of each position.
+    """
+    keys = (contig.astype(np.int64) << 32) | pos.astype(np.int64)
+    idx = np.searchsorted(bin_keys, keys, side="right") - 1
+    return np.maximum(idx, chrom_offset[contig]).astype(np.int64, copy=False)
+
+
 def _bin_pairs_chunk(
     chunk: pd.DataFrame,
     contig_name_to_id: dict[str, int],
     chrom_offset: np.ndarray,
     binsize: int | None,
-    bin_starts: np.ndarray | None,
+    bin_keys: np.ndarray | None,
     stats: _PairsDropStats | None = None,
     qc: ContactQC | None = None,
     ps: PSCounts | None = None,
     contig_genome_id: np.ndarray | None = None,
+    contig_length: np.ndarray | None = None,
 ) -> pd.DataFrame | None:
     """Bin a single pairs chunk into aggregated ``(bin1_id, bin2_id, count)`` pixels.
 
@@ -1252,8 +1401,8 @@ def _bin_pairs_chunk(
         contig_name_to_id: Mapping from contig name to integer ID.
         chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
         binsize: Fixed bin size, or ``None`` for fragment-level bins.
-        bin_starts: Flattened array of bin start positions; required when
-            ``binsize`` is ``None``.
+        bin_keys: Folded ``(contig, start)`` key of every bin, from
+            :func:`_folded_bin_keys`; required when ``binsize`` is ``None``.
         stats: Optional accumulator updated with the number of pairs seen and
             dropped, so the caller can report them once at end of stream.
         qc: Optional contact-quality tally, updated from the *raw positions* of
@@ -1265,12 +1414,14 @@ def _bin_pairs_chunk(
             anything below one bin.
         contig_genome_id: Genome id of every contig, required when *qc* or *ps*
             is given.
+        contig_length: Length of every contig; pairs past a contig's end are
+            dropped (see :func:`_decode_pairs_chunk`).
 
     Returns:
         Aggregated pixel DataFrame or ``None`` if the chunk is empty after
         filtering.
     """
-    decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats)
+    decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats, contig_length)
     if decoded is None:
         return None
     c1, c2, p1, p2 = decoded
@@ -1297,24 +1448,12 @@ def _bin_pairs_chunk(
             chrom_offset[c2 + 1] - 1,
         )
     else:
-        # Fragment-level bins: binary search within each contig's bin starts
-        assert bin_starts is not None, "bin_starts required for fragment-level binning"
-        bin1 = np.empty(len(c1), dtype=np.int64)
-        bin2 = np.empty(len(c2), dtype=np.int64)
-        for cid in np.unique(c1):
-            mask = c1 == cid
-            lo, hi = int(chrom_offset[cid]), int(chrom_offset[cid + 1])
-            bin1[mask] = np.maximum(
-                lo,
-                lo + np.searchsorted(bin_starts[lo:hi], p1[mask], side="right") - 1,
-            )
-        for cid in np.unique(c2):
-            mask = c2 == cid
-            lo, hi = int(chrom_offset[cid]), int(chrom_offset[cid + 1])
-            bin2[mask] = np.maximum(
-                lo,
-                lo + np.searchsorted(bin_starts[lo:hi], p2[mask], side="right") - 1,
-            )
+        # Fragment-level bins: one global binary search over keys that fold the
+        # contig id in above the coordinate, so (contig, start) order is plain
+        # integer order -- never a per-contig loop (see _folded_bin_keys).
+        assert bin_keys is not None, "bin_keys required for fragment-level binning"
+        bin1 = _fragment_bin_ids(bin_keys, chrom_offset, c1, p1)
+        bin2 = _fragment_bin_ids(bin_keys, chrom_offset, c2, p2)
 
     # Enforce upper triangle
     swap = bin1 > bin2
@@ -1577,26 +1716,39 @@ def _chain_pixel_frames(
 
 def _ensure_nonempty_pixel_stream(
     pixel_iter: Iterable[pd.DataFrame],
-) -> Iterable[pd.DataFrame]:
-    """Yield from *pixel_iter*, emitting one empty frame if it is empty.
+) -> tuple[Iterable[pd.DataFrame], bool]:
+    """Return *pixel_iter* made safe to write, and whether it was empty.
 
     ``cooler.create_cooler`` writes a malformed pixel table (a dense block of
     phantom rows with ``nnz=0``) when handed a generator that yields *nothing*,
-    but handles an empty DataFrame correctly. This guard turns a zero-pixel
-    input (e.g. a header-only pairs file) into a valid empty ``.metacool``.
+    but handles an empty DataFrame correctly -- on the *ordered* path only:
+    with ``ordered=False`` its unordered writer fails with "No objects to
+    concatenate".  So an empty stream becomes one empty frame, and the caller
+    must write it ordered (an empty table is trivially sorted).  This turns a
+    zero-pixel input (a header-only pairs file, every pair on an unknown or
+    filtered contig, an ``nnz=0`` cooler) into a valid empty ``.metacool``
+    under every sort strategy.
+
+    Only the first frame is pulled to decide, so a lazy stream stays lazy.
+
+    Args:
+        pixel_iter: The pixel frames to write.
+
+    Returns:
+        ``(frames, was_empty)``.
     """
-    yielded = False
-    for df in pixel_iter:
-        yielded = True
-        yield df
-    if not yielded:
-        yield pd.DataFrame(
+    it = iter(pixel_iter)
+    first = next(it, None)
+    if first is None:
+        empty = pd.DataFrame(
             {
                 "bin1_id": np.array([], dtype=np.int64),
                 "bin2_id": np.array([], dtype=np.int64),
                 "count": np.array([], dtype=np.int32),
             }
         )
+        return iter([empty]), True
+    return itertools.chain([first], it), False
 
 
 def _stream_binned_pairs(
@@ -1604,13 +1756,14 @@ def _stream_binned_pairs(
     contig_name_to_id: dict[str, int],
     chrom_offset: np.ndarray,
     binsize: int | None,
-    bin_starts: np.ndarray | None,
+    bin_keys: np.ndarray | None,
     chunksize: int,
     pairs_kwargs: dict,
     stats: _PairsDropStats | None = None,
     qc: ContactQC | None = None,
     ps: PSCounts | None = None,
     contig_genome_id: np.ndarray | None = None,
+    contig_length: np.ndarray | None = None,
 ) -> Iterable[pd.DataFrame]:
     """Stream a pairs file and yield binned pixel DataFrames with progress.
 
@@ -1619,8 +1772,8 @@ def _stream_binned_pairs(
         contig_name_to_id: Mapping from contig name to integer ID.
         chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
         binsize: Fixed bin size, or ``None`` for fragment-level bins.
-        bin_starts: Flattened bin start positions; required when *binsize*
-            is ``None``.
+        bin_keys: Folded ``(contig, start)`` bin keys from
+            :func:`_folded_bin_keys`; required when *binsize* is ``None``.
         chunksize: Rows per streaming batch.
         pairs_kwargs: Extra keyword arguments forwarded to ``_stream_pairs``.
         stats: Drop tally to fill in.  Passed in (rather than created here)
@@ -1659,11 +1812,12 @@ def _stream_binned_pairs(
                 contig_name_to_id,
                 chrom_offset,
                 binsize,
-                bin_starts,
+                bin_keys,
                 stats,
                 qc,
                 ps,
                 contig_genome_id,
+                contig_length,
             )
             if result is not None and not result.empty:
                 pending.append(result)
@@ -1974,7 +2128,7 @@ def from_pairs(
     # out that the table cannot be written is worth seconds, not hours.
     ps_path = ps_table_path(uri) if ps else None
     if ps_path is not None:
-        check_output_path(ps_path, force)
+        check_output_path(ps_path, force, defer_removal=True)
     timer = time.perf_counter()
 
     # --- Parse contig map and optional genomes metadata table ---
@@ -2020,6 +2174,7 @@ def from_pairs(
             f"Dropped {n_before - len(contig_lengths)} unassigned contigs; "
             f"{len(contig_lengths)} remain"
         )
+        _require_assigned_contigs(contig_lengths, n_before)
 
     # --- Apply --filter predicates before anything is tiled or binned ---
     contig_lengths, bins_df = _apply_create_filters(
@@ -2079,12 +2234,19 @@ def from_pairs(
 
     # --- Stream pairs, bin, sort, and write the cooler file ---
     logger.info(f"Starting to create cooler file at {uri}...")
-    bin_starts: np.ndarray | None = (
-        None if binsize is not None else bins_df["start"].values.astype(np.int64)
+    bin_keys: np.ndarray | None = (
+        None
+        if binsize is not None
+        else _folded_bin_keys(chrom_offset, bins_df["start"].to_numpy())
     )
     drop_stats = _PairsDropStats()
     qc_tally = (
-        ContactQC(len(genomes_df), qc_distance_threshold, source="pairs")
+        ContactQC(
+            len(genomes_df),
+            qc_distance_threshold,
+            source="pairs",
+            unbinned_genome=unbinned_genome_id(genomes_df["name"]),
+        )
         if qc
         else None
     )
@@ -2097,13 +2259,14 @@ def from_pairs(
         contig_name_to_id,
         chrom_offset,
         binsize,
-        bin_starts,
+        bin_keys,
         chunksize,
         pairs_kwargs,
         drop_stats,
         qc_tally,
         ps_tally,
         contig_genome_id if (qc or ps) else None,
+        contig_length,
     )
     pixel_source: Iterable[pd.DataFrame]
     if sort_in_memory is None:
@@ -2133,7 +2296,8 @@ def from_pairs(
     else:
         pixel_source = raw_pixels
         ordered = False
-    pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
+    pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
+    ordered = ordered or was_empty
     with _staged_output(uri) as staged:
         write_cooler(
             staged,
@@ -2170,8 +2334,7 @@ def from_pairs(
                 qc_tally.summary(
                     binsize=binsize,
                     n_pairs_read=drop_stats.total,
-                    n_pairs_discarded=drop_stats.unknown_contig
-                    + drop_stats.null_position,
+                    n_pairs_discarded=drop_stats.dropped,
                 ),
                 qc_tally.genome_table(genomes_df["name"].to_numpy()),
             )
@@ -2280,6 +2443,18 @@ def from_cool(
     if not cooler.fileops.is_cooler(str(cool_path)):
         raise ValueError(f"Not a valid cooler file: {cool_path}")
     clr = cooler.Cooler(str(cool_path))
+    # A metacool is symmetric-upper, and the remap below folds every pixel into
+    # the upper triangle. On a "square" cooler -- which stores both triangles --
+    # that sums each off-diagonal contact with its mirror, doubling it, and the
+    # result still validates. Folding is only correct for a symmetric matrix,
+    # and square storage is chosen precisely when one is not guaranteed.
+    storage_mode = clr.info.get("storage-mode", "symmetric-upper")
+    if storage_mode != "symmetric-upper":
+        raise ValueError(
+            f"{cool_path} uses storage-mode {storage_mode!r}; metacooler only "
+            "imports symmetric-upper coolers (the cooler default). Re-create "
+            "it with symmetric_upper=True, keeping the upper triangle."
+        )
     bins = pd.DataFrame(clr.bins()[:])
     n_pixels = clr.info["nnz"]
     logger.info(f"Loaded cool file: {len(bins)} bins, {n_pixels} pixels")
@@ -2319,11 +2494,13 @@ def from_cool(
 
     # --- Filter unassigned contigs ---
     if drop_unassigned:
+        n_before = len(contig_lengths)
         contig_lengths = {
             ct: ln
             for ct, ln in contig_lengths.items()
             if ct in contig_map and contig_map[ct] != "__unbinned__"
         }
+        _require_assigned_contigs(contig_lengths, n_before)
 
     # --- Apply --filter predicates before the bins are remapped ---
     contig_lengths, _ = _apply_create_filters(
@@ -2384,7 +2561,14 @@ def from_cool(
         str(cool_path), clr.info["nnz"], old_to_new_bin, nproc, count_dtype
     )
     qc_tally = (
-        ContactQC(len(genomes), qc_distance_threshold, source="pixels") if qc else None
+        ContactQC(
+            len(genomes),
+            qc_distance_threshold,
+            source="pixels",
+            unbinned_genome=unbinned_genome_id(genomes["name"]),
+        )
+        if qc
+        else None
     )
     if qc_tally is not None:
         raw_pixels = _tally_pixel_qc(
@@ -2398,7 +2582,8 @@ def from_cool(
     else:
         pixel_source: Iterable[pd.DataFrame] = raw_pixels
         ordered = False
-    pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
+    pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
+    ordered = ordered or was_empty
     with _staged_output(output_path) as staged:
         write_cooler(
             staged,
@@ -2406,7 +2591,8 @@ def from_cool(
             pixel_source,
             ordered=ordered,
             symmetric_upper=True,
-            assembly=assembly_name or "imported",
+            # Keep the source's assembly name unless the caller overrides it.
+            assembly=assembly_name or _source_assembly(clr) or "imported",
             metadata=metadata or {},
             dtypes={"count": count_dtype},
         )

@@ -47,13 +47,14 @@ def cmd_merge(
 
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.merge import merge
+    from metacooler.qc import strip_qc_metadata
 
     setup_logging(verbose, command_name="metacooler merge", quiet=quiet)
 
     if len(metacool_paths) < 2:
         raise click.UsageError("At least two input files required.")
 
-    check_output(output, force)
+    check_output(output, force, inputs=metacool_paths)
 
     merge(inputs=metacool_paths, output=output)
 
@@ -61,7 +62,9 @@ def cmd_merge(
     combined_meta: dict = {}
     all_commands: list[str] = []
     for inp in metacool_paths:
-        meta = read_metadata_uri(inp)
+        # merge() already dropped the qc block from its output: each input's
+        # describes that input alone, not the summed pixel table.
+        meta = strip_qc_metadata(read_metadata_uri(inp))
         for key, value in meta.items():
             if key == "commands":
                 if isinstance(value, list):

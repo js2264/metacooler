@@ -75,6 +75,43 @@
   line is still accepted, and no longer becomes an empty `Unnamed: N` column in
   `/genomes` or `/contigs`.
 
+- **`ps` from a binned map counts opportunities in position pairs.** Each bin
+  pair of widths `w_i`, `w_j` contributes `w_i × w_j` (the diagonal
+  `w (w + 1) / 2`) — the unit the `--pairs` path already used — so
+  `n_bin_pairs`, `avg_contacts` and `prob` change on the pixel path and now
+  mean the same thing on both. Counting bin pairs weighed the diagonal as a
+  full opportunity though it holds half as many position pairs, halving the
+  first point. `prob` also no longer depends on `--bins-per-decade`: it was
+  normalised over the full width of every log bin, though a binned map only
+  realises separations at bin-distance steps, so the pixel/pairs ratio at
+  10 kb drifted from 1.07 to 1.52 as the grid got finer. `dist` now sits on
+  the separations a distance bin can actually hold (`[1, 2)` is plotted at 1,
+  not 1.41).
+- **QC counts a contact between two different `__unbinned__` contigs as
+  `inter_genome`.** The unbinned bucket is not a genome, and treating it as
+  one inflated `intra_genome_fraction` by every contact among unassigned
+  contigs. The `metadata.qc` block is now `version: 2`.
+- **`create cool` refuses a `square` cooler.** Both triangles were folded into
+  the upper one and summed, doubling every off-diagonal count.
+- **`create pairs` drops pairs at or past their contig's end** instead of
+  folding them into the last bin (as `cooler cload` does); they are counted
+  in the discard report and in `qc.n_pairs_discarded`.
+- **Zero-width bins in `--bins`, and a `--drop-unassigned` that removes every
+  contig, are refused before binning** rather than failing after the whole
+  pairs pass.
+- **`--metadata` files may not contain a `qc` key**, which `create` overwrote.
+- **`validate()` is stricter:** it refuses a repeated `(bin1_id, bin2_id)`
+  pixel, a `/chroms` link that does not resolve to the map's own `/contigs`,
+  and a table member that is a group rather than a column.
+- **`stack`, `create_mmetacool` and `add_entry` validate their sources**, so a
+  plain `.cool` or a whole `.mmetacool` is refused, and entry names containing
+  `/` are rejected (also by `cp`/`mv`).
+- **An output that is one of the command's inputs is refused, even with
+  `-f`.** `binnify a.metacool -o a.metacool -f` deleted the input, then failed.
+- **Distance options must be finite, non-negative and at most 2^53 bp**
+  (`qc --threshold`, `ps --min-distance`/`--max-distance`,
+  `create --qc-threshold`); `inf` and `1e30` used to escape as tracebacks.
+
 ### Added
 
 - **`qc`**: contact-quality statistics — where a library's contacts actually
@@ -215,6 +252,47 @@
   Both used to be silent, which made a `/genomes` table larger than the input
   look as though genomes had been invented.
 
+- **cooler ≥ 0.11 no longer brings back the quadratic per-contig write
+  cost.** cooler moved `write_bins` into `cooler.create._writer`; metacooler's
+  shims looked in the old module and silently did nothing, so on cooler 0.12
+  creating an 80 k-contig map took 13.9 s instead of 2.1 s, growing about 3×
+  per doubling of contigs.
+- **`merge`** ran cooler's writer without those shims (65 s → 3.1 s at 150 k
+  contigs), floored float counts, lost `bin-size` when every contig was a
+  single bin, crashed on `.mmetacool` entry URIs, and — in the CLI — put back
+  the stale `metadata.qc` block it had just removed.
+- **`create --force` keeps the previous map (and its `.ps.tsv`) until the new
+  one has been written and validated**; it used to delete them before any
+  work, so a failed run left nothing.
+- A contig table with its own `genome_id` column no longer sends every contig
+  to `__unbinned__`, and the same collision in `--genomes` no longer crashes.
+- A `/` in a `--contigs`/`--genomes` column name (e.g. `reads/kb`) is stored
+  as `_`; it used to create a nested HDF5 group that neither cooler nor
+  `MetaCooler()` could open.
+- `--contigs-format I,J,noheader` with extra columns no longer crashes after
+  the whole pairs pass (they are stored as `col3`, `col4`, …).
+- `.zst` pairs (and `.bz2` with an integer `--bins`) are read; the header
+  scans used their own openers and failed.
+- An empty pixel stream no longer crashes `create` under
+  `--sort-strategy external`, nor `binnify`, `zoomify` or `aggregate` on a
+  zero-pixel map.
+- Fragment-level (`--bins file.bed`) binning is one vectorised lookup instead
+  of a loop over contigs (13.1 s → 4.7 s at 80 k contigs; identical output).
+- `aggregate --level genome` refuses a genome longer than 2^31 bp instead of
+  writing a negative chromosome length.
+- `show` keeps float counts at contig/genome level, and
+  `show --transform log10` is `log10(1 + count)` as documented (single-count
+  pixels used to render as empty).
+- `--filter` `!=` / `!~` no longer match a missing text value.
+- `extract --split` strips only a trailing `.cool` from `-o`, so
+  `-o sample.rep1` and `-o sample.rep2` no longer collide.
+- `create cool` keeps the source's `genome-assembly`.
+- `MetaCooler.root` is the entry path for an `.mmetacool` entry, `info["sum"]`
+  keeps a fractional sum, and `MetaCooler` has a `repr`.
+- A `G:start-end` range on a `binnify --level genome` file (where every contig
+  is also a genome) selects the contig instead of being refused.
+- `qc --store` no longer crashes on a non-object `qc` metadata value.
+
 ### Documentation
 
 - `COMMANDS.md` removed; [`docs/cli.md`](cli.md) is the single CLI reference.
@@ -228,6 +306,18 @@
 - `ops/aggregate.py` centralises the accumulation logic in module-level
   helpers (`_aggregate_sparse` / `_aggregate_pixel_stream`) instead of
   duplicating it across call sites.
+
+### Packaging and CI
+
+- The MIT license text ships as `LICENSE` (PEP 639 metadata).
+- Corrected lower bounds: `pyfaidx>=0.7.2.2` (older releases import
+  `pkg_resources`) and `rich-click>=1.9` (older releases cannot import the
+  CLI). Dropped the unused `bioframe` dependency and `plotly` extra.
+- The development toolchain is a `dev` dependency group, so `uv sync` installs
+  it; as an extra, the documented `uv sync --dev` installed nothing.
+- Python 3.13 and 3.14 are supported and tested. A `dependency-bounds` CI job
+  runs the suite at the lowest and the newest versions every dependency range
+  allows, and `tests/data/cli_tests.sh` runs in CI.
 
 ---
 

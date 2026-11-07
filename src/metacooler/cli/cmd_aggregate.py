@@ -79,7 +79,7 @@ def cmd_aggregate(
 
     setup_logging(verbose, command_name="metacooler aggregate", quiet=quiet)
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     aggregate(
         uri=metacool_path,

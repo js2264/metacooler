@@ -77,7 +77,7 @@ link `/chroms → /contigs` makes it transparent to the cooler ecosystem.
 | `name` | `S<n>` (fixed bytes) | Contig name, unique within the file, ASCII only (see [Names must be ASCII](#names-must-be-ascii)). |
 | `length` | `int32` | Contig length in bp. |
 | `genome_id` | `int32` | Zero-based index into `/genomes`. |
-| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`). ASCII only: cooler reads every column of this group. |
+| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`). ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. |
 
 Row order is determined by the `--contig-order` strategy chosen at creation time
 and stored in the `contig-ordering` attribute.
@@ -106,7 +106,9 @@ One row per non-zero contact, stored in upper-triangular form
 | `count` | `int32` or `int64` | Number of contacts. `int32` at base resolution; `int64` wherever counts are summed (`binnify`, `merge`), since aggregation readily exceeds the `int32` range. Readers must not assume `int32`. |
 
 Pixels are sorted by `(bin1_id, bin2_id)` to allow the `bin1_offset` index to
-work correctly.
+work correctly, and strictly so: a `(bin1_id, bin2_id)` pair appears at most
+once. `validate()` and `check --deep` refuse a repeated pair, which cooler would
+sum on some reads and not on others.
 
 ### `/indexes` group
 
@@ -118,7 +120,7 @@ work correctly.
 
 `genome_offset` is written for every file, but it only *delimits* contiguous
 per-genome blocks under a genome-grouped `contig-ordering` (`genome-then-length`,
-`genome-then-alpha`, `genomeid-then-alpha`). Under `fasta`, `alpha` or `cool`
+`genome-then-alpha`). Under `fasta`, `alpha` or `cool`
 ordering a genome's contigs may be scattered, so readers must fall back to
 filtering `/contigs/genome_id` rather than slicing with `genome_offset`.
 
@@ -222,7 +224,7 @@ alongside the `commands` provenance list:
 
 | Key | Meaning |
 |-----|---------|
-| `version` | Block schema version (currently `1`). |
+| `version` | Block schema version (currently `2`; version 1 counted a contact between two different `__unbinned__` contigs as intra-genome rather than inter-genome). |
 | `source` | `"pairs"` — measured on read positions by `create pairs`, before binning — or `"pixels"`, measured between bin midpoints. |
 | `distance_threshold` | Short/long intra-contig split, in bp (default 10 000). |
 | `n_contacts` | Total contacts classified. |
@@ -259,7 +261,9 @@ creation time:
 
 1. **Soft link** `/chroms → /contigs`: cooler looks up `/chroms` for the
    chromosome reference table. The soft link redirects it transparently to
-   `/contigs`.
+   `/contigs`. metacooler writes it *relative* (`contigs`), so it keeps
+   resolving when a map is copied into an `.mmetacool` entry, and `validate()`
+   requires it to resolve to the map's own `/contigs`.
 2. **`format = "HDF5::Cooler"` attribute**: cooler's `is_cooler()` check passes.
 
 The consequence is that `cooler.Cooler("gut_T0.metacool").chroms()[:]` returns
