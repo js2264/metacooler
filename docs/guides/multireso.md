@@ -185,3 +185,19 @@ metacooler.zoomify(
 entries = metacooler.list_entries("sample_multireso.mmetacool")
 print(entries)  # ['1000', '2000', '4000', ...]
 ```
+
+## Viewing in HiGlass { #higlass }
+
+HiGlass reads multi-resolution coolers laid out as `/resolutions/<binsize>`
+(`.mcool`). The `.mmetacool` that `metacooler zoomify` writes stores its levels
+under `/entries/<binsize>` instead, so HiGlass cannot ingest it directly. Since
+every `.metacool` is also a valid cooler, cooler's own `zoomify` produces an
+`.mcool` from it:
+
+```bash
+cooler zoomify -r 1000,2000,4000,8000 -o sample.mcool sample.metacool
+```
+
+The result is a plain `.mcool`: contigs are its chromosomes, and the genome
+layer is not carried over.
+

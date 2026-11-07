@@ -17,7 +17,7 @@ A few conventions hold across the whole CLI:
 |------------|---------|
 | `METACOOL_PATH` | A **positional** path to a `.metacool` file, or an `.mmetacool` entry URI (`file.mmetacool::entries/<name>`). Every command takes its input this way — there are no input *options*. |
 | `-o, --output` | Output path. Required unless the command writes to stdout. |
-| `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. |
+| `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create` keeps the previous file until the new one has been written and validated. |
 | `-v, --verbose` | Enable debug logging. Available on every command. |
 | `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
@@ -164,13 +164,13 @@ metacooler create pairs --pairs P --bins B --contigs C -o OUT.metacool [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, or `.zst`). |
+| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
 | `--contigs-format` | `contigs` | `contigs`, `contig_genome`, `metator`, or a column-index spec `I,J[,noheader]`. See [Creating from pairs](guides/from-pairs.md#contig-to-genome-table). |
 | `--genomes` | — | Optional genome metadata TSV (first column `genome_name`); extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
-| `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a `commands` key — that name is reserved for the provenance record metacooler writes itself. |
+| `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a `commands` or `qc` key — those names are reserved for the provenance record and the contact-quality block metacooler writes itself. |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `fasta`, or `alpha`. See [Contig ordering](concepts.md#contig-ordering). |
 | `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs header has no `#chromsize:` lines. |
 | `--assembly-name` | — | Name for this assembly / metagenome. Stored in the standard cooler `genome-assembly` attribute (reported as `assembly` by `info`). |
@@ -228,7 +228,7 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
 | `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
 | `--contigs-format` | `contigs` | Same choices as `create pairs`. |
 | `--genomes` | — | Optional genome metadata TSV. Decorates the genome rows derived from `--contigs`; same semantics and warnings as `create pairs`. |
-| `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
+| `--metadata` | — | JSON or YAML metadata file (no `commands` or `qc` key — see `create pairs`). |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `cool` (preserve the input's order), or `alpha`. |
 | `--assembly-name` | — | Assembly / metagenome name, stored as `genome-assembly`. |
 | `--drop-unassigned` | off | Drop unassigned contigs. |
@@ -257,7 +257,8 @@ metacooler create cool \
 
 Sum the pixel counts of two or more metacool files that share **identical**
 bins, contigs, genomes, and contig ordering (e.g. sequencing replicates of the
-same assembly). Counts are summed in `int64`. **API:**
+same assembly). Inputs may be `.mmetacool` entry URIs. Integer counts are
+summed in `int64`, float counts in `float64`. **API:**
 `metacooler.merge` (`metacooler.io.merge.merge`).
 
 ```console
@@ -622,14 +623,14 @@ same MAG or not) are what [`qc`](#qc) counts instead.
 | Column | Meaning |
 |--------|---------|
 | `genome` | The MAG name under `--by genome`; `all` when the curves are pooled. |
-| `dist` | Geometric centre of the log-spaced distance bin, in bp — the x coordinate to plot against. |
+| `dist` | Geometric centre of the separations the distance bin can actually hold, in bp — whole base pairs under `--pairs`, multiples of the bin size on a fixed-bin map — and the x coordinate to plot against. The leading bin holds separation 0, which a log axis cannot place, and sits at half its upper edge. |
 | `n_contacts` | Contacts observed at that separation. |
-| `n_bin_pairs` | Opportunities: pairs of bins (or of positions, under `--pairs`) that *could* have contributed one. |
-| `avg_contacts` | `n_contacts / n_bin_pairs`. |
-| `prob` | `avg_contacts` normalised so the curve integrates to 1 over the reported range. |
+| `n_bin_pairs` | Opportunities, in pairs of **positions** (base pairs) that *could* have contributed a contact — on both paths, so the two are directly comparable. A bin pair of widths `w_i`, `w_j` holds `w_i × w_j` of them, a diagonal one `w (w + 1) / 2`. (The column name predates the unit.) |
+| `avg_contacts` | `n_contacts / n_bin_pairs`: contacts per position pair. |
+| `prob` | `avg_contacts` normalised so the curve integrates to 1 over the reported range. Each distance bin weighs the share of separation it actually represents, so the result does not depend on `--bins-per-decade`. |
 
-`n_bin_pairs` is what makes the curve mean anything: a contig of *n* bins
-offers only `n - d` pairs at separation *d*, so a raw count of long-range
+`n_bin_pairs` is what makes the curve mean anything: a contig of *L* bp offers
+only `L - s` position pairs at separation *s*, so a raw count of long-range
 contacts is starved by construction and would look like a decay even on
 uniform data. Dividing it out is also what makes `--by genome` curves
 comparable between a 5 Mb MAG and a 300 kb one, and `prob` is what makes two
@@ -640,8 +641,8 @@ populate are omitted rather than reported as a rate of zero.
 
 | | distances | `n_bin_pairs` counts | starts at |
 |---|---|---|---|
-| **pixels** (default) | between bin midpoints | pairs of **bins**, `n - d` per contig | one bin |
-| **pairs** (`--pairs`) | between read positions | pairs of **positions**, `L - s` per contig | 1 bp |
+| **pixels** (default) | between bin midpoints | **position** pairs, summed over the bin pairs at that midpoint separation | one bin |
+| **pairs** (`--pairs`) | between read positions | **position** pairs, `L - s` per contig | 1 bp |
 
 A binned map cannot say anything below its own resolution: every sub-bin
 contact has already been collapsed onto the diagonal. Since the short-range
@@ -815,6 +816,12 @@ Every contact falls in exactly one of four categories:
 | `intra_contig_long` | Same contig, at least `--threshold` apart. |
 | `inter_contig_intra_genome` | Two contigs of the same MAG. |
 | `inter_genome` | Two contigs of different MAGs. |
+
+`__unbinned__` is not a MAG but the absence of one, so each unbinned contig
+counts as a genome of its own: a contact between two *different* unbinned
+contigs is `inter_genome`. (Before block version 2 it was counted as
+intra-genome, which inflated `intra_genome_fraction` by every contact among
+the unassigned contigs.)
 
 The headline `trans_contig_ratio` — the "3D ratio" — is the share of contacts
 joining two *different* contigs, i.e.
@@ -1012,7 +1019,9 @@ metacooler stack A.metacool B.metacool -o OUT.mmetacool [--names ...]
 
 Inputs may be entry URIs as well as plain files; an entry URI copies **that
 entry**, and its default name is the entry name (a plain path defaults to the
-file stem, `sample.metacool` → `sample`).
+file stem, `sample.metacool` → `sample`). Every input is validated first, so a
+plain `.cool` or a whole `.mmetacool` is refused, and an entry name may not
+contain `/`.
 
 ```bash
 metacooler stack rep1.metacool rep2.metacool --names "rep1,rep2" -o combined.mmetacool

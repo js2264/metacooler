@@ -772,8 +772,9 @@ def _finalize_metacool_file(
         genome_offset: Pre-computed ``genome_offset`` array of length
             ``n_genomes + 1``.
         contig_ordering: Value written to the ``contig-ordering`` HDF5
-            attribute.  Typically ``"genome-then-alpha"``,
-            ``"pairs-header"``, or ``"genomeid-then-alpha"``.
+            attribute: one of the ``--contig-order`` strategies
+            (``"genome-then-length"``, ``"genome-then-alpha"``, ``"fasta"``,
+            ``"alpha"``) or ``"cool"``.
         assembly_name: Optional assembly name.  Written to cooler's
             standard ``genome-assembly`` attribute (the only attribute
             metacooler uses for this), and only when ``cooler.create``
