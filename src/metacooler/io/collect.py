@@ -1102,7 +1102,8 @@ def collect(
         pixel_source = _tally_pixel_qc(
             pixel_source, qc_tally, bin_maps(bins_df, contigs_df)
         )
-    pixel_source = _ensure_nonempty_pixel_stream(pixel_source)
+    pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
+    ordered = ordered or was_empty
     with _staged_output(output) as staged:
         write_cooler(
             staged,
