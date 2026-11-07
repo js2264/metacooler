@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import importlib
 import logging
 import re
+import types
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -432,6 +434,36 @@ def infer_binsize(bins: pd.DataFrame) -> int | None:
     return int(first) if bool((widths == first).all()) else None
 
 
+# Modules in which a supported cooler keeps ``write_bins`` and ``get_binsize`` as
+# module globals that its writer calls by name, newest layout first.  cooler
+# 0.11 split the writer out of ``create/_create.py`` into ``create/_writer.py``;
+# patching the old location there is a silent no-op, which is exactly how the
+# quadratic enum build came back unnoticed on cooler 0.12.
+_COOLER_WRITER_MODULES = ("cooler.create._writer", "cooler.create._create")
+
+_warned_no_writer_module = False
+
+
+def cooler_writer_module() -> types.ModuleType | None:
+    """Return the cooler module whose ``write_bins``/``get_binsize`` to shim.
+
+    Returns:
+        The first module of :data:`_COOLER_WRITER_MODULES` that imports and
+        defines both functions, or ``None`` if the installed cooler keeps them
+        somewhere metacooler does not know about.
+    """
+    for name in _COOLER_WRITER_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        if callable(getattr(module, "write_bins", None)) and callable(
+            getattr(module, "get_binsize", None)
+        ):
+            return module
+    return None
+
+
 @contextlib.contextmanager
 def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
     """Neutralise two ``cooler.create`` costs that scale with *contig* count.
@@ -465,15 +497,24 @@ def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
     Yields:
         ``None``, with the shims installed for the duration of the block.
     """
-    from cooler.create import _create as cooler_create
+    global _warned_no_writer_module
 
-    original_write_bins = getattr(cooler_create, "write_bins", None)
-    original_get_binsize = getattr(cooler_create, "get_binsize", None)
-    if original_write_bins is None or original_get_binsize is None:
-        # A cooler that has moved these on: leave it alone and pay the cost.
-        logger.debug("cooler.create internals not as expected; shims not installed")
+    cooler_create = cooler_writer_module()
+    if cooler_create is None:
+        # A cooler that has moved these on: leave it alone and pay the cost —
+        # but say so, once, because on a metagenome that cost is hours.
+        if not _warned_no_writer_module:
+            _warned_no_writer_module = True
+            logger.warning(
+                "This cooler version keeps its bin writer somewhere metacooler "
+                "does not recognise, so writes will scale quadratically with "
+                "the number of contigs. Please report this at "
+                "https://github.com/js2264/metacooler/issues."
+            )
         yield
         return
+    original_write_bins = getattr(cooler_create, "write_bins")  # noqa: B009
+    original_get_binsize = getattr(cooler_create, "get_binsize")  # noqa: B009
 
     # Signatures mirror cooler's exactly: these are installed as its own module
     # globals, and everything calling them is cooler's code, not ours.
@@ -489,15 +530,15 @@ def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
     def get_binsize_precomputed(bins: pd.DataFrame) -> int | None:
         return binsize
 
-    # Rebinding another module's function is the whole point here, so the
-    # shadowing ty flags is intentional rather than accidental.
-    cooler_create.write_bins = write_bins_without_enum  # ty:ignore[invalid-assignment]
-    cooler_create.get_binsize = get_binsize_precomputed  # ty:ignore[invalid-assignment]
+    # Rebinding another module's globals is the whole point here; setattr
+    # because the module is only known at run time.
+    setattr(cooler_create, "write_bins", write_bins_without_enum)  # noqa: B010
+    setattr(cooler_create, "get_binsize", get_binsize_precomputed)  # noqa: B010
     try:
         yield
     finally:
-        cooler_create.write_bins = original_write_bins
-        cooler_create.get_binsize = original_get_binsize
+        setattr(cooler_create, "write_bins", original_write_bins)  # noqa: B010
+        setattr(cooler_create, "get_binsize", original_get_binsize)  # noqa: B010
 
 
 def write_cooler(
