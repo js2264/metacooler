@@ -937,3 +937,61 @@ class TestReservedQcKey:
         result = _run("qc", f, "--store")
         assert result.exit_code == 0, result.output
         assert isinstance(MetaCooler(f).metadata["qc"], dict)
+
+
+class TestUncoveredEdges:
+    """Edge branches of this pass's fixes, so patch coverage stays complete."""
+
+    def test_writer_module_is_none_for_an_unknown_layout(self, monkeypatch):
+        import metacooler.io._utils as utils
+
+        monkeypatch.setattr(
+            utils, "_COOLER_WRITER_MODULES", ("cooler.no_such_module", "cooler.util")
+        )
+        assert utils.cooler_writer_module() is None
+
+    def test_last_pairs_line_without_a_newline_is_read(self, tmp_path: Path):
+        from metacooler.io.create import _iter_pairs_lines
+
+        f = tmp_path / "p.pairs"
+        f.write_bytes(b"#a\n#b\nr\tc\t1\tc\t2")
+        assert list(_iter_pairs_lines(f, block_size=3)) == [
+            "#a\n",
+            "#b\n",
+            "r\tc\t1\tc\t2",
+        ]
+
+    def test_blank_lines_between_header_and_body(self, tmp_path: Path):
+        from metacooler.io.create import _scan_pairs_header
+
+        with_body = tmp_path / "a.pairs"
+        with_body.write_bytes(b"#h1\n#h2\n\n  \nr\tc\t1\tc\t2\n")
+        assert _scan_pairs_header(with_body) == (2, True)
+        header_only = tmp_path / "b.pairs"
+        header_only.write_bytes(b"#h1\n\n\n")
+        assert _scan_pairs_header(header_only) == (1, False)
+
+    def test_a_chunk_entirely_past_the_contig_ends(self, tmp_path: Path):
+        from metacooler.io.create import _decode_pairs_chunk, _PairsDropStats
+
+        chunk = pd.DataFrame(
+            {
+                "chrom1": ["a", "a"],
+                "pos1": [5, 1],
+                "chrom2": ["a", "a"],
+                "pos2": [999, 50],
+            }
+        )
+        stats = _PairsDropStats()
+        decoded = _decode_pairs_chunk(
+            chunk, {"a": 0}, stats, contig_length=np.array([10])
+        )
+        assert decoded is None
+        assert stats.out_of_bounds == 2
+        assert stats.dropped == 2
+
+    def test_level_chroms_rejects_an_unknown_level(self, tiny_metacooler: Path):
+        from metacooler.ops.aggregate import _level_chroms
+
+        with pytest.raises(ValueError, match="level must be 'contig' or 'genome'"):
+            _level_chroms(MetaCooler(tiny_metacooler), "bin")  # ty:ignore[invalid-argument-type]

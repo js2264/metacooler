@@ -55,6 +55,7 @@ docs = [
 # installs the toolchain and it never ships as part of the package metadata.
 dev = [
     "biopython>=1.87",
+    "diff-cover>=9",
     "ipython>=8.39.0",
     "jupyter>=1.1.1",
     "pre-commit>=4.6.0",

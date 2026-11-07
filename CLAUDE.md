@@ -25,6 +25,10 @@ uv run ruff check src/ tests/                  # lint
 uv run ruff format src/ tests/                 # format (line-length 88, double quotes; no black)
 uv run ty check src/ tests/                    # type check
 
+# patch coverage: Codecov fails a PR whose changed lines are < 80% covered
+uv run pytest tests/ --cov-report=xml
+uv run diff-cover coverage.xml --compare-branch=origin/devel --fail-under=80
+
 make fix          # ty check + ruff format + ruff check --fix + regenerate README.md from README.qmd
 make regenerate   # rebuild tests/data/ fixtures (generate-raw-files.py + raw-to-cool.sh)
 make cli-tests    # run tests/data/cli_tests.sh end-to-end CLI smoke tests
@@ -89,6 +93,7 @@ src/metacooler/
 - Fixtures live in `tests/conftest.py`: `tiny_fasta`, `tiny_contigs_table`, `tiny_bins_bed`, `tiny_pairs`, `tiny_genomes_table`, `tiny_metacooler`, `tiny_cool`, `tiny_mmetacool`, plus variants for each contig-table format (`contigs`, `contig_genome`, `metator`, column-index) and edge cases (variable bins, reversed cool order).
 - Static test data is in `tests/data/`, regenerated with `make regenerate`.
 - If you mark a known issue with `@pytest.mark.xfail`, do not remove the marker without fixing the underlying bug.
+- **Every change to `src/` must keep patch coverage at or above 80%** — Codecov's `codecov/patch` status enforces it (`.github/codecov.yml`). Before pushing, run the two patch-coverage commands above and add tests for any uncovered changed line, error branches included; don't wait for Codecov to report it.
 - CI's `test` job installs from `uv.lock`; the `dependency-bounds` job re-resolves at `lowest-direct` (py3.10) and `highest` (py3.14). To reproduce either locally, set `UV_RESOLUTION` for *every* uv command (`uv sync` silently re-locks when the lockfile's mode differs), and use a scratch copy so `uv.lock` is not rewritten.
 
 ## Reference
