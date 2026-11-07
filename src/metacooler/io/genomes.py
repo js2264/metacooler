@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from metacooler.io._utils import read_user_table
+from metacooler.io._utils import read_user_table, rename_key_columns
 
 logger = logging.getLogger("metacooler")
 
@@ -46,7 +46,7 @@ def parse_genomes_table(path: str | Path) -> pd.DataFrame:
             f"genomes table expects first column to be 'genome_name', "
             f"got '{df.columns[0]}'."
         )
-    df = df.rename(columns={"genome_name": "genome_id"})
+    df = rename_key_columns(df, {0: "genome_id"}, kind="Genomes table")
     dup = df["genome_id"].duplicated()
     if dup.any():
         names = df.loc[dup, "genome_id"].unique().tolist()

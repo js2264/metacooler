@@ -29,7 +29,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from metacooler.api import MetaCooler
 
@@ -211,6 +211,76 @@ def read_user_table(
         )
     _warn_ragged_rows(data_counts, n_named, kind, path, first_line=2)
     return df
+
+
+def rename_key_columns(
+    df: pd.DataFrame, keys: Mapping[int, str], *, kind: str
+) -> pd.DataFrame:
+    """Give a user table's key columns their internal names, by position.
+
+    Every user table has one or two *key* columns that metacooler renames to
+    its own internal labels (``contig_name``, ``genome_id``); every other
+    column is metadata that ends up as an HDF5 dataset of the same name.  This
+    is the single place that relabelling happens, because each way of doing it
+    by *name* went wrong:
+
+    - ``df.rename(columns={"genome_name": "genome_id"})`` on a table that also
+      carries its own ``genome_id`` column yields two columns of that label,
+      and ``df["genome_id"]`` then returns a frame -- the contig->genome map
+      came out as ``{contig: "genome_id"}`` and every contig fell into
+      ``__unbinned__`` without an error.
+    - A headerless table keeps pandas' integer labels on its extra columns,
+      which ``h5py`` cannot use as dataset names (a ``TypeError`` raised only
+      after the whole pairs pass).
+    - A column name containing ``/`` is an HDF5 *path*: ``create_dataset``
+      quietly builds a nested group, and the file then opens in neither
+      cooler nor metacooler.
+
+    So key columns are relabelled by position, and every other label is made
+    a string, freed of ``/``, and suffixed if it would collide -- each change
+    logged, never silent.
+
+    Args:
+        df: Table as read by :func:`read_user_table`.
+        keys: Mapping of 0-based column position to internal label.
+        kind: Human-readable table name for log messages.
+
+    Returns:
+        A copy of *df* with the new column labels.
+    """
+    labels: list[str] = []
+    taken = set(keys.values())
+    for i, raw in enumerate(df.columns):
+        if i in keys:
+            labels.append(keys[i])
+            continue
+        name = f"col{i + 1}" if isinstance(raw, int | np.integer) else str(raw)
+        if "/" in name:
+            fixed = name.replace("/", "_")
+            logger.warning(
+                "%s column %r contains '/', which HDF5 reads as a group path; "
+                "stored as %r.",
+                kind,
+                name,
+                fixed,
+            )
+            name = fixed
+        if name in taken:
+            fixed = f"{name}_col{i + 1}"
+            logger.warning(
+                "%s column %d is named %r, which collides with a column "
+                "metacooler uses internally; renamed it to %r.",
+                kind,
+                i + 1,
+                name,
+                fixed,
+            )
+            name = fixed
+        taken.add(name)
+        labels.append(name)
+    out = df.copy()
+    out.columns = labels
+    return out
 
 
 def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:

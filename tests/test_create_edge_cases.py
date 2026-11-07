@@ -655,11 +655,11 @@ class TestValidateBinCoords:
         with pytest.raises(ValueError, match="end < start"):
             _validate_bin_coords(df)
 
-    def test_zero_width_warns_but_ok(self, caplog):
+    def test_zero_width_raises(self):
+        """Refused up front: validate() rejected them anyway, after the pass."""
         df = pd.DataFrame({"chrom": ["c"], "start": [100], "end": [100]})
-        with caplog.at_level("WARNING"):
-            _validate_bin_coords(df)  # must not raise
-        assert any("zero-width" in r.message for r in caplog.records)
+        with pytest.raises(ValueError, match="zero-width"):
+            _validate_bin_coords(df)
 
     def test_valid_coords_pass(self):
         df = pd.DataFrame({"chrom": ["c", "c"], "start": [0, 100], "end": [100, 200]})

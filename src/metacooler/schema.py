@@ -178,11 +178,17 @@ def _table_length(group: h5py.Group, name: str) -> int:
     Raises:
         MetaCoolerFormatError: If two columns have different lengths.
     """
-    lengths = {
-        key: len(group[key])
-        for key in group
-        if isinstance(group[key], h5py.Dataset) and group[key].ndim > 0
-    }
+    for key in group:
+        if not isinstance(group[key], h5py.Dataset):
+            # A column name containing '/' becomes a nested group when written,
+            # and cooler -- which reads every member of /chroms, i.e. /contigs,
+            # as a column -- then fails with an AttributeError on open.
+            raise MetaCoolerFormatError(
+                f"/{name}/{key} is a group, not a column; every member of a "
+                "table group must be a dataset (a column name containing '/' "
+                "is written as a nested group)"
+            )
+    lengths = {key: len(group[key]) for key in group if group[key].ndim > 0}
     if not lengths:
         return 0
     if len(set(lengths.values())) > 1:
@@ -495,9 +501,16 @@ def validate(uri: str | Path) -> None:
             raise MetaCoolerFormatError(
                 "/chroms must be a soft link to /contigs for cooler compatibility"
             )
-        if link.path.lstrip("/").rsplit("/", 1)[-1] != "contigs":
+        # Resolve the link rather than compare its last path component: an
+        # absolute "/contigs" is dangling once the map is copied into an
+        # .mmetacool entry, and "/nowhere/contigs" or another entry's contigs
+        # used to pass, after which MetaCooler() raised an AttributeError.
+        target = f.get("chroms")
+        if target is None or target != c:
+            where = "resolves to nothing" if target is None else "resolves elsewhere"
             raise MetaCoolerFormatError(
-                f"/chroms soft link must target 'contigs', got {link.path!r}"
+                f"/chroms soft link must resolve to this map's /contigs, but "
+                f"{link.path!r} {where}"
             )
 
         # --- name uniqueness ---

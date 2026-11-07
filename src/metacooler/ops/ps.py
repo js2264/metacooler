@@ -279,8 +279,9 @@ def _from_pairs_file(
 
     tally = PSCounts(selection.n_groups, edges)
     stats = _PairsDropStats()
+    contig_length = mc.contigs["length"].to_numpy(dtype=np.int64)
     for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
-        decoded = _decode_pairs_chunk(chunk, name_to_id, stats)
+        decoded = _decode_pairs_chunk(chunk, name_to_id, stats, contig_length)
         if decoded is None:
             continue
         c1, c2, p1, p2 = decoded
