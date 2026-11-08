@@ -1,0 +1,101 @@
+name: Release
+
+# Tags are pushed only by the release steps documented in README.md, which
+# bump `src/metacooler/_version.py` and the changelog before tagging. This
+# workflow trusts that the tag names a version that is actually built here.
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Check the tag matches the package version
+        id: version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version=$(grep -oP '(?<=__version__ = ")[^"]+' src/metacooler/_version.py)
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match __version__ ($pkg_version) in src/metacooler/_version.py" >&2
+            exit 1
+          fi
+          echo "version=$pkg_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check metadata (README renders, classifiers, license)
+        run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/metacooler/${{ needs.build.outputs.version }}/
+    permissions:
+      # Trusted publishing (OIDC): no API token is stored in the repo. Configure
+      # this GitHub repo as a trusted publisher for the `metacooler` PyPI
+      # project (PyPI project settings -> Publishing), environment name "pypi".
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub release
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract this version's changelog section
+        run: |
+          awk -v ver="${{ needs.build.outputs.version }}" '
+            /^## / {
+              if (found) exit
+              if ($0 ~ "^## " ver "( |$)") { found=1; next }
+              next
+            }
+            found && /^---$/ { exit }
+            found { print }
+          ' docs/changelog.md > release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ needs.build.outputs.version }}
+          body_path: release-notes.md
+          files: dist/*

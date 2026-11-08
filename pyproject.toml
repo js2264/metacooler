@@ -55,6 +55,7 @@ docs = [
 # installs the toolchain and it never ships as part of the package metadata.
 dev = [
     "biopython>=1.87",
+    "bump-my-version>=0.28",
     "diff-cover>=9",
     "ipython>=8.39.0",
     "jupyter>=1.1.1",
@@ -116,3 +117,26 @@ omit = ["*/tests/*"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+
+[tool.bumpversion]
+# `_version.py` is the single source of truth for __version__ (see its own
+# comment); this current_version is bump-my-version's bookkeeping copy, kept
+# in sync with it on every bump.
+current_version = "0.1.0"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+message = "chore(release): v{new_version}"
+allow_dirty = false
+
+[[tool.bumpversion.files]]
+filename = "src/metacooler/_version.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[[tool.bumpversion.files]]
+# Promotes the accumulated "Unreleased" entries to a dated version section and
+# opens a fresh, empty "Unreleased" above them for the next round of changes.
+filename = "docs/changelog.md"
+search = "## Unreleased"
+replace = "## Unreleased\n\n## {new_version} - {now:%Y-%m-%d}"

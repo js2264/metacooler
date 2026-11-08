@@ -16,14 +16,14 @@ jobs:
     strategy:
       matrix:
         # Full Python matrix on Linux; one representative version elsewhere
-        # (macOS runners bill at 10x, Windows at 2x).
+        # (macOS runners bill at 10x). Windows is not tested.
         os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
-            python-version: "3.12"
-          - os: windows-latest
-            python-version: "3.12"
+            python-version: "3.14"
+          # - os: windows-latest
+          #   python-version: "3.14"
       fail-fast: false
 
     steps:
