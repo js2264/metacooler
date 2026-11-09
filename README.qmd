@@ -10,9 +10,9 @@ format:
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![codecov](https://codecov.io/gh/js2264/metacooler/branch/devel/graph/badge.svg?token=XMYgQxb7KH)](https://codecov.io/gh/js2264/metacooler)
 
-An extension of the [cooler](https://github.com/open2c/cooler) format for multi-genome (metagenomic) Hi-C data. `metacooler` adds a `genomes/` hierarchy on top of cooler's `chroms/bins/pixels` model, while preserving **full backward compatibility**: any `.metacooler` file can be opened with `cooler.Cooler()` out of the box.
+An extension of the [cooler](https://github.com/open2c/cooler) format for multi-genome (metagenomic) Hi-C data. `metacooler` adds a `genomes/` hierarchy on top of cooler's `chroms/bins/pixels` model, while preserving **full backward compatibility**: any `.metacool` file can be opened with `cooler.Cooler()` out of the box.
 
-`metacooler` aims to be a drop-in replacement for `cooler` providing a flexible framework for storing and analyzing metagenomic contact maps.
+`metacooler` builds on `cooler` to provide a framework for storing and analysing metagenomic contact maps: every `.metacool` file is also a valid cooler, so cooler, cooltools and the rest of the ecosystem keep working on it.
 
 ## Installation
 
@@ -20,11 +20,9 @@ An extension of the [cooler](https://github.com/open2c/cooler) format for multi-
 pip install metacooler
 ```
 
-Or with development dependencies:
-
-```console
-pip install metacooler[dev]
-```
+For development, clone the repository and run `uv sync`, which installs the
+runtime dependencies plus the `dev` dependency group (pytest, ruff, ty,
+pre-commit).
 
 ## Quick start
 
@@ -46,6 +44,12 @@ metacooler aggregate --level genome output.metacool -o genome.cool
 metacooler show output.metacool --level genome -o heatmap.png
 metacooler qc output.metacool --table
 metacooler ps output.metacool --pairs contacts.pairs --by genome --plot ps.png
+```
+
+Already have one `.cool` file per genome? `collect` zips them into a single metacool file, one genome per input:
+
+```console
+metacooler collect E_coli.cool B_subtilis.cool S_aureus.cool -o species.metacool
 ```
 
 Every command takes its input as a positional path (or an
@@ -155,7 +159,20 @@ display(Markdown(f"```yaml\n{content}\n```"))
 - **Report contact quality**: the 3D ratio and its intra-contig / intra-MAG / inter-MAG breakdown, tallied at creation time into `metadata.qc` and per-MAG `/genomes` columns, recomputable with `qc`
 - **Export P(s)**: contact probability vs genomic distance, pooled or per MAG, as a table and a log-log plot (`ps`). `create pairs` writes the per-MAG curve at base-pair resolution beside the output as `<output>.ps.tsv`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
-- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
+- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool` and `collect`)
+- **Collect single-genome maps**: `collect` stacks one `.cool` per genome into a metacool file, renaming contigs `<genome>__<contig>` so shared names cannot collide
 - **Unassigned contigs**: default to `__unbinned__` genome
 - **Re-attributable bins**: `reassign` swaps in a new contig-to-genome table on an existing file — the `/genomes` table and the contig layout are rebuilt, the contacts are not recomputed
 - **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection
+
+
+## Releasing
+
+Changelog entries for in-progress work go under `## Unreleased` in `docs/changelog.md` as they land on `devel`. To cut a release:
+
+```console
+uv run bump-my-version bump minor   # or patch / major
+git push --follow-tags
+```
+
+[`bump-my-version`](https://github.com/callowayproject/bump-my-version) (configured in `pyproject.toml`) promotes `## Unreleased` to a dated `## X.Y.Z - YYYY-MM-DD` section, bumps `__version__` in `src/metacooler/_version.py` — the single source of truth for the package version — and commits and tags the result, all in one step. Pushing the tag triggers [`release.yml`](.github/workflows/release.yml): it builds the sdist/wheel, fails if the tag doesn't match `__version__`, publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no stored token), and opens a GitHub release with that version's changelog section and the built artifacts attached. [`docs.yml`](.github/workflows/docs.yml) redeploys the documentation site on the same tag.

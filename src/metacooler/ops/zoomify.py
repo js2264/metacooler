@@ -231,7 +231,7 @@ def zoomify(
     from metacooler.ops.binnify import binnify
 
     output = Path(output)
-    check_output_path(output, force)
+    check_output_path(output, force, inputs=[uri])
 
     mc = MetaCooler(uri)
     if mc._group_path not in ("/", ""):

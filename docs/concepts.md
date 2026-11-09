@@ -128,7 +128,7 @@ in the `contig-ordering` attribute. It determines the layout of `bins` and
 | `genome-then-alpha` | grouped by genome, alphabetical within each genome |
 | `fasta` | as they appear in the FASTA / pairs header |
 | `alpha` | all contigs alphabetical, ignoring genome |
-| `cool` | preserve the input file's order (`create cool` only) |
+| `cool` | preserve the input file's order (`create cool`, and the default of `collect`, where each input keeps its own order within its genome) |
 
 Grouping by genome keeps each MAG's contigs contiguous, so a genome appears as a
 solid block on the diagonal of a contact map. Because the ordering is baked in,

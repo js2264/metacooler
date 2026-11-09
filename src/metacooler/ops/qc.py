@@ -22,6 +22,7 @@ from metacooler.qc import (
     QC_METADATA_KEY,
     ContactQC,
     bin_maps,
+    unbinned_genome_id,
 )
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
@@ -73,6 +74,7 @@ def qc(
         n_genomes=len(genomes),
         distance_threshold=distance_threshold,
         source="pixels",
+        unbinned_genome=unbinned_genome_id(genomes["name"]),
     )
     maps = bin_maps(mc.bins(), mc.contigs)
 
@@ -115,7 +117,8 @@ def qc(
     if store:
         from metacooler.io._utils import store_qc
 
-        if mc.metadata.get(QC_METADATA_KEY, {}).get("source") == "pairs":
+        existing = mc.metadata.get(QC_METADATA_KEY)
+        if isinstance(existing, dict) and existing.get("source") == "pairs":
             logger.warning(
                 "Replacing a block measured on read positions with one measured "
                 "between bin midpoints: the intra-contig short/long split will "

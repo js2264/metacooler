@@ -203,11 +203,17 @@ def _table_length(group: h5py.Group, name: str) -> int:
     Raises:
         MetaCoolerFormatError: If two columns have different lengths.
     """
-    lengths = {
-        key: len(group[key])
-        for key in group
-        if isinstance(group[key], h5py.Dataset) and group[key].ndim > 0
-    }
+    for key in group:
+        if not isinstance(group[key], h5py.Dataset):
+            # A column name containing '/' becomes a nested group when written,
+            # and cooler -- which reads every member of /chroms, i.e. /contigs,
+            # as a column -- then fails with an AttributeError on open.
+            raise MetaCoolerFormatError(
+                f"/{name}/{key} is a group, not a column; every member of a "
+                "table group must be a dataset (a column name containing '/' "
+                "is written as a nested group)"
+            )
+    lengths = {key: len(group[key]) for key in group if group[key].ndim > 0}
     if not lengths:
         return 0
     if len(set(lengths.values())) > 1:
@@ -520,9 +526,16 @@ def validate(uri: str | Path) -> None:
             raise MetaCoolerFormatError(
                 "/chroms must be a soft link to /contigs for cooler compatibility"
             )
-        if link.path.lstrip("/").rsplit("/", 1)[-1] != "contigs":
+        # Resolve the link rather than compare its last path component: an
+        # absolute "/contigs" is dangling once the map is copied into an
+        # .mmetacool entry, and "/nowhere/contigs" or another entry's contigs
+        # used to pass, after which MetaCooler() raised an AttributeError.
+        target = f.get("chroms")
+        if target is None or target != c:
+            where = "resolves to nothing" if target is None else "resolves elsewhere"
             raise MetaCoolerFormatError(
-                f"/chroms soft link must target 'contigs', got {link.path!r}"
+                f"/chroms soft link must resolve to this map's /contigs, but "
+                f"{link.path!r} {where}"
             )
 
         # --- name uniqueness ---
@@ -772,11 +785,15 @@ def validate(uri: str | Path) -> None:
                     raise MetaCoolerFormatError(
                         "pixels are not upper-triangular (bin1_id <= bin2_id)"
                     )
+                # Strictly increasing: a repeated (bin1, bin2) pair is a
+                # duplicate pixel, which cooler sums on some reads and not on
+                # others, so the stored counts no longer define one matrix.
                 if len(b1) > 1 and not np.all(
-                    (b1[:-1] < b1[1:]) | ((b1[:-1] == b1[1:]) & (b2[:-1] <= b2[1:]))
+                    (b1[:-1] < b1[1:]) | ((b1[:-1] == b1[1:]) & (b2[:-1] < b2[1:]))
                 ):
                     raise MetaCoolerFormatError(
-                        "pixels are not sorted by (bin1_id, bin2_id)"
+                        "pixels are not sorted by (bin1_id, bin2_id), or a "
+                        "(bin1_id, bin2_id) pair is repeated"
                     )
                 # Each sampled row must live in the bin1_offset slot that claims
                 # it; this ties the (cheap) index check to the actual pixels.
@@ -1046,13 +1063,20 @@ def _deep_pixel_problems(path: Path, group_path: str) -> list[str]:
             # checked *across* chunk boundaries too, not just within them.
             j1 = np.concatenate(([previous[0]], b1)) if previous else b1
             j2 = np.concatenate(([previous[1]], b2)) if previous else b2
-            ordered = (j1[:-1] < j1[1:]) | ((j1[:-1] == j1[1:]) & (j2[:-1] <= j2[1:]))
+            ordered = (j1[:-1] < j1[1:]) | ((j1[:-1] == j1[1:]) & (j2[:-1] < j2[1:]))
             if len(j1) > 1 and not np.all(ordered):
-                bad = int(np.argmax(~ordered)) + (0 if previous else 1)
-                once(
-                    "order",
-                    f"pixels are not sorted by (bin1_id, bin2_id) at row {lo + bad}",
-                )
+                k = int(np.argmax(~ordered))  # compares rows k and k + 1 of j1/j2
+                bad = k + (0 if previous else 1)
+                if j1[k] == j1[k + 1] and j2[k] == j2[k + 1]:
+                    message = (
+                        f"pixels repeat the (bin1_id, bin2_id) pair of the row "
+                        f"before at row {lo + bad} (a duplicate pixel)"
+                    )
+                else:
+                    message = (
+                        f"pixels are not sorted by (bin1_id, bin2_id) at row {lo + bad}"
+                    )
+                once("order", message)
             owner = np.searchsorted(bin1_offset, np.arange(lo, hi), side="right") - 1
             if not np.array_equal(owner, b1):
                 bad = int(np.argmax(owner != b1))

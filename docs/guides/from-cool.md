@@ -5,6 +5,12 @@ use `metacooler create cool`. This is useful when your Hi-C processing pipeline
 produces a standard cooler output that you want to enrich with metagenomic
 context after the fact.
 
+!!! tip "One cool file per genome?"
+    If each of your cool files holds a *single* genome — one per species, strain,
+    or isolate — use [`metacooler collect`](collect.md) instead: it turns every
+    input into one genome of a single `.metacool` file, with no contig table to
+    write.
+
 ## Basic usage
 
 ```bash

@@ -104,15 +104,15 @@ def cmd_qc(
     ``metadata.qc`` — read it with ``metacooler metadata get -k qc``.
     """
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.filters import parse_size
+    from metacooler.filters import parse_distance
     from metacooler.ops.qc import qc as run_qc
 
     setup_logging(verbose, command_name="metacooler qc", quiet=quiet)
 
-    check_output(output, force)
-    check_output(per_genome_out, force)
+    check_output(output, force, inputs=[metacool_path])
+    check_output(per_genome_out, force, inputs=[metacool_path])
     try:
-        distance_threshold = int(parse_size(threshold))
+        distance_threshold = parse_distance(threshold)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--threshold") from exc
 

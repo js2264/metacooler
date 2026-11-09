@@ -74,7 +74,7 @@ def cmd_stack(
     if len(input_files) < 2:
         raise click.UsageError("At least 2 input files required.")
 
-    check_output(output, force)
+    check_output(output, force, inputs=input_files)
 
     # (file path, group path) for every input. A group path other than "/" used
     # to be discarded, silently copying the whole collection in as one entry.

@@ -391,10 +391,12 @@ def test_pixel_path_counts_the_intra_contig_pixels(tiny_metacooler):
 
 
 def test_pixel_diagonal_is_counted(tiny_metacooler):
-    """The leading bin holds one self-pair per bin: no bin is left out."""
+    """The leading bin holds every bin's own position pairs: w (w + 1) / 2 each."""
     mc = MetaCooler(tiny_metacooler)
+    bins = mc.bins()
+    w = (bins["end"] - bins["start"]).to_numpy()
     table = contact_probability(tiny_metacooler)
-    assert table.iloc[0]["n_bin_pairs"] == len(mc.bins())
+    assert table.iloc[0]["n_bin_pairs"] == int((w * (w + 1) // 2).sum())
 
 
 def test_by_genome_partitions_the_pooled_curve(tiny_metacooler):

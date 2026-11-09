@@ -148,7 +148,7 @@ def cmd_show(
 
     setup_logging(verbose, command_name="metacooler show", quiet=quiet)
 
-    check_output(output, force)
+    check_output(output, force, inputs=[metacool_path])
 
     # ``show`` upgrades the level for --range/--contigs itself, so the Python
     # API and the CLI cannot drift apart.

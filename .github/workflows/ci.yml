@@ -16,14 +16,14 @@ jobs:
     strategy:
       matrix:
         # Full Python matrix on Linux; one representative version elsewhere
-        # (macOS runners bill at 10x, Windows at 2x).
+        # (macOS runners bill at 10x). Windows is not tested.
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
           - os: macos-latest
-            python-version: "3.12"
-          - os: windows-latest
-            python-version: "3.12"
+            python-version: "3.14"
+          # - os: windows-latest
+          #   python-version: "3.14"
       fail-fast: false
 
     steps:
@@ -64,6 +64,10 @@ jobs:
             --cov-report=xml \
             -v
 
+      - name: Run end-to-end CLI smoke tests
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: uv run --no-sync bash -c "cd tests/data && ./cli_tests.sh"
+
       - name: Upload coverage reports
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v6
@@ -74,3 +78,48 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # The `test` job installs from uv.lock, so it can never see a dependency
+  # release newer than the lock, nor one older than it. Both have bitten:
+  # cooler 0.11 moved the internals the writer shims patch (silently bringing
+  # back a quadratic per-contig cost), and two declared lower bounds
+  # (pyfaidx, rich-click) could not even import. These jobs re-resolve the
+  # project at each end of its declared ranges and run the suite there.
+  dependency-bounds:
+    name: ${{ matrix.bound }} dependencies / py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bound: lowest
+            resolution: lowest-direct
+            python-version: "3.10"
+          - bound: latest
+            resolution: highest
+            python-version: "3.14"
+    env:
+      # Every uv command must see the same mode: `uv sync` re-locks when the
+      # lockfile's resolution mode differs from the requested one, so setting
+      # it on `uv lock` alone is silently undone by the next step.
+      UV_RESOLUTION: ${{ matrix.resolution }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Re-resolve at the ${{ matrix.bound }} bound, ignoring uv.lock
+        run: uv lock --upgrade
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: List all installed packages
+        run: uv pip list
+
+      - name: Run tests
+        run: uv run pytest tests/ -q --no-cov

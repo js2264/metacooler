@@ -263,6 +263,37 @@ def parse_size(text: str) -> float:
     )
 
 
+# Largest distance option accepted, in bp: far beyond any genome, and small
+# enough that edges built from it stay exact in int64 arithmetic.
+_MAX_DISTANCE = 2**53
+
+
+def parse_distance(text: str) -> int:
+    """Parse a distance option (``qc --threshold``, ``ps --max-distance``, ...).
+
+    :func:`parse_size` accepts anything ``float()`` does, including ``inf``,
+    ``nan`` and ``1e30``, which then escaped as an ``OverflowError`` or a
+    ``TypeError`` traceback from deep inside the command.
+
+    Args:
+        text: As for :func:`parse_size`.
+
+    Returns:
+        The distance in whole base pairs.
+
+    Raises:
+        ValueError: If *text* is not a finite, non-negative distance of at most
+            ``2**53`` bp.
+    """
+    value = parse_size(text)
+    if not np.isfinite(value) or value < 0 or value > _MAX_DISTANCE:
+        raise ValueError(
+            f"{text!r} is not a usable distance: give a finite, non-negative "
+            f"number of base pairs up to {_MAX_DISTANCE:.0e}."
+        )
+    return int(value)
+
+
 def _to_number(text: str, filt: Filter) -> float:
     """Parse a filter value as a number, naming the filter if it is not one.
 
@@ -348,6 +379,11 @@ def _single_mask(
 
     col = df[filt.column]
     present = col.notna().to_numpy()
+    if not pd.api.types.is_numeric_dtype(col) and not pd.api.types.is_bool_dtype(col):
+        # Missing text is stored on disk as b"" and read back as "", which
+        # notna() calls present: `!=`/`!~` then matched every row with no value,
+        # though missing values are documented never to match.
+        present = present & (col.astype(str).str.strip() != "").to_numpy()
 
     if filt.op in _REGEX_OPERATORS:
         text = col.where(col.notna(), "").astype(str)

@@ -63,6 +63,7 @@ class TestInit:
             # creation
             "from_pairs",
             "from_cool",
+            "collect",
             # transforms and readers
             "reassign",
             "extract",
@@ -126,6 +127,12 @@ class TestInit:
         from metacooler.io.create import from_cool as _from_cool
 
         assert from_cool is _from_cool
+
+    def test_collect_is_io_collect(self):
+        from metacooler import collect
+        from metacooler.io.collect import collect as _collect
+
+        assert collect is _collect
 
     def test_is_metacooler_is_schema_is_metacooler(self):
         from metacooler import is_metacooler

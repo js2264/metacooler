@@ -112,10 +112,17 @@ class MetaCooler:
         """The file path as a string."""
         return str(self._store)
 
+    def __repr__(self) -> str:
+        return f"<MetaCooler {self.uri!r}>"
+
     @property
     def root(self) -> str:
-        """The HDF5 root path (always ``/`` for metacooler)."""
-        return "/"
+        """HDF5 path of the map inside its file, as ``cooler.Cooler.root``.
+
+        ``/`` for a ``.metacool``; ``/entries/<name>`` for an ``.mmetacool``
+        entry (it used to claim ``/`` for those too).
+        """
+        return self._clr.root
 
     @property
     def store(self) -> Path:
@@ -158,7 +165,11 @@ class MetaCooler:
     def pixels(self, join: bool = False, **kw) -> pd.DataFrame:
         """Return the pixels table as a DataFrame.
 
-        Delegates to ``cooler.Cooler.pixels()``.
+        Delegates to ``cooler.Cooler.pixels()``, except for the bin coordinates
+        added by *join*. ``/bins/chrom`` is a plain integer column in a metacool
+        file, and cooler's join reports such a column as contig *ids*, where
+        ``cooler.Cooler.bins()`` converts it to names; so the coordinates are
+        joined here, from :meth:`bins`, and name the contigs.
 
         Args:
             join: If ``True``, annotate each pixel with its bin coordinates
@@ -170,9 +181,14 @@ class MetaCooler:
         Returns:
             DataFrame with at least ``bin1_id``, ``bin2_id``, and ``count``
             columns.  When *join* is ``True``, bin coordinate columns are
-            prepended.
+            prepended, with ``chrom1``/``chrom2`` holding contig names (contig
+            ids if ``convert_enum=False`` is passed).
         """
-        return cast(pd.DataFrame, self._clr.pixels(join=join, **kw)[:])
+        if not join or kw.get("convert_enum", True) is False:
+            return cast(pd.DataFrame, self._clr.pixels(join=join, **kw)[:])
+        pixels = cast(pd.DataFrame, self._clr.pixels(**kw)[:])
+        coords = self._bins_cache[["chrom", "start", "end"]]
+        return cooler.api.annotate(pixels, coords, replace=True)
 
     def matrix(self, **kw):
         """Return a cooler matrix selector for slicing the contact matrix.
@@ -297,7 +313,10 @@ class MetaCooler:
         ):
             if _key in base:
                 with contextlib.suppress(ValueError, TypeError):
-                    base[_key] = int(base[_key])
+                    as_int = int(base[_key])
+                    # A float-count map has a fractional sum; int() floored it.
+                    if as_int == float(base[_key]):
+                        base[_key] = as_int
         return base
 
     @property

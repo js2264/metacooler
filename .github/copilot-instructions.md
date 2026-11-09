@@ -69,7 +69,7 @@ src/metacooler/
 
 ```bash
 # Install
-uv sync --extra dev
+uv sync
 
 # Test
 uv run pytest tests/ -x -v

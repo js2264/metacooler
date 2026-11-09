@@ -480,8 +480,13 @@ class TestMmetacoolCoolerCompat:
             "/entries/entry1",
             "/entries/entry2",
         }
-        with pytest.raises(KeyError):
-            cooler.fileops.is_cooler(f"{tiny_mmetacool}::entries/nonexistent")
+        # cooler <= 0.10 raises KeyError for a missing group; 0.11+ returns
+        # False. Either way it must not claim the group is a cooler.
+        try:
+            missing = cooler.fileops.is_cooler(f"{tiny_mmetacool}::entries/nonexistent")
+        except KeyError:
+            missing = False
+        assert missing is False
 
     def test_entries_match_metacooler(
         self, tiny_metacooler: Path, tiny_mmetacool: Path

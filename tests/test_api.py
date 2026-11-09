@@ -37,6 +37,30 @@ class TestMetaCooler:
         assert len(pix) > 0
         assert {"bin1_id", "bin2_id", "count"}.issubset(pix.columns)
 
+    def test_pixels_join_names_contigs(self, tiny_metacooler):
+        # /bins/chrom is a plain integer column, which cooler's own join
+        # reports as contig ids rather than names.
+        mc = MetaCooler(tiny_metacooler)
+        pix = mc.pixels()
+        joined = mc.pixels(join=True)
+        bins = mc.bins()
+        assert list(joined.columns) == [
+            "chrom1", "start1", "end1", "chrom2", "start2", "end2", "count",
+        ]  # fmt: skip
+        for side in ("1", "2"):
+            ref = bins.loc[pix[f"bin{side}_id"]]
+            assert joined[f"chrom{side}"].astype(str).tolist() == (
+                ref["chrom"].astype(str).tolist()
+            )
+            assert joined[f"start{side}"].tolist() == ref["start"].tolist()
+            assert joined[f"end{side}"].tolist() == ref["end"].tolist()
+        assert set(joined["chrom1"].astype(str)) <= set(mc.chromnames)
+        assert joined["count"].tolist() == pix["count"].tolist()
+
+        ids = mc.pixels(join=True, convert_enum=False)
+        codes = bins["chrom"].cat.codes.to_numpy()
+        assert ids["chrom1"].tolist() == codes[pix["bin1_id"]].tolist()
+
     def test_chroms(self, tiny_metacooler):
         mc = MetaCooler(tiny_metacooler)
         chroms = mc.chroms()

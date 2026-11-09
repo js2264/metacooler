@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import importlib
+import itertools
 import logging
+import os
 import re
+import types
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import h5py
 import numpy as np
@@ -26,7 +30,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
     from metacooler.api import MetaCooler
 
@@ -210,6 +214,76 @@ def read_user_table(
     return df
 
 
+def rename_key_columns(
+    df: pd.DataFrame, keys: Mapping[int, str], *, kind: str
+) -> pd.DataFrame:
+    """Give a user table's key columns their internal names, by position.
+
+    Every user table has one or two *key* columns that metacooler renames to
+    its own internal labels (``contig_name``, ``genome_id``); every other
+    column is metadata that ends up as an HDF5 dataset of the same name.  This
+    is the single place that relabelling happens, because each way of doing it
+    by *name* went wrong:
+
+    - ``df.rename(columns={"genome_name": "genome_id"})`` on a table that also
+      carries its own ``genome_id`` column yields two columns of that label,
+      and ``df["genome_id"]`` then returns a frame -- the contig->genome map
+      came out as ``{contig: "genome_id"}`` and every contig fell into
+      ``__unbinned__`` without an error.
+    - A headerless table keeps pandas' integer labels on its extra columns,
+      which ``h5py`` cannot use as dataset names (a ``TypeError`` raised only
+      after the whole pairs pass).
+    - A column name containing ``/`` is an HDF5 *path*: ``create_dataset``
+      quietly builds a nested group, and the file then opens in neither
+      cooler nor metacooler.
+
+    So key columns are relabelled by position, and every other label is made
+    a string, freed of ``/``, and suffixed if it would collide -- each change
+    logged, never silent.
+
+    Args:
+        df: Table as read by :func:`read_user_table`.
+        keys: Mapping of 0-based column position to internal label.
+        kind: Human-readable table name for log messages.
+
+    Returns:
+        A copy of *df* with the new column labels.
+    """
+    labels: list[str] = []
+    taken = set(keys.values())
+    for i, raw in enumerate(df.columns):
+        if i in keys:
+            labels.append(keys[i])
+            continue
+        name = f"col{i + 1}" if isinstance(raw, int | np.integer) else str(raw)
+        if "/" in name:
+            fixed = name.replace("/", "_")
+            logger.warning(
+                "%s column %r contains '/', which HDF5 reads as a group path; "
+                "stored as %r.",
+                kind,
+                name,
+                fixed,
+            )
+            name = fixed
+        if name in taken:
+            fixed = f"{name}_col{i + 1}"
+            logger.warning(
+                "%s column %d is named %r, which collides with a column "
+                "metacooler uses internally; renamed it to %r.",
+                kind,
+                i + 1,
+                name,
+                fixed,
+            )
+            name = fixed
+        taken.add(name)
+        labels.append(name)
+    out = df.copy()
+    out.columns = labels
+    return out
+
+
 def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
     """Convert a string/object NumPy array to fixed-length bytes for HDF5 storage.
 
@@ -310,7 +384,13 @@ def chrom_codes(bins: pd.DataFrame) -> np.ndarray:
     return col.to_numpy(dtype=np.int64)
 
 
-def check_output_path(path: str | Path, force: bool = False) -> None:
+def check_output_path(
+    path: str | Path,
+    force: bool = False,
+    *,
+    inputs: Iterable[str | Path | None] = (),
+    defer_removal: bool = False,
+) -> None:
     """Refuse to overwrite an existing output file unless *force* is set.
 
     Single home for the "output exists" guard shared by the CLI commands and
@@ -319,13 +399,24 @@ def check_output_path(path: str | Path, force: bool = False) -> None:
 
     Args:
         path: Output path about to be written.
-        force: If True, remove an existing file instead of raising.
+        force: If True, an existing file may be replaced instead of raising.
+        inputs: Paths or ``file::group`` URIs the command is about to read.
+            An output that is the same file as any of them is refused even
+            under *force*: removing it would delete the input before it is
+            read (``binnify a.metacool -o a.metacool -f`` used to do exactly
+            that, then fail with "File not found").
+        defer_removal: Leave an existing file in place for the caller to
+            replace on success, instead of removing it now.  For writers that
+            stage their output and rename it over *path* at the end, so a run
+            that fails does not also destroy the previous result.
 
     Raises:
+        ValueError: If *path* is the same file as one of *inputs*.
         FileExistsError: If *path* exists and *force* is False.
         IsADirectoryError: If *path* exists and is a directory.
     """
     path = Path(path)
+    _refuse_input_as_output(path, inputs)
     if not path.exists():
         return
     if path.is_dir():
@@ -334,7 +425,60 @@ def check_output_path(path: str | Path, force: bool = False) -> None:
         raise FileExistsError(
             f"Output file {str(path)!r} already exists. Use --force to overwrite."
         )
-    path.unlink()
+    if not defer_removal:
+        path.unlink()
+
+
+def _refuse_input_as_output(path: Path, inputs: Iterable[str | Path | None]) -> None:
+    """Raise if *path* names the same file as any of *inputs*.
+
+    Args:
+        path: Output path about to be written.
+        inputs: Input paths or URIs; ``None`` and ``"-"`` (stdin) are skipped.
+
+    Raises:
+        ValueError: If *path* and an input resolve to the same file.
+    """
+    from metacooler.uri import parse_uri
+
+    if not path.exists():
+        return
+    for raw in inputs:
+        if raw is None or str(raw) == "-":
+            continue
+        file_path, _ = parse_uri(str(raw))
+        if file_path.exists() and os.path.samefile(file_path, path):
+            raise ValueError(
+                f"Output {str(path)!r} is the same file as the input "
+                f"{str(raw)!r}; writing it would destroy the input before it "
+                "is read. Choose a different output path."
+            )
+
+
+def check_output_not_an_input(output: str | Path, inputs: Sequence[str | Path]) -> None:
+    """Refuse an output path that names one of the command's own inputs.
+
+    Must run *before* :func:`check_output_path`: under ``--force`` that guard
+    deletes an existing output up front, so ``-o`` pointing at an input would
+    destroy the input before a single byte of it had been read, and the command
+    would then fail on the file it had just removed.
+
+    Args:
+        output: Output path about to be written.
+        inputs: Input paths or ``file::group`` URIs; only the file part counts.
+
+    Raises:
+        ValueError: If *output* resolves to the same file as any input.
+    """
+    from metacooler.uri import parse_uri
+
+    target = Path(output).resolve()
+    for uri in inputs:
+        if parse_uri(str(uri))[0].resolve() == target:
+            raise ValueError(
+                f"Output {str(output)!r} is also the input {str(uri)!r}; choose "
+                "another output path. An input is never overwritten."
+            )
 
 
 def resolve_count_dtype(dtype: np.dtype | str, *, context: str = "pixels") -> np.dtype:
@@ -432,6 +576,36 @@ def infer_binsize(bins: pd.DataFrame) -> int | None:
     return int(first) if bool((widths == first).all()) else None
 
 
+# Modules in which a supported cooler keeps ``write_bins`` and ``get_binsize`` as
+# module globals that its writer calls by name, newest layout first.  cooler
+# 0.11 split the writer out of ``create/_create.py`` into ``create/_writer.py``;
+# patching the old location there is a silent no-op, which is exactly how the
+# quadratic enum build came back unnoticed on cooler 0.12.
+_COOLER_WRITER_MODULES = ("cooler.create._writer", "cooler.create._create")
+
+_warned_no_writer_module = False
+
+
+def cooler_writer_module() -> types.ModuleType | None:
+    """Return the cooler module whose ``write_bins``/``get_binsize`` to shim.
+
+    Returns:
+        The first module of :data:`_COOLER_WRITER_MODULES` that imports and
+        defines both functions, or ``None`` if the installed cooler keeps them
+        somewhere metacooler does not know about.
+    """
+    for name in _COOLER_WRITER_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        if callable(getattr(module, "write_bins", None)) and callable(
+            getattr(module, "get_binsize", None)
+        ):
+            return module
+    return None
+
+
 @contextlib.contextmanager
 def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
     """Neutralise two ``cooler.create`` costs that scale with *contig* count.
@@ -465,15 +639,24 @@ def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
     Yields:
         ``None``, with the shims installed for the duration of the block.
     """
-    from cooler.create import _create as cooler_create
+    global _warned_no_writer_module
 
-    original_write_bins = getattr(cooler_create, "write_bins", None)
-    original_get_binsize = getattr(cooler_create, "get_binsize", None)
-    if original_write_bins is None or original_get_binsize is None:
-        # A cooler that has moved these on: leave it alone and pay the cost.
-        logger.debug("cooler.create internals not as expected; shims not installed")
+    cooler_create = cooler_writer_module()
+    if cooler_create is None:
+        # A cooler that has moved these on: leave it alone and pay the cost —
+        # but say so, once, because on a metagenome that cost is hours.
+        if not _warned_no_writer_module:
+            _warned_no_writer_module = True
+            logger.warning(
+                "This cooler version keeps its bin writer somewhere metacooler "
+                "does not recognise, so writes will scale quadratically with "
+                "the number of contigs. Please report this at "
+                "https://github.com/js2264/metacooler/issues."
+            )
         yield
         return
+    original_write_bins = getattr(cooler_create, "write_bins")  # noqa: B009
+    original_get_binsize = getattr(cooler_create, "get_binsize")  # noqa: B009
 
     # Signatures mirror cooler's exactly: these are installed as its own module
     # globals, and everything calling them is cooler's code, not ours.
@@ -489,15 +672,15 @@ def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
     def get_binsize_precomputed(bins: pd.DataFrame) -> int | None:
         return binsize
 
-    # Rebinding another module's function is the whole point here, so the
-    # shadowing ty flags is intentional rather than accidental.
-    cooler_create.write_bins = write_bins_without_enum  # ty:ignore[invalid-assignment]
-    cooler_create.get_binsize = get_binsize_precomputed  # ty:ignore[invalid-assignment]
+    # Rebinding another module's globals is the whole point here; setattr
+    # because the module is only known at run time.
+    setattr(cooler_create, "write_bins", write_bins_without_enum)  # noqa: B010
+    setattr(cooler_create, "get_binsize", get_binsize_precomputed)  # noqa: B010
     try:
         yield
     finally:
-        cooler_create.write_bins = original_write_bins
-        cooler_create.get_binsize = original_get_binsize
+        setattr(cooler_create, "write_bins", original_write_bins)  # noqa: B010
+        setattr(cooler_create, "get_binsize", original_get_binsize)  # noqa: B010
 
 
 def write_cooler(
@@ -534,9 +717,47 @@ def write_cooler(
     """
     import cooler
 
+    if kwargs.get("ordered") is False and not isinstance(pixels, pd.DataFrame | dict):
+        pixels, was_empty = _skip_empty_frames(cast("Iterable[pd.DataFrame]", pixels))
+        if was_empty:
+            # cooler's unordered writer concatenates its per-chunk files and
+            # fails with "No objects to concatenate" when there are none; an
+            # empty table is trivially sorted, so write it on the ordered path.
+            kwargs["ordered"] = True
     resolved = binsize if binsize is not None else infer_binsize(bins)
     with cooler_writer_shims(resolved):
         cooler.create_cooler(str(path), bins=bins, pixels=pixels, **kwargs)
+
+
+def _skip_empty_frames(
+    pixels: Iterable[pd.DataFrame],
+) -> tuple[pd.DataFrame | Iterator[pd.DataFrame], bool]:
+    """Drop empty frames from a pixel stream, reporting if nothing was left.
+
+    Only the first non-empty frame is pulled to decide, so a lazy stream stays
+    lazy.  A zero-pixel source (a valid, if unusual, metacool) reached
+    ``binnify``, ``zoomify`` and ``aggregate`` as either an empty stream or one
+    of empty frames, and both crashed cooler's unordered writer.
+
+    Args:
+        pixels: An iterable of pixel DataFrames.
+
+    Returns:
+        ``(stream, was_empty)``; when *was_empty*, *stream* is a single empty
+        frame that ``cooler.create_cooler`` accepts.
+    """
+    frames = (df for df in pixels if len(df))
+    first = next(frames, None)
+    if first is None:
+        empty = pd.DataFrame(
+            {
+                "bin1_id": np.array([], dtype=np.int64),
+                "bin2_id": np.array([], dtype=np.int64),
+                "count": np.array([], dtype=np.int32),
+            }
+        )
+        return empty, True
+    return itertools.chain([first], frames), False
 
 
 def _finalize_metacool_file(
@@ -577,8 +798,9 @@ def _finalize_metacool_file(
         genome_offset: Pre-computed ``genome_offset`` array of length
             ``n_genomes + 1``.
         contig_ordering: Value written to the ``contig-ordering`` HDF5
-            attribute.  Typically ``"genome-then-alpha"``,
-            ``"pairs-header"``, or ``"genomeid-then-alpha"``.
+            attribute: one of the ``--contig-order`` strategies
+            (``"genome-then-length"``, ``"genome-then-alpha"``, ``"fasta"``,
+            ``"alpha"``) or ``"cool"``.
         assembly_name: Optional assembly name.  Written to cooler's
             standard ``genome-assembly`` attribute (the only attribute
             metacooler uses for this), and only when ``cooler.create``
