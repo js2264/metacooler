@@ -250,6 +250,11 @@
 
 ### Fixed
 
+- **`MetaCooler.pixels(join=True)` names the contigs.** `chrom1` and `chrom2`
+  held contig *ids* (`0`, `1`, …): `/bins/chrom` is a plain integer column in a
+  metacool file, and cooler's join reports such a column as ids where
+  `cooler.Cooler.bins()` converts it to names. The coordinates are now joined
+  from `MetaCooler.bins()`. Pass `convert_enum=False` to get the ids.
 - **`dump … | head` no longer reports a failure.** Closing the pipe early is the
   normal end of a pipeline, but the resulting `BrokenPipeError` is an `OSError`
   and so was rendered in the same red `Error: [Errno 32] Broken pipe` box as a
