@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
@@ -239,10 +240,30 @@ def _resolve_layout(layout: str, source_ordering: str | None) -> str:
     return "keep"
 
 
+def _scattered_genomes(
+    contig_order: list[str], assignment: dict[str, str]
+) -> list[str]:
+    """Return the genomes whose contigs do not form one contiguous run.
+
+    Args:
+        contig_order: The physical contig order.
+        assignment: Contig → genome mapping over the same contigs.
+
+    Returns:
+        Sorted names of the genomes split into two or more runs of rows.
+    """
+    labels = [assignment[contig] for contig in contig_order]
+    runs = Counter(
+        label for i, label in enumerate(labels) if i == 0 or label != labels[i - 1]
+    )
+    return sorted(genome for genome, n_runs in runs.items() if n_runs > 1)
+
+
 def _kept_ordering(
     source_ordering: str | None,
     contig_order: list[str],
     contig_lengths: dict[str, int],
+    before: dict[str, str],
     assignment: dict[str, str],
 ) -> str:
     """Return the ``contig-ordering`` value for a relabelled (un-permuted) file.
@@ -255,15 +276,38 @@ def _kept_ordering(
     :data:`CUSTOM_ORDERING` — which also stops ``validate()`` from enforcing a
     grouping the rows no longer have.
 
+    A label that does not promise grouping can still describe a file whose
+    genomes happen to be contiguous — every ``collect``ed map is, under
+    ``cool`` — and relabelling may scatter them.  Nothing on disk becomes
+    false, so the label stays, but the loss is warned about by name: it is
+    exactly what ``layout="auto"`` does not protect against for such a file.
+
     Args:
         source_ordering: The source file's ``contig-ordering`` attribute.
         contig_order: The (unchanged) physical contig order.
         contig_lengths: Contig name → length, for the length-based strategy.
+        before: The source's contig → genome mapping.
         assignment: The new contig → genome mapping.
 
     Returns:
         The ``contig-ordering`` value to write.
     """
+    if source_ordering not in GENOME_GROUPED_ORDERINGS:
+        scattered = _scattered_genomes(contig_order, assignment)
+        if scattered and not _scattered_genomes(contig_order, before):
+            logger.warning(
+                "Every genome of the source occupied one contiguous block of "
+                "contigs, but contig-ordering=%r does not promise it, so the "
+                "rows were left where they are and %d genome(s) are now "
+                "scattered: %s. Anything that needs one bin range per genome "
+                "('show'/'ps' region strings, genome_extent) fails for those; "
+                "selecting by contig membership is unaffected. Pass "
+                "layout='genome-then-alpha' or 'genome-then-length' to re-group "
+                "the file instead.",
+                source_ordering,
+                len(scattered),
+                _names(scattered),
+            )
     if source_ordering in _ASSIGNMENT_INDEPENDENT_ORDERINGS:
         return str(source_ordering)
     if source_ordering in GENOME_GROUPED_ORDERINGS:
@@ -683,12 +727,17 @@ def reassign(
             With ``False`` the stale block is dropped and not replaced.
         chunksize: Source pixels read and remapped per chunk, on the re-ordering
             path only.
-        force: Overwrite *output* if it exists.
+        force: Replace *output* if it exists.  The existing file is only
+            replaced once the new one has been written and validated, so a
+            failed run leaves it untouched.
 
     Raises:
-        ValueError: If the output arguments are inconsistent, if *inplace* is
-            asked for a reassignment that requires re-ordering, or if the table
-            names no contig of this file.
+        ValueError: If the output arguments are inconsistent, if *output* is
+            one of the inputs, if *inplace* is asked for a reassignment that
+            requires re-ordering, if re-ordering is asked of a map whose
+            storage mode is not ``symmetric-upper``, or if the table names no
+            contig of this file.
+        FileExistsError: If *output* exists and *force* is not set.
     """
     from metacooler.api import MetaCooler
 
@@ -701,6 +750,20 @@ def reassign(
         raise ValueError(
             "An output path is required. Pass output=... to write a new file, "
             "or inplace=True to rewrite the input."
+        )
+    if output is not None:
+        # Before anything is read: an output that is one of the inputs is
+        # refused even under force, and an existing output is left in place
+        # for _staged_output to replace once the new file has validated.
+        check_output_path(
+            output,
+            force,
+            inputs=[
+                uri,
+                genomes_table,
+                None if isinstance(contig_genome_map, dict) else contig_genome_map,
+            ],
+            defer_removal=True,
         )
 
     mc = MetaCooler(uri)
@@ -745,11 +808,25 @@ def reassign(
     # rows correctly, and writing the source's old label there would understate
     # what the file now guarantees.  Only "keep" has to interrogate the rows.
     ordering = (
-        _kept_ordering(source_ordering, contig_order, contig_lengths, assignment)
+        _kept_ordering(
+            source_ordering, contig_order, contig_lengths, before, assignment
+        )
         if strategy == "keep"
         else strategy
     )
 
+    storage_mode = mc.info.get("storage-mode", "symmetric-upper")
+    if reorder and storage_mode != "symmetric-upper":
+        # Remapping folds every pixel into the upper triangle, which is only
+        # right for a symmetric matrix -- and square storage is chosen precisely
+        # when one is not guaranteed, so a pixel and its mirror would be summed.
+        # Relabelling never touches a pixel, so it stays available.
+        raise ValueError(
+            f"{uri} uses storage-mode {storage_mode!r}, and laying its contigs "
+            f"out as {strategy!r} would fold every pixel into the upper "
+            "triangle, summing each contact with its mirror. Pass layout='keep' "
+            "to relabel without moving any pixel."
+        )
     if reorder and inplace:
         raise ValueError(
             f"inplace cannot be used here: laying the contigs out as {strategy!r} "
@@ -805,7 +882,6 @@ def reassign(
     else:
         assert output is not None  # guaranteed by the argument check above
         target = Path(output)
-        check_output_path(target, force)
         with _staged_output(target) as staged:
             if reorder:
                 logger.info(

@@ -20,6 +20,7 @@ import h5py
 import numpy as np
 import pytest
 from _cli_output import flat
+from _cools import BSUB, ECOLI, make_cool
 from click.testing import CliRunner
 from numpy.testing import assert_array_equal
 
@@ -343,6 +344,85 @@ def test_a_non_grouped_file_can_be_grouped_on_request(
         np.sort(result.contigs["genome_id"].to_numpy()),
         result.contigs["genome_id"].to_numpy(),
     )
+
+
+@pytest.fixture
+def collected_metacooler(tmp_path: Path) -> Path:
+    """A ``collect``ed map: ``cool`` ordering, genomes contiguous by construction.
+
+    Laid out [B_subtilis__chromosome, B_subtilis__plasmid1, E_coli__chromosome,
+    E_coli__plasmid1, E_coli__plasmid2].
+    """
+    from metacooler.io.collect import collect
+
+    ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, seed=1)
+    bsub = make_cool(tmp_path / "B_subtilis.cool", BSUB, seed=2)
+    out = tmp_path / "collected.metacool"
+    collect([ecoli, bsub], out)
+    return out
+
+
+def test_a_collected_map_is_relabelled_without_a_warning_when_genomes_stay_whole(
+    tmp_path: Path, collected_metacooler: Path, caplog
+):
+    """E_coli's first contig borders B_subtilis's block, so both stay contiguous."""
+    source = MetaCooler(collected_metacooler)
+    out = tmp_path / "out.metacool"
+    table = _table(tmp_path / "t.tsv", {"E_coli__chromosome": "B_subtilis"})
+    with caplog.at_level("WARNING", logger="metacooler"):
+        reassign(collected_metacooler, table, out, qc=False)
+
+    assert "scattered" not in caplog.text
+    result = MetaCooler(out)
+    assert result.info["ordering"] == "cool"
+    # 8 + 3 bins of its own, then E_coli__chromosome's 10.
+    assert result.genome_extent("B_subtilis") == (0, 21)
+    assert_array_equal(_dense(result), _dense(source))
+
+
+def test_scattering_a_collected_map_is_warned_about(
+    tmp_path: Path, collected_metacooler: Path, caplog
+):
+    """``cool`` does not promise grouping, so auto relabels -- but says so."""
+    out = tmp_path / "out.metacool"
+    table = _table(tmp_path / "t.tsv", {"E_coli__plasmid1": "B_subtilis"})
+    with caplog.at_level("WARNING", logger="metacooler"):
+        reassign(collected_metacooler, table, out, qc=False)
+
+    assert "2 genome(s) are now scattered: B_subtilis, E_coli" in caplog.text
+    result = MetaCooler(out)
+    assert result.info["ordering"] == "cool"
+    validate(out)
+    with pytest.raises(ValueError, match="not contiguous in bin space"):
+        result.genome_extent("E_coli")
+
+
+def test_a_collected_map_can_be_regrouped_on_request(
+    tmp_path: Path, collected_metacooler: Path
+):
+    source = MetaCooler(collected_metacooler)
+    out = tmp_path / "out.metacool"
+    reassign(
+        collected_metacooler,
+        _table(tmp_path / "t.tsv", {"E_coli__plasmid1": "B_subtilis"}),
+        out,
+        layout="genome-then-alpha",
+        qc=False,
+    )
+
+    result = MetaCooler(out)
+    assert result.contigs["name"].tolist() == [
+        "B_subtilis__chromosome",
+        "B_subtilis__plasmid1",
+        "E_coli__plasmid1",
+        "E_coli__chromosome",
+        "E_coli__plasmid2",
+    ]
+    assert result.genome_extent("B_subtilis")[0] == 0
+    assert result.genome_extent("E_coli")[1] == len(result.bins())
+    assert result.info["sum"] == source.info["sum"]
+    perm = _bin_permutation(source, result)
+    assert_array_equal(_dense(result), _dense(source)[np.ix_(perm, perm)])
 
 
 def test_unknown_layout_is_rejected(tmp_path: Path, tiny_metacooler: Path):
@@ -784,6 +864,171 @@ def test_cli_refuses_to_clobber_without_force(
     forced = runner.invoke(cli, [*args, "--force"])
     assert forced.exit_code == 0, forced.output
     assert MetaCooler(out).genomes["name"].tolist() == ["__unbinned__", "MAG_1"]
+
+
+def _fingerprint(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def test_an_output_that_is_the_input_is_refused_even_under_force(
+    tmp_path: Path, tiny_metacooler: Path
+):
+    """``--force`` used to delete the source before a byte of it was read."""
+    before = _fingerprint(tiny_metacooler)
+
+    with pytest.raises(ValueError, match="same file as the input"):
+        reassign(
+            tiny_metacooler,
+            _table(tmp_path / "t.tsv", {"contig_C": "MAG_1"}),
+            tiny_metacooler,
+            force=True,
+        )
+
+    assert _fingerprint(tiny_metacooler) == before
+
+
+def test_cli_refuses_an_output_that_is_the_input(
+    runner, tmp_path: Path, tiny_metacooler: Path
+):
+    before = _fingerprint(tiny_metacooler)
+    result = runner.invoke(
+        cli,
+        [
+            "reassign",
+            str(tiny_metacooler),
+            "--contigs",
+            str(_table(tmp_path / "t.tsv", {"contig_C": "MAG_1"})),
+            "-o",
+            str(tiny_metacooler),
+            "--force",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "same file as the input" in flat(result.output)
+    assert _fingerprint(tiny_metacooler) == before
+
+
+def test_cli_refuses_an_output_that_is_the_contigs_table(
+    runner, tmp_path: Path, tiny_metacooler: Path
+):
+    table = _table(tmp_path / "t.tsv", {"contig_C": "MAG_1"})
+    before = table.read_text()
+    result = runner.invoke(
+        cli,
+        ["reassign", str(tiny_metacooler), "--contigs", str(table), "-o", str(table)]
+        + ["--force"],
+    )
+
+    assert result.exit_code != 0
+    assert "same file as the input" in flat(result.output)
+    assert table.read_text() == before
+
+
+def test_force_keeps_the_previous_output_when_the_run_fails(
+    runner, tmp_path: Path, tiny_metacooler: Path
+):
+    """The old output is replaced on success, not deleted up front.
+
+    A table that matches no contig fails *after* the output check; the
+    finished map already at ``-o`` must survive that.
+    """
+    out = tmp_path / "out.metacool"
+    reassign(tiny_metacooler, _table(tmp_path / "ok.tsv", {"contig_C": "MAG_1"}), out)
+    before = _fingerprint(out)
+
+    result = runner.invoke(
+        cli,
+        [
+            "reassign",
+            str(tiny_metacooler),
+            "--contigs",
+            str(_table(tmp_path / "bad.tsv", {"no_such_contig": "MAG_1"})),
+            "-o",
+            str(out),
+            "--force",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "match a contig of this file" in flat(result.output)
+    assert _fingerprint(out) == before
+    validate(out)
+
+
+@pytest.fixture
+def empty_metacool(tmp_path: Path, tiny_contigs_table: Path, tiny_bins_bed: Path):
+    """A valid metacool with zero pixels, laid out ``genome-then-alpha``."""
+    from metacooler.io.create import from_pairs
+
+    pairs = tmp_path / "empty.pairs"
+    pairs.write_text("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+    out = tmp_path / "empty.metacool"
+    from_pairs(
+        uri=out,
+        bins=tiny_bins_bed,
+        pairs=pairs,
+        contig_genome_map=tiny_contigs_table,
+        contig_ordering="genome-then-alpha",
+        ps=False,
+    )
+    return out
+
+
+def test_a_zero_pixel_map_can_be_regrouped(tmp_path: Path, empty_metacool: Path):
+    """The regroup path streams no pixel at all; the writer must still cope."""
+    out = tmp_path / "out.metacool"
+    reassign(empty_metacool, _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"}), out)
+
+    validate(out)
+    result = MetaCooler(out)
+    assert result.contigs["name"].tolist() == [
+        "contig_D",
+        "contig_B",
+        "contig_A",
+        "contig_C",
+    ]
+    assert int(result.info["nnz"]) == 0
+
+
+@pytest.fixture
+def square_metacooler(tmp_path: Path, tiny_metacooler: Path) -> Path:
+    """The tiny map declared ``storage-mode="square"`` (which validate accepts)."""
+    target = tmp_path / "square.metacool"
+    shutil.copy2(tiny_metacooler, target)
+    with h5py.File(target, "r+") as f:
+        f.attrs["storage-mode"] = "square"
+    validate(target)
+    return target
+
+
+def test_regrouping_a_square_map_is_refused(tmp_path: Path, square_metacooler: Path):
+    """Remapping folds every pixel into the upper triangle.
+
+    That is only right for a symmetric matrix, which square storage does not
+    promise; a pixel and its mirror would be summed.
+    """
+    out = tmp_path / "out.metacool"
+    with pytest.raises(ValueError, match="storage-mode 'square'"):
+        reassign(
+            square_metacooler, _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"}), out
+        )
+    assert not out.exists()
+
+
+def test_a_square_map_can_still_be_relabelled(tmp_path: Path, square_metacooler: Path):
+    """Relabelling never touches a pixel, so the storage mode does not matter."""
+    out = tmp_path / "out.metacool"
+    reassign(
+        square_metacooler,
+        _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"}),
+        out,
+        layout="keep",
+    )
+
+    validate(out)
+    assert cooler.Cooler(str(out)).info["storage-mode"] == "square"
+    assert_array_equal(_dense(MetaCooler(out)), _dense(MetaCooler(square_metacooler)))
 
 
 def test_cli_rejects_a_bare_mmetacool_path(

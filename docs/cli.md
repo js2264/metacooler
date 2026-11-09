@@ -17,7 +17,7 @@ A few conventions hold across the whole CLI:
 |------------|---------|
 | `METACOOL_PATH` | A **positional** path to a `.metacool` file, or an `.mmetacool` entry URI (`file.mmetacool::entries/<name>`). Every command takes its input this way — there are no input *options*. |
 | `-o, --output` | Output path. Required unless the command writes to stdout. |
-| `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create` keeps the previous file until the new one has been written and validated. |
+| `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create` and `reassign` keep the previous file until the new one has been written and validated. |
 | `-v, --verbose` | Enable debug logging. Available on every command. |
 | `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
@@ -405,7 +405,7 @@ metacooler reassign METACOOL_PATH --contigs TABLE --inplace [OPTIONS]
 | `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
 | `--qc / --no-qc` | on | Recompute the contact-quality block when the source carries one. With `--no-qc` the stale block is dropped and not replaced. |
 | `--chunksize` | `50000000` | Source pixels read and remapped per chunk, on the re-ordering path only. |
-| `-f, --force` | off | Overwrite the output if it already exists. |
+| `-f, --force` | off | Overwrite the output if it already exists. The previous file is replaced only once the new one has validated, and an input (the map, `--contigs`, `--genomes`, `--metadata`) is never overwritten. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
 What is rewritten, and what is not:
@@ -435,7 +435,7 @@ giving up the guarantee:
 
 | `--layout` | What it does | Cost |
 |------------|--------------|------|
-| `auto` | Re-group a file whose `contig-ordering` is genome-grouped; leave the order of any other file (`fasta`, `alpha`, `cool`) alone, since it never made the promise. | Whichever of the two below applies. |
+| `auto` | Re-group a file whose `contig-ordering` is genome-grouped; leave the order of any other file (`fasta`, `alpha`, `cool`) alone, since it never made the promise. A file whose genomes were contiguous anyway — every [`collect`](#collect)ed map, under `cool` — is relabelled too, with a warning naming any genome the new assignment scatters. | Whichever of the two below applies. |
 | `keep` | Never re-order. The file is recorded as `contig-ordering="custom"`, because it can no longer claim to be grouped. | O(n_contigs) — the file is copied and four datasets are rewritten. |
 | `genome-then-alpha`, `genome-then-length` | Re-group with that strategy, whatever the source used. | O(nnz) — bins are permuted and pixels remapped and re-sorted. |
 
@@ -443,6 +443,11 @@ A re-grouping that turns out to reproduce the order the file already has is
 detected and skipped, so merging two adjacent MAGs, renaming one, or unbinning
 a contig usually costs nothing. `--inplace` is available exactly when no
 re-ordering is needed, and is refused (before writing anything) when one is.
+
+Re-grouping folds every remapped pixel into the upper triangle, which is only
+right for a symmetric matrix. A map stored as `storage-mode="square"` does not
+promise one, so re-grouping it is refused; `--layout keep` relabels it without
+moving a pixel.
 
 !!! warning "`--layout keep` gives up contiguous genomes"
     Under `contig-ordering="custom"` a genome's contigs may be scattered

@@ -212,7 +212,7 @@ grouping its rows no longer have.
 | `genome-then-alpha` | Group by genome (alphabetical), contigs alphabetical within each genome. |
 | `fasta` | Preserve the order of contigs as they appear in the FASTA or pairs header. |
 | `alpha` | All contigs sorted alphabetically, ignoring genome assignment. |
-| `cool` | Preserve the exact contig order of the input cooler. `create cool`, and `collect` — where every input is one genome, genomes are laid out in `genome_id` order, and each keeps its input's contig order, so the layout is genome-grouped even though `cool` is not declared as such. |
+| `cool` | Preserve the exact contig order of the input cooler. `create cool`, and `collect` — where every input is one genome, genomes are laid out in `genome_id` order, and each keeps its input's contig order, so the layout is genome-grouped even though `cool` is not declared as such (until a `reassign` scatters a genome — see [`reassign`](cli.md#reassign-layout)). |
 | `custom` | Row order inherited from an earlier layout and no longer described by any strategy. Written by `reassign --layout keep` when the new assignment breaks genome grouping; not a value `create` can produce. |
 
 ---

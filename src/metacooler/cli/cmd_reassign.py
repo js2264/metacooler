@@ -174,7 +174,12 @@ def cmd_reassign(
             "--inplace to rewrite the input file."
         )
 
-    check_output(output, force)
+    check_output(
+        output,
+        force,
+        inputs=[metacool_path, contigs_table, genomes_table, metadata],
+        defer_removal=True,
+    )
 
     meta: dict = {"commands": [reconstruct_command()]}
     meta.update(load_metadata_file(metadata))
