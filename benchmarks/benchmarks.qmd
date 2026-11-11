@@ -68,7 +68,8 @@ Every command below runs **as a fresh process, from bash, as a user would type i
 (wall clock; CPU = user + system, including children; peak resident memory of the largest process)
 and `timeout`. Each run is one row of `timings.tsv`; every table and figure is drawn from it.
 cooler and metacooler get the same inputs and must produce the same contacts — that is checked,
-not assumed. A command that hits the time limit is stopped and reported as a lower bound.
+not assumed. A command that hits the time limit is stopped and reported as a lower bound; one
+that the kernel kills for want of memory is reported as out of memory.
 
 ```bash
 # Render (runs the benchmarks: hours for the full ladder; minutes for S and M)
@@ -145,6 +146,10 @@ def cell(rows, value="wall_s", fmt="{:,.1f}"):
     last = rows.iloc[-1]
     if last["status"] == "timeout":
         return f"> {last['wall_s']:,.0f} (time limit)" if value == "wall_s" else "–"
+    if last["status"] == "oom":
+        if value in ("wall_s", "peak_mb"):
+            return f"out of memory at {fmt.format(last[value])}"
+        return "–"
     return {"skipped": "not run", "error": "FAILED"}.get(last["status"], last["status"])
 
 
@@ -188,8 +193,9 @@ def seconds_axis(ax, unit="s"):
 
 
 def scaling(ax, rows, value="wall_s", names=None):
-    """One line per command through its run means, each run a dot; a run
-    stopped at the time limit is an open triangle there, joined dotted."""
+    """One line per command through its run means, each run a dot. A run
+    stopped at the time limit is an open triangle, one killed for want of
+    memory a cross, each where it ended and joined dotted."""
     for (tool, task), r in rows.groupby(["tool", "task"], sort=False):
         colour, variant = HUE[tool], "external" in task
         ok = r[r["status"] == "ok"]
@@ -198,13 +204,16 @@ def scaling(ax, rows, value="wall_s", names=None):
         ax.plot(mean.index, mean.values, color=colour, ls="--" if variant else "-",
                 marker="o", ms=5, mfc=SURFACE if variant else colour, mec=colour, label=name)
         ax.scatter(ok["contigs"], ok[value], s=10, color=colour, alpha=0.35, lw=0, zorder=3)
-        stopped = r[r["status"] == "timeout"]
-        if len(stopped) and value == "wall_s":
-            x, y = stopped["contigs"].iloc[-1], stopped[value].iloc[-1]
-            ax.scatter([x], [y], marker="^", s=60, facecolors=SURFACE, edgecolors=colour, lw=1.5, zorder=4)
+        for status, marker, note in (("timeout", "^", "time limit"), ("oom", "X", "out of memory")):
+            ended = r[r["status"] == status]
+            if not len(ended):
+                continue
+            x, y = ended["contigs"].iloc[-1], ended[value].iloc[-1]
+            ax.scatter([x], [y], marker=marker, s=60, facecolors=SURFACE if marker == "^" else colour,
+                       edgecolors=colour, lw=1.5, zorder=4)
             if len(mean):
                 ax.plot([mean.index[-1], x], [mean.values[-1], y], color=colour, ls=":", lw=1.5)
-            ax.annotate("time limit", (x, y), xytext=(0, 9), textcoords="offset points",
+            ax.annotate(note, (x, y), xytext=(0, 9), textcoords="offset points",
                         ha="center", color=INK2, fontsize=8)
     contig_axis(ax)
 ```
@@ -368,7 +377,7 @@ show(both[["measure", "tool", "task", *[d for d in DATASETS if d in both.columns
 
 ```{python}
 #| label: fig-create
-#| fig-cap: "Creating a map from pairs: wall clock (left) and peak memory (right) against the number of contigs. Each run is a dot and the line joins the means; an open triangle is a run stopped at the time limit."
+#| fig-cap: "Creating a map from pairs: wall clock (left) and peak memory (right) against the number of contigs. Each run is a dot and the line joins the means; an open triangle is a run stopped at the time limit, a cross one killed for want of memory, each placed where it ended."
 #| code-fold: true
 t = timings()
 rows = t[t["section"] == "create"]
@@ -391,7 +400,7 @@ same = []
 for ds in DATASETS:
     row = {"dataset": ds}
     for tool, path in (("cooler", MAPS / f"{ds}.cool"), ("metacooler", MAPS / f"{ds}.metacool")):
-        if path.exists() and not timings().query(f"section == 'create' and dataset == '{ds}' and tool == '{tool}'")["status"].eq("timeout").any():
+        if path.exists() and not timings().query(f"section == 'create' and dataset == '{ds}' and tool == '{tool}'")["status"].isin(["timeout", "oom"]).any():
             with h5py.File(path, "r") as f:
                 row[f"{tool} nnz"], row[f"{tool} sum"] = int(f.attrs["nnz"]), int(f.attrs["sum"])
     same.append(row)
@@ -457,7 +466,7 @@ show(wide("convert"))
 
 `cooler zoomify` and `metacooler zoomify`, to the same resolutions. Each coarser level is another
 `cooler.create`, so cooler pays the per-contig cost once per level. Where cooler could not build
-the base map in time, its pyramid is not attempted.
+the base map, its pyramid is not attempted.
 
 ```{python}
 #| label: zoomify
@@ -466,8 +475,8 @@ source bench.sh
 for ds in $DATASETS; do
     bench zoomify "$ds" metacooler zoomify "$SCRATCH/$ds.mmetacool" -- \
         metacooler zoomify "$MAPS/$ds.metacool" -r "$ZOOMS" -o "$SCRATCH/$ds.mmetacool"
-    if timed_out create "$ds" cooler "cload pairs"; then
-        skip zoomify "$ds" cooler zoomify "cooler cload pairs reached the time limit on $ds"
+    if unfinished create "$ds" cooler "cload pairs"; then
+        skip zoomify "$ds" cooler zoomify "cooler cload pairs did not finish on $ds"
         continue
     fi
     bench zoomify "$ds" cooler zoomify "$SCRATCH/$ds.mcool" -- \
@@ -654,7 +663,7 @@ show(check)
 
 ```{python}
 #| label: fig-commands
-#| fig-cap: "Every timed command against the number of contigs, cooler in orange, metacooler in blue; an open triangle is a run stopped at the time limit."
+#| fig-cap: "Every timed command against the number of contigs, cooler in orange, metacooler in blue; an open triangle is a run stopped at the time limit, a cross one killed for want of memory."
 #| code-fold: true
 t = timings()
 PANELS = [
@@ -697,25 +706,34 @@ FOLDS = [
 
 
 def fold(section, cooler_task, metacooler_task, ds):
-    """cooler's seconds over metacooler's, and whether cooler's are a lower bound."""
+    """cooler's seconds over metacooler's, and how cooler's run ended:
+    "ok", "timeout" (the ratio is then a lower bound) or "oom" (no ratio)."""
     pick = t[(t["section"] == section) & (t["dataset"] == ds)]
     c = pick[(pick["tool"] == "cooler") & (pick["task"] == cooler_task)]
     m = pick[(pick["tool"] == "metacooler") & (pick["task"] == metacooler_task) & (pick["status"] == "ok")]
     if c.empty or m.empty:
         return None
     if (c["status"] == "ok").any():
-        return c.loc[c["status"] == "ok", "wall_s"].mean() / m["wall_s"].mean(), False
+        return c.loc[c["status"] == "ok", "wall_s"].mean() / m["wall_s"].mean(), "ok"
     if (c["status"] == "timeout").any():
-        return c["wall_s"].max() / m["wall_s"].mean(), True
+        return c["wall_s"].max() / m["wall_s"].mean(), "timeout"
+    if (c["status"] == "oom").any():
+        return None, "oom"
     return None
+
+
+def fold_text(f):
+    if f is None:
+        return ""
+    value, ended = f
+    return {"ok": f"{value:,.1f}×", "timeout": f"> {value:,.1f}×"}.get(ended, "cooler out of memory")
 
 
 rows = []
 for section, ct, mt, label in FOLDS:
     row = {"": label}
     for ds in DATASETS:
-        f = fold(section, ct, mt, ds)
-        row[ds] = "" if f is None else f"{'> ' if f[1] else ''}{f[0]:,.1f}×"
+        row[ds] = fold_text(fold(section, ct, mt, ds))
     rows.append(row)
 FOLD_TABLE = pd.DataFrame(rows)
 FOLD_TABLE.to_csv(RESULTS / "speedups.tsv", sep="\t", index=False)
@@ -731,9 +749,20 @@ Filled in from this render; the sentences follow the manuscript draft.
 #| echo: false
 #| output: asis
 def mean_wall(section, ds, tool, task):
+    """Mean wall clock of the runs that finished, and how the command ended."""
     r = t[(t.section == section) & (t.dataset == ds) & (t.tool == tool) & (t.task == task)]
     ok = r[r.status == "ok"]["wall_s"]
-    return (ok.mean(), False) if len(ok) else ((r["wall_s"].max(), True) if (r.status == "timeout").any() else (None, None))
+    if len(ok):
+        return ok.mean(), "ok"
+    for status in ("timeout", "oom"):
+        if (r.status == status).any():
+            return r.loc[r.status == status, "wall_s"].max(), status
+    return None, None
+
+
+def peak(section, ds, tool, task):
+    r = t[(t.section == section) & (t.dataset == ds) & (t.tool == tool) & (t.task == task)]
+    return r["peak_mb"].max() / 1024
 
 
 def human(s):
@@ -742,7 +771,7 @@ def human(s):
 
 cooler_v, mc_v = version("cooler"), version("metacooler")
 lines = []
-finished = [ds for ds in DATASETS if mean_wall("create", ds, "cooler", "cload pairs")[1] is False]
+finished = [ds for ds in DATASETS if mean_wall("create", ds, "cooler", "cload pairs")[1] == "ok"]
 if finished:
     ds = finished[-1]
     f, _ = fold("create", "cload pairs", "create pairs", ds)
@@ -753,14 +782,20 @@ if finished:
         f"{human(mean_wall('create', ds, 'cooler', 'cload pairs')[0])}), while also ingesting and indexing "
         f"the /genomes table."
     )
+memory_gb = float(t["memory_gb"].iloc[0]) if "memory_gb" in t and len(t) else float("nan")
 for ds in DATASETS:
-    c, stopped = mean_wall("create", ds, "cooler", "cload pairs")
-    if stopped:
-        m, _ = mean_wall("create", ds, "metacooler", "create pairs")
-        lines.append(
-            f"* At **{CONTIGS[ds]:,} contigs** ({SUMMARY[ds]['genomes']:,} genomes), cooler did not finish "
-            f"within {human(c)}; metacooler took {human(m)}."
-        )
+    c, ended = mean_wall("create", ds, "cooler", "cload pairs")
+    m, _ = mean_wall("create", ds, "metacooler", "create pairs")
+    if ended == "timeout":
+        why = f"did not finish within {human(c)}"
+    elif ended == "oom":
+        why = f"ran out of memory ({memory_gb:.0f} GB) after {human(c)}"
+    else:
+        continue
+    lines.append(
+        f"* At **{CONTIGS[ds]:,} contigs** ({SUMMARY[ds]['genomes']:,} genomes), cooler {why}; "
+        f"metacooler took {human(m)} (peak {peak('create', ds, 'metacooler', 'create pairs'):.1f} GB)."
+    )
 med = RETRIEVAL[RETRIEVAL["query"] == "genome"].groupby(["way", "dataset"])["seconds"].median()
 first, last = DATASETS[0], DATASETS[-1]
 if ("cool", first) in med and ("cool", last) in med:

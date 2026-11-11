@@ -5,7 +5,9 @@
 #
 # runs COMMAND as a fresh process, `reps DATASET` times, each under GNU time
 # and `timeout`, after deleting OUTPUT (the file it writes, '-' for none) and
-# its sidecars; and appends one row per run to $RESULTS/timings.tsv. A run
+# its sidecars; and appends one row per run to $RESULTS/timings.tsv, with its
+# status: ok, timeout (stopped at $TIMEOUT s), oom (killed by the kernel for
+# want of memory) or error. A run
 # that was already timed, and whose output is still there, is not run again
 # (BENCH_REDO=1 forces it), so a page can be re-rendered without re-timing.
 
@@ -64,8 +66,8 @@ bench() {
     fi
     read -r n_done last <<<"$(_done "$key")"
     first=$((n_done + 1))
-    if [[ $last == timeout ]]; then # final: it would only time out again
-        printf '%-44s timed out before (after %s s): not run again\n' "$key" "$TIMEOUT"
+    if [[ $last == timeout || $last == oom ]]; then # final: it would only fail again
+        printf '%-44s did not finish before (%s): not run again\n' "$key" "$last"
         return 0
     fi
     if ((n_done >= n_reps)); then
@@ -75,7 +77,7 @@ bench() {
         fi
         n_reps=$first # its output is gone: one more run to make it again
     fi
-    local log="$LOGS/${key//\//_}" command="$*" rep status wall user sys rss bytes started
+    local log="$LOGS/${key//\//_}" command="$*" rep status signal wall user sys rss bytes started
     command=${command//$'\t'/ }
     command=${command//$'\n'/ }
     for ((rep = first; rep <= n_reps; rep++)); do
@@ -85,11 +87,16 @@ bench() {
         /usr/bin/time -f '%e %U %S %M %x' -o "$log.time" \
             timeout --kill-after=60 "$TIMEOUT" "$@" >"$log.out" 2>"$log.err"
         read -r wall user sys rss status <<<"$(tail -n 1 "$log.time")"
-        # 124: timeout's TERM; 137: its KILL a minute later -- or the OOM killer.
+        # A killed command has no exit status (GNU time's %x reads 0): take
+        # the signal from the line time writes about it, the shell's way.
+        signal=$(sed -n 's/^Command terminated by signal \([0-9]*\).*/\1/p' "$log.time")
+        [[ -n $signal ]] && status=$((128 + signal))
+        # 124: stopped at the time limit. 137: SIGKILL -- timeout's, a minute
+        # past the limit, or, before it, the kernel's out-of-memory killer.
         case $status in
             0) status=ok ;;
             124) status=timeout ;;
-            137) status=$(awk -v w="$wall" -v t="$TIMEOUT" 'BEGIN { print (w >= t ? "timeout" : "error") }') ;;
+            137) status=$(awk -v w="$wall" -v t="$TIMEOUT" 'BEGIN { print (w >= t ? "timeout" : "oom") }') ;;
             *) status=error ;;
         esac
         # A killed run's output is partial; cooler's external sort also leaves
@@ -107,7 +114,7 @@ bench() {
         printf '%-44s run %d/%d  %-7s %8.2f s  %6.0f MB\n' "$key" "$rep" "$n_reps" \
             "$status" "$wall" "$(awk -v k="$rss" 'BEGIN { print k / 1024 }')"
         [[ $status == error ]] && sed 's/^/    | /' "$log.err" | tail -n 15
-        [[ $status == ok ]] || break # a timeout or a failure is not repeated
+        [[ $status == ok ]] || break # a timeout, an OOM or a failure is not repeated
     done
     # Outputs under $SCRATCH are only timed, not used: drop them.
     [[ $output == "$SCRATCH"/* ]] && rm -rf "$output" "$output".* "${output%.*}.ps.tsv"
@@ -124,8 +131,10 @@ skip() {
     printf '%-44s skipped: %s\n' "$section/$dataset/$tool/$task" "$reason"
 }
 
-# Whether a command's last run in the table timed out.
-timed_out() { [[ $(_done "$1/$2/$3/$4" | cut -d' ' -f2) == timeout ]]; }
+# Whether a command's last run in the table did not finish: it reached the
+# time limit (timeout) or ran out of memory (oom).
+unfinished() { [[ $(_done "$1/$2/$3/$4" | cut -d' ' -f2) =~ ^(timeout|oom)$ ]]; }
+timed_out() { unfinished "$@"; }
 
 # Read files once, untimed, so that no run is the one paying the disk.
 warm() { cat "$@" >/dev/null; }
