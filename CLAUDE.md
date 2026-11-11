@@ -103,4 +103,5 @@ src/metacooler/
 
 - `docs/cli.md` — **the** CLI reference (every command, options, and the API entry point each maps to). This is the single source of truth; `COMMANDS.md` was a competing, drifted copy and has been deleted.
 - `docs/format.md` — the on-disk format specification.
+- `benchmarks/` — metacooler vs cooler, timed from the CLI (`benchmarks.qmd`, rendered by `.github/workflows/benchmarks.yml` on `v*` tags and on demand; see its README). Its datasets come from `simulate.py` and are deterministic per `GENERATOR_VERSION` — bump it whenever the model or a preset changes, since the workflow caches them in a `benchmark-data-v<N>` release.
 - `reviewed/` — dated code-review notes from prior passes. Gitignored, so it exists only in a maintainer's local checkout.

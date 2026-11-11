@@ -369,6 +369,13 @@
 - Python 3.13 and 3.14 are supported and tested. A `dependency-bounds` CI job
   runs the suite at the lowest and the newest versions every dependency range
   allows, and `tests/data/cli_tests.sh` runs in CI.
+- Benchmarks against cooler: `benchmarks/benchmarks.qmd` times both tools from
+  the command line on four reproducible synthetic metagenomes (10³ to 2 × 10⁶
+  contigs): creating a map from pairs, converting, zoomifying, querying a
+  contig, a genome or a genome pair, and genome-level aggregation. The
+  `benchmarks` workflow renders it for every release tag and on demand,
+  attaches the page and its TSV tables to the release, and keeps the datasets
+  in a `benchmark-data-v<N>` release.
 
 ---
 
