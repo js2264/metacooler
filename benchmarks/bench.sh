@@ -134,7 +134,6 @@ skip() {
 # Whether a command's last run in the table did not finish: it reached the
 # time limit (timeout) or ran out of memory (oom).
 unfinished() { [[ $(_done "$1/$2/$3/$4" | cut -d' ' -f2) =~ ^(timeout|oom)$ ]]; }
-timed_out() { unfinished "$@"; }
 
 # Read files once, untimed, so that no run is the one paying the disk.
 warm() { cat "$@" >/dev/null; }

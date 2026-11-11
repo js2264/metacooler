@@ -87,6 +87,7 @@ datasets; `retrieval.py` times queries in-process. A second render re-uses runs 
 #| code-fold: true
 #| code-summary: "Setup: paths, colours, table and figure helpers"
 import json
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -138,6 +139,13 @@ def timings():
     return t
 
 
+def finished(section, dataset, tool, task):
+    """Whether a command's last run finished, and so left its output to check."""
+    t = timings()
+    runs = t[(t["section"] == section) & (t["dataset"] == dataset) & (t["tool"] == tool) & (t["task"] == task)]
+    return len(runs) > 0 and runs["status"].iloc[-1] == "ok"
+
+
 def cell(rows, value="wall_s", fmt="{:,.1f}"):
     """Mean ± sd over the runs that finished; else what became of the command."""
     ok = rows.loc[rows["status"] == "ok", value]
@@ -147,9 +155,9 @@ def cell(rows, value="wall_s", fmt="{:,.1f}"):
     if last["status"] == "timeout":
         return f"> {last['wall_s']:,.0f} (time limit)" if value == "wall_s" else "–"
     if last["status"] == "oom":
-        if value in ("wall_s", "peak_mb"):
-            return f"out of memory at {fmt.format(last[value])}"
-        return "–"
+        if value == "wall_s":
+            return f"out of memory after {last[value]:,.0f} s"
+        return f"out of memory at {fmt.format(last[value])}" if value == "peak_mb" else "–"
     return {"skipped": "not run", "error": "FAILED"}.get(last["status"], last["status"])
 
 
@@ -396,23 +404,23 @@ file's own attributes.
 ```{python}
 #| label: tbl-same-contacts
 #| code-fold: true
+MADE_BY = {"cooler": ("cload pairs", "cool"), "metacooler": ("create pairs", "metacool")}
 same = []
 for ds in DATASETS:
-    row = {"dataset": ds}
-    for tool, path in (("cooler", MAPS / f"{ds}.cool"), ("metacooler", MAPS / f"{ds}.metacool")):
-        if path.exists() and not timings().query(f"section == 'create' and dataset == '{ds}' and tool == '{tool}'")["status"].isin(["timeout", "oom"]).any():
-            with h5py.File(path, "r") as f:
-                row[f"{tool} nnz"], row[f"{tool} sum"] = int(f.attrs["nnz"]), int(f.attrs["sum"])
+    row, held = {"dataset": ds}, {}
+    for tool, (task, ext) in MADE_BY.items():
+        if finished("create", ds, tool, task):  # else the map below is not this tool's
+            with h5py.File(MAPS / f"{ds}.{ext}", "r") as f:
+                held[tool] = int(f.attrs["nnz"]), int(f.attrs["sum"])
+            row[f"{tool} nnz"], row[f"{tool} sum"] = held[tool]
+    missing = [tool for tool in MADE_BY if tool not in held]
+    row["identical"] = (
+        f"{' and '.join(missing)} did not finish" if missing
+        else "yes" if held["cooler"] == held["metacooler"] else "NO"
+    )
     same.append(row)
 same = pd.DataFrame(same)
-if {"cooler nnz", "metacooler nnz"} <= set(same.columns):
-    both = same["cooler nnz"].notna()
-    same["identical"] = np.where(
-        both,
-        np.where((same["cooler nnz"] == same["metacooler nnz"]) & (same["cooler sum"] == same["metacooler sum"]), "yes", "NO"),
-        "cooler did not finish",
-    )
-    assert not (same["identical"] == "NO").any(), "cooler and metacooler disagree on the contacts"
+assert not (same["identical"] == "NO").any(), "cooler and metacooler disagree on the contacts"
 show(same, **{c: "{:,.0f}" for c in same.columns if c.endswith(("nnz", "sum"))})
 ```
 
@@ -540,12 +548,19 @@ def pixels(path):
 agree = []
 for ds in DATASETS:
     for name, file in (("contig", "contig"), ("genome", "genome"), ("genome pair", "pair")):
-        c = pixels(QUERIES / f"{ds}.cooler.{file}.tsv")
-        m = pixels(QUERIES / f"{ds}.metacooler.{file}.tsv")
-        agree.append({"dataset": ds, "query": name, "pixels": f"{m[0]:,}", "contacts": f"{m[1]:,}",
-                      "same as cooler": "yes" if c == m else "NO"})
+        got = {tool: pixels(QUERIES / f"{ds}.{tool}.{file}.tsv")
+               for tool in ("metacooler", "cooler") if finished("query", ds, tool, name)}
+        missing = [tool for tool in ("cooler", "metacooler") if tool not in got]
+        n, total = next(iter(got.values()), (None, None))
+        agree.append({
+            "dataset": ds, "query": name,
+            "pixels": "–" if n is None else f"{n:,}",
+            "contacts": "–" if total is None else f"{total:,}",
+            "same as cooler": f"{' and '.join(missing)} did not finish" if missing
+                              else "yes" if got["cooler"] == got["metacooler"] else "NO",
+        })
 agree = pd.DataFrame(agree)
-assert (agree["same as cooler"] == "yes").all(), "the two tools returned different pixels"
+assert not (agree["same as cooler"] == "NO").any(), "the two tools returned different pixels"
 display(show(wide("query")))
 show(agree.pivot(index="query", columns="dataset", values="pixels").reindex(columns=DATASETS).reset_index())
 ```
@@ -575,7 +590,7 @@ for ds in $DATASETS; do
     /usr/bin/time -f "$ds: %e s, %M KB" python retrieval.py --dataset "$ds" \
         --cool "$MAPS/$ds.cool" --metacool "$MAPS/$ds.metacool" \
         --contigs "$DATA/$ds/contigs.tsv" --sizes "$DATA/$ds/contigs.sizes" \
-        -o "$RESULTS/retrieval.$ds.tsv"
+        -o "$RESULTS/retrieval.$ds.tsv" || echo "$ds: retrieval.py failed"
 done
 ```
 
@@ -584,7 +599,8 @@ done
 #| fig-cap: "Query latency in-process, against the number of contigs: the time to be ready for a first query (left), then the median latency of a query, with its interquartile range over the ten queries."
 #| code-fold: true
 RETRIEVAL = pd.concat(
-    [pd.read_csv(RESULTS / f"retrieval.{ds}.tsv", sep="\t") for ds in DATASETS], ignore_index=True
+    [pd.read_csv(f, sep="\t") for ds in DATASETS if (f := RESULTS / f"retrieval.{ds}.tsv").exists()],
+    ignore_index=True,
 )
 RETRIEVAL.to_csv(RESULTS / "retrieval.tsv", sep="\t", index=False)
 WAYS = {"cool": "cool + binning table", "metacooler": "MetaCooler API", "index": "metacool indexes (h5py)"}
@@ -650,11 +666,19 @@ def edges(path):
 
 check = []
 for ds in DATASETS:
-    c, m = (edges(QUERIES / f"{ds}.{tool}.network.tsv") for tool in ("cooler", "metacooler"))
-    check.append({"dataset": ds, "edges": f"{len(m):,}", "contacts": f"{m.sum():,}",
-                  "same as cooler": "yes" if c.sort_index().equals(m.sort_index()) else "NO"})
+    nets = {tool: edges(QUERIES / f"{ds}.{tool}.network.tsv").sort_index()
+            for tool in ("metacooler", "cooler") if finished("aggregate", ds, tool, "genome network")}
+    missing = [tool for tool in ("cooler", "metacooler") if tool not in nets]
+    net = next(iter(nets.values()), None)
+    check.append({
+        "dataset": ds,
+        "edges": "–" if net is None else f"{len(net):,}",
+        "contacts": "–" if net is None else f"{net.sum():,}",
+        "same as cooler": f"{' and '.join(missing)} did not finish" if missing
+                          else "yes" if nets["cooler"].equals(nets["metacooler"]) else "NO",
+    })
 check = pd.DataFrame(check)
-assert (check["same as cooler"] == "yes").all(), "the two networks differ"
+assert not (check["same as cooler"] == "NO").any(), "the two networks differ"
 display(show(wide("aggregate")))
 show(check)
 ```
@@ -771,9 +795,9 @@ def human(s):
 
 cooler_v, mc_v = version("cooler"), version("metacooler")
 lines = []
-finished = [ds for ds in DATASETS if mean_wall("create", ds, "cooler", "cload pairs")[1] == "ok"]
-if finished:
-    ds = finished[-1]
+cooler_built = [ds for ds in DATASETS if mean_wall("create", ds, "cooler", "cload pairs")[1] == "ok"]
+if cooler_built:
+    ds = cooler_built[-1]
     f, _ = fold("create", "cload pairs", "create pairs", ds)
     lines.append(
         f"* metacooler {mc_v} creates metacool files **{f:.0f}-fold** faster than cooler v{cooler_v} "
