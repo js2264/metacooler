@@ -128,6 +128,54 @@ metacooler merge --output assembly_2_1kb.metacool assembly_2_rep1_1kb.metacool a
 metacooler merge --output assembly_2_DpnII.metacool assembly_2_rep1_DpnII.metacool assembly_2_rep2_DpnII.metacool
 
 # ================================================================================
+## reassign
+# ================================================================================
+
+## A reassignment is a relabelling: the pixel table is identical, whichever path
+## is taken, so a `dump -t pixels` of the source and of every output must match.
+metacooler dump -t pixels assembly_1_rep1_1kb.metacool > reassign_pixels_source.tsv
+metacooler dump -t bins assembly_1_rep1_1kb.metacool > reassign_bins_source.tsv
+metacooler dump -t contigs assembly_1_rep1_1kb.metacool > reassign_contigs_source.tsv
+metacooler dump -t genomes assembly_1_rep1_1kb.metacool > reassign_genomes_source.tsv
+
+## Incremental (--missing keep, the default): only the named contigs move.
+printf 'contig_name\tgenome_name\ncontig_1_000\tMAG_02\n' > reassign_one.tsv
+metacooler reassign assembly_1_rep1_1kb.metacool --contigs reassign_one.tsv -o reassign_one.metacool
+metacooler check reassign_one.metacool
+metacooler dump -t genomes reassign_one.metacool > reassign_one_genomes.tsv
+assert_differs "reassign moved a contig" reassign_genomes_source.tsv reassign_one_genomes.tsv
+
+## --layout keep never re-orders, so the bins are untouched and the file records
+## contig-ordering="custom" (it can no longer claim to be genome-grouped).
+metacooler reassign assembly_1_rep1_1kb.metacool --contigs reassign_one.tsv --layout keep -o reassign_keep.metacool
+metacooler check reassign_keep.metacool
+metacooler attrs reassign_keep.metacool | grep contig-ordering
+metacooler dump -t bins reassign_keep.metacool > reassign_keep_bins.tsv
+assert_identical "reassign --layout keep leaves /bins alone" reassign_bins_source.tsv reassign_keep_bins.tsv
+
+## Whatever the layout, no contact is created, destroyed or moved between bins.
+metacooler dump -t pixels reassign_keep.metacool > reassign_keep_pixels.tsv
+assert_identical "reassign preserves the pixel table" reassign_pixels_source.tsv reassign_keep_pixels.tsv
+
+## The creation table, re-applied wholesale, is a no-op on the assignment — a
+## full round trip through the re-ordering path.
+metacooler reassign assembly_1_rep1_1kb.metacool --contigs ../contigs_table_1.tsv --missing unbinned -o reassign_roundtrip.metacool
+metacooler dump -t contigs reassign_roundtrip.metacool > reassign_roundtrip_contigs.tsv
+assert_identical "re-applying the creation table changes nothing" reassign_contigs_source.tsv reassign_roundtrip_contigs.tsv
+
+## In place, on a copy: allowed only because this reassignment moves no contig.
+cp assembly_1_rep1_1kb.metacool reassign_inplace.metacool
+metacooler reassign reassign_inplace.metacool --contigs reassign_one.tsv --layout keep --inplace
+metacooler check reassign_inplace.metacool
+
+## Expected errors: a table for another assembly, and --inplace when the layout
+## has to be restored.
+printf 'contig_name\tgenome_name\nnot_a_contig\tMAG_02\n' > reassign_wrong.tsv
+metacooler reassign assembly_1_rep1_1kb.metacool --contigs reassign_wrong.tsv -o reassign_wrong.metacool || echo "  (expected: no contig name matches this file)"
+cp assembly_1_rep1_1kb.metacool reassign_inplace_bad.metacool
+metacooler reassign reassign_inplace_bad.metacool --contigs reassign_one.tsv --layout genome-then-length --inplace || echo "  (expected: --inplace cannot re-order contigs)"
+
+# ================================================================================
 ## info/ls/tree/attrs
 # ================================================================================
 

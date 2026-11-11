@@ -140,6 +140,26 @@
   which the docs spell out. Exposed as `metacooler.collect`. See
   [`collect`](cli.md#collect) and the new guide,
   [Collecting single-genome cools](guides/collect.md).
+- **`reassign`**: re-attribute the contigs of an existing map to genomes from a
+  new contig-to-genome table — a re-binning, a curation pass, a merge of two
+  MAGs — without re-binning a pair. Every count is kept; `/genomes` is rebuilt
+  from the new assignment (genomes created and emptied, every `genome_id`
+  renumbered, `length`/`n_contigs`/`n_bins` recomputed). Under a genome-grouped
+  `contig-ordering` a moved contig breaks the layout `genome_offset` and
+  `genome_extent` rely on, so `--layout auto` re-groups such a file (bins
+  permuted, pixels remapped and re-sorted, balancing weights carried) and only
+  relabels any other, skipping the rewrite when the new grouping reproduces the
+  old order; `--layout keep` never moves a row and records
+  `contig-ordering="custom"`, a new value `validate()` does not hold to a
+  grouping. A relabel copies the file and rewrites four datasets, so it can also
+  run `--inplace`. `--missing keep|unbinned` makes the table an incremental edit
+  or authoritative; neither drops a contig. The QC block is recomputed (or, with
+  `--no-qc`, dropped), per-genome metadata is carried with a warning naming the
+  genomes whose contig set changed, and a table matching no contig is refused.
+  A `square` map is only ever relabelled, and a `collect`ed map's genomes,
+  contiguous although `cool` does not promise it, are named in a warning if the
+  new assignment scatters them. Exposed as `metacooler.reassign`. See
+  [`reassign`](cli.md#reassign).
 - **`qc`**: contact-quality statistics — where a library's contacts actually
   land. Every contact is classified into one of four categories
   (`intra_contig_short` / `intra_contig_long`, split at `--threshold`, default

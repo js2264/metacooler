@@ -65,6 +65,7 @@ class TestInit:
             "from_cool",
             "collect",
             # transforms and readers
+            "reassign",
             "extract",
             "flatten",
             "merge",

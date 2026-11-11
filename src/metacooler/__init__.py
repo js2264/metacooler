@@ -25,6 +25,7 @@ __all__ = [
     "from_cool",
     "collect",
     # transforms and readers
+    "reassign",
     "extract",
     "flatten",
     "merge",
@@ -81,6 +82,10 @@ def __getattr__(name: str) -> object:
         from metacooler.io.create import from_pairs as _from_pairs
 
         return _from_pairs
+    if name == "reassign":
+        from metacooler.io.reassign import reassign as _reassign
+
+        return _reassign
     if name == "from_cool":
         from metacooler.io.create import from_cool as _from_cool
 
