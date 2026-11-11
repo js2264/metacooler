@@ -146,11 +146,11 @@ def finished(section, dataset, tool, task):
     return len(runs) > 0 and runs["status"].iloc[-1] == "ok"
 
 
-def cell(rows, value="wall_s", fmt="{:,.1f}"):
+def cell(rows, value="wall_s", fmt="{:,.1f}", spread=True):
     """Mean ± sd over the runs that finished; else what became of the command."""
     ok = rows.loc[rows["status"] == "ok", value]
     if len(ok):
-        return fmt.format(ok.mean()) + (f" ± {fmt.format(ok.std())}" if len(ok) > 1 else "")
+        return fmt.format(ok.mean()) + (f" ± {fmt.format(ok.std())}" if spread and len(ok) > 1 else "")
     last = rows.iloc[-1]
     if last["status"] == "timeout":
         return f"> {last['wall_s']:,.0f} (time limit)" if value == "wall_s" else "–"
@@ -161,13 +161,13 @@ def cell(rows, value="wall_s", fmt="{:,.1f}"):
     return {"skipped": "not run", "error": "FAILED"}.get(last["status"], last["status"])
 
 
-def wide(section, value="wall_s", fmt="{:,.1f}"):
+def wide(section, value="wall_s", fmt="{:,.1f}", spread=True):
     """One row per command, one column per dataset."""
     t = timings()
     t = t[t["section"] == section]
     keys = ["tool", "task", "dataset"]
     cells = pd.DataFrame(
-        [(*k, cell(g, value, fmt)) for k, g in t.groupby(keys, sort=False)],
+        [(*k, cell(g, value, fmt, spread)) for k, g in t.groupby(keys, sort=False)],
         columns=[*keys, "cell"],
     )
     out = cells.pivot(index=["tool", "task"], columns="dataset", values="cell")
@@ -240,7 +240,8 @@ def scaling(ax, rows, value="wall_s", names=None):
 #| label: settings
 %%bash
 source bench.sh
-echo "datasets: $DATASETS · bin size: $BINSIZE bp · zoom levels: $ZOOMS · time limit: $TIMEOUT s per run"
+echo "datasets: $DATASETS · bin size: $BINSIZE bp · zoom levels: $ZOOMS"
+echo "time limit: $TIMEOUT s per run"
 for ds in $DATASETS; do printf '  %-3s %d run(s) per command\n' "$ds" "$(reps "$ds")"; done
 metacooler --version
 cooler --version
@@ -273,9 +274,9 @@ map and L that of a human gut sample's, in genomes, contigs, bins and contacts.
 %%bash
 source bench.sh
 for ds in $DATASETS; do  # fetched, made earlier, or made now
-    python simulate.py --preset "$ds" --outdir "$DATA/$ds" --keep
+    python simulate.py --preset "$ds" --outdir "$DATA/$ds" --keep | sed "s|$WORK/||"
 done
-du -sh "$DATA"/*
+cd "$WORK" && du -sh data/*
 ```
 
 ```{python}
@@ -385,7 +386,7 @@ show(wide("create"))
 #| tbl-cap: "Creating a map: peak memory (MB, largest process) and file size (MB)."
 #| code-fold: true
 memory = wide("create", "peak_mb", "{:,.0f}").assign(measure="peak memory (MB)")
-size = wide("create", "output_mb", "{:,.0f}").assign(measure="file (MB)")
+size = wide("create", "output_mb", "{:,.0f}", spread=False).assign(measure="file (MB)")
 both = pd.concat([memory, size])
 both = both[~both["task"].str.contains("external")]
 show(both[["measure", "tool", "task", *[d for d in DATASETS if d in both.columns]]])
@@ -402,7 +403,7 @@ scaling(left, rows)
 seconds_axis(left)
 scaling(right, rows, "peak_gb")
 log_y(right, "peak memory (GB)")
-left.legend(loc="upper left")
+left.legend(loc="lower right")
 save(fig, "create")
 ```
 
@@ -411,6 +412,7 @@ file's own attributes.
 
 ```{python}
 #| label: tbl-same-contacts
+#| tbl-cap: "The contacts each tool's map holds: pixels (nnz) and their total, from the file's own attributes."
 #| code-fold: true
 MADE_BY = {"cooler": ("cload pairs", "cool"), "metacooler": ("create pairs", "metacool")}
 same = []
@@ -449,7 +451,7 @@ for ds in $DATASETS; do
         metacooler flatten -q "$SCRATCH/$ds.fasta.metacool" -o "$MAPS/$ds.cool"
     rm -f "$SCRATCH/$ds.fasta.metacool" "$SCRATCH/$ds.fasta.ps.tsv"
 done
-ls -l "$MAPS"
+cd "$MAPS" && du -h -- *.cool *.metacool
 ```
 
 ## 2 · Converting between the formats
@@ -522,8 +524,8 @@ pixels are the joined pixels whose two contigs the binning table puts in that MA
 %%bash
 source bench.sh
 in_genome='NR == FNR { if ($2 == g) keep[$1]; next } ($1 in keep) && ($4 in keep)'
-in_pair='NR == FNR { if ($2 == a) A[$1]; if ($2 == b) B[$1]; next }
-         (($1 in A) && ($4 in B)) || (($1 in B) && ($4 in A))'
+in_pair='NR == FNR { if ($2 == a) A[$1]; if ($2 == b) B[$1]; next }'
+in_pair+=' (($1 in A) && ($4 in B)) || (($1 in B) && ($4 in A))'
 for ds in $DATASETS; do
     d=$DATA/$ds m=$MAPS/$ds q=$QUERIES/$ds
     read -r contig mag a b <<<"$(python retrieval.py --targets --contigs "$d/contigs.tsv" \
@@ -572,7 +574,8 @@ for ds in DATASETS:
 agree = pd.DataFrame(agree)
 assert not (agree["same as cooler"] == "NO").any(), "the two tools returned different pixels"
 display(show(wide("query")))
-show(agree.pivot(index="query", columns="dataset", values="pixels").reindex(columns=DATASETS).reset_index())
+returned = agree.pivot(index="query", columns="dataset", values="pixels").reindex(columns=DATASETS)
+show(returned.rename_axis("pixels returned").reset_index())
 ```
 
 ### In-process
@@ -651,9 +654,9 @@ command for.
 #| label: aggregate
 %%bash
 source bench.sh
-by_genome='NR == FNR { g[$1] = $2; next }
-           { a = g[$1]; b = g[$4]; if (a > b) { t = a; a = b; b = t }; n[a "\t" b] += $7 }
-           END { for (k in n) print k "\t" n[k] }'
+by_genome='NR == FNR { g[$1] = $2; next }'
+by_genome+=' { a = g[$1]; b = g[$4]; if (a > b) { t = a; a = b; b = t }; n[a "\t" b] += $7 }'
+by_genome+=' END { for (k in n) print k "\t" n[k] }'
 for ds in $DATASETS; do
     d=$DATA/$ds m=$MAPS/$ds q=$QUERIES/$ds
     bench aggregate "$ds" cooler "genome network" "$q.cooler.network.tsv" -- bash -o pipefail -c \
@@ -729,6 +732,7 @@ where it could not build the base map.
 
 ```{python}
 #| label: tbl-folds
+#| tbl-cap: "Speed-up: cooler's wall clock over metacooler's."
 #| code-fold: true
 FOLDS = [
     ("create", "cload pairs", "create pairs", "create a map from pairs"),

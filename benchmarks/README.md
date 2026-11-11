@@ -29,7 +29,7 @@ and every table and figure is drawn from that file.
 ```bash
 uv sync && source .venv/bin/activate   # metacooler, cooler and jupyter on PATH
 cd benchmarks
-quarto render benchmarks.qmd                         # the whole ladder: ~3 h, 11 GB RAM at XL
+quarto render benchmarks.qmd                         # the whole ladder: ~4 h on 4 cores, 16 GB RAM
 BENCH_DATASETS="S M" quarto render benchmarks.qmd    # a quick look: minutes
 ```
 
