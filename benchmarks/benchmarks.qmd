@@ -503,8 +503,9 @@ show(wide("zoomify"))
 
 ### From the command line
 
-One contig, one MAG and one pair of MAGs per dataset, picked by `retrieval.py` with a fixed seed.
-cooler serves a contig through its own index (`dump -r`). It has no notion of a genome. So a MAG's
+One contig, one MAG and one pair of MAGs per dataset, picked by `retrieval.py` with a fixed seed
+(the pair in proportion to abundance × length, as the library joins genomes, so that it shares
+contacts). cooler serves a contig through its own index (`dump -r`). It has no notion of a genome. So a MAG's
 pixels are the joined pixels whose two contigs the binning table puts in that MAG, in one pass of
 `awk` over the whole map. metacooler resolves the genome by name (`dump -r`/`-r2`).
 
@@ -517,8 +518,9 @@ in_pair='NR == FNR { if ($2 == a) A[$1]; if ($2 == b) B[$1]; next }
          (($1 in A) && ($4 in B)) || (($1 in B) && ($4 in A))'
 for ds in $DATASETS; do
     d=$DATA/$ds m=$MAPS/$ds q=$QUERIES/$ds
-    read -r contig mag other <<<"$(python retrieval.py --targets --contigs "$d/contigs.tsv" --sizes "$d/contigs.sizes")"
-    echo "$ds: contig $contig · genome $mag · genome pair $mag × $other"
+    read -r contig mag a b <<<"$(python retrieval.py --targets --contigs "$d/contigs.tsv" \
+        --sizes "$d/contigs.sizes" --genomes "$d/genomes.tsv")"
+    echo "$ds: contig $contig · genome $mag · genome pair $a × $b"
     bench query "$ds" cooler contig "$q.cooler.contig.tsv" -- \
         cooler dump -t pixels -r "$contig" -o "$q.cooler.contig.tsv" "$m.cool"
     bench query "$ds" metacooler contig "$q.metacooler.contig.tsv" -- \
@@ -528,9 +530,9 @@ for ds in $DATASETS; do
     bench query "$ds" metacooler genome "$q.metacooler.genome.tsv" -- \
         metacooler dump "$m.metacool" -t pixels -r "$mag" -o "$q.metacooler.genome.tsv"
     bench query "$ds" cooler "genome pair" "$q.cooler.pair.tsv" -- bash -o pipefail -c \
-        "cooler dump -t pixels --join $m.cool | awk -F'\t' -v a=$mag -v b=$other '$in_pair' $d/contigs.tsv - > $q.cooler.pair.tsv"
+        "cooler dump -t pixels --join $m.cool | awk -F'\t' -v a=$a -v b=$b '$in_pair' $d/contigs.tsv - > $q.cooler.pair.tsv"
     bench query "$ds" metacooler "genome pair" "$q.metacooler.pair.tsv" -- \
-        metacooler dump "$m.metacool" -t pixels -r "$mag" -r2 "$other" -o "$q.metacooler.pair.tsv"
+        metacooler dump "$m.metacool" -t pixels -r "$a" -r2 "$b" -o "$q.metacooler.pair.tsv"
 done
 ```
 
@@ -569,7 +571,7 @@ show(agree.pivot(index="query", columns="dataset", values="pixels").reindex(colu
 
 The command line pays for starting Python and opening the file on every call. To see what each
 format costs to answer a query once open, `retrieval.py` asks ten contigs, ten MAGs (≥ 500 kb) and ten MAG
-pairs of each map, three ways, and checks that all three return the same pixels:
+pairs (drawn as above) of each map, three ways, and checks that all three return the same pixels:
 
 * **cool** — the genome-agnostic `.cool` and its binning table: a MAG's contigs by a scan of the
   table, each contig's bins by cooler's `chrom_offset`, its pixels by `bin1_offset`, one row
@@ -590,7 +592,7 @@ for ds in $DATASETS; do
     /usr/bin/time -f "$ds: %e s, %M KB" python retrieval.py --dataset "$ds" \
         --cool "$MAPS/$ds.cool" --metacool "$MAPS/$ds.metacool" \
         --contigs "$DATA/$ds/contigs.tsv" --sizes "$DATA/$ds/contigs.sizes" \
-        -o "$RESULTS/retrieval.$ds.tsv" || echo "$ds: retrieval.py failed"
+        --genomes "$DATA/$ds/genomes.tsv" -o "$RESULTS/retrieval.$ds.tsv" || echo "$ds: retrieval.py failed"
 done
 ```
 
@@ -714,7 +716,8 @@ save(fig, "commands")
 ```
 
 How many times faster metacooler runs than cooler (wall clock, means over runs); `>` where
-cooler hit the time limit, which makes the ratio a lower bound.
+cooler hit the time limit, which makes the ratio a lower bound. cooler's pyramid is not run
+where it could not build the base map.
 
 ```{python}
 #| label: tbl-folds
@@ -730,8 +733,8 @@ FOLDS = [
 
 
 def fold(section, cooler_task, metacooler_task, ds):
-    """cooler's seconds over metacooler's, and how cooler's run ended:
-    "ok", "timeout" (the ratio is then a lower bound) or "oom" (no ratio)."""
+    """cooler's seconds over metacooler's, and how cooler's run ended: "ok",
+    "timeout" (the ratio is then a lower bound), "oom" or "skipped" (no ratio)."""
     pick = t[(t["section"] == section) & (t["dataset"] == ds)]
     c = pick[(pick["tool"] == "cooler") & (pick["task"] == cooler_task)]
     m = pick[(pick["tool"] == "metacooler") & (pick["task"] == metacooler_task) & (pick["status"] == "ok")]
@@ -741,16 +744,24 @@ def fold(section, cooler_task, metacooler_task, ds):
         return c.loc[c["status"] == "ok", "wall_s"].mean() / m["wall_s"].mean(), "ok"
     if (c["status"] == "timeout").any():
         return c["wall_s"].max() / m["wall_s"].mean(), "timeout"
-    if (c["status"] == "oom").any():
-        return None, "oom"
+    for status in ("oom", "skipped"):
+        if (c["status"] == status).any():
+            return None, status
     return None
 
 
 def fold_text(f):
-    if f is None:
-        return ""
-    value, ended = f
-    return {"ok": f"{value:,.1f}×", "timeout": f"> {value:,.1f}×"}.get(ended, "cooler out of memory")
+    match f:
+        case None:
+            return ""
+        case value, "ok":
+            return f"{value:,.1f}×"
+        case value, "timeout":
+            return f"> {value:,.1f}×"
+        case _, "skipped":
+            return "cooler not run"
+        case _:
+            return "cooler out of memory"
 
 
 rows = []
@@ -793,6 +804,23 @@ def human(s):
     return "–" if s is None else (f"{s * 1e3:,.0f} ms" if s < 1 else f"{s:,.1f} s" if s < 120 else f"{s / 60:,.1f} min")
 
 
+def series(values):
+    """'a at 1,000, b at 20,000 and c at 200,000 contigs', from {dataset: text}."""
+    parts = [f"**{v}** at {CONTIGS[ds]:,}" for ds, v in values.items()]
+    if not parts:
+        return "–"
+    return (", ".join(parts[:-1]) + " and " if len(parts) > 1 else "") + parts[-1] + " contigs"
+
+
+def walls(section, tool, task):
+    out = {}
+    for ds in DATASETS:
+        s, ended = mean_wall(section, ds, tool, task)
+        if s is not None:
+            out[ds] = {"timeout": "> ", "oom": "out of memory after "}.get(ended, "") + human(s)
+    return out
+
+
 cooler_v, mc_v = version("cooler"), version("metacooler")
 lines = []
 cooler_built = [ds for ds in DATASETS if mean_wall("create", ds, "cooler", "cload pairs")[1] == "ok"]
@@ -820,34 +848,58 @@ for ds in DATASETS:
         f"* At **{CONTIGS[ds]:,} contigs** ({SUMMARY[ds]['genomes']:,} genomes), cooler {why}; "
         f"metacooler took {human(m)} (peak {peak('create', ds, 'metacooler', 'create pairs'):.1f} GB)."
     )
-med = RETRIEVAL[RETRIEVAL["query"] == "genome"].groupby(["way", "dataset"])["seconds"].median()
+if walls("query", "cooler", "genome"):
+    lines.append(
+        "* With cooler's command line, extracting a single MAG from a genome-agnostic .cool file is a "
+        "linear scan of every pixel (`cooler dump --join`, filtered against the binning table): "
+        f"{series(walls('query', 'cooler', 'genome'))}. `metacooler dump -r <MAG>` takes "
+        f"{series(walls('query', 'metacooler', 'genome'))}."
+    )
+genome_queries = RETRIEVAL[RETRIEVAL["query"] == "genome"]
+med = genome_queries.groupby(["way", "dataset"])["seconds"].median()
 first, last = DATASETS[0], DATASETS[-1]
 if ("cool", first) in med and ("cool", last) in med:
+    cool = genome_queries[genome_queries["way"] == "cool"]
+    per_contig = pd.concat([  # seconds per contig of the MAG queried
+        g["seconds"] / g["target"].map(
+            pd.read_csv(DATA / ds / "contigs.tsv", sep="\t", usecols=["genome_name"])["genome_name"].value_counts()
+        )
+        for ds, g in cool.groupby("dataset")
+    ]).median()
     lines.append(
-        f"* Extracting a single MAG from a genome-agnostic .cool file requires a linear scan of the "
-        f"contig table and scales accordingly, from **{human(med['cool', first])}** at "
-        f"{CONTIGS[first]:,} contigs to **{human(med['cool', last])}** at {CONTIGS[last]:,} "
-        f"(in-process, median of ten MAGs)."
+        "* In-process, through cooler's contig index and a scan of the binning table, a MAG takes "
+        f"{series({ds: human(med['cool', ds]) for ds in DATASETS if ('cool', ds) in med})} "
+        f"(median of ten MAGs each; the slowest single MAG {human(cool['seconds'].max())}): one index "
+        "lookup and one row block per contig, so the cost follows the MAG's contig count, "
+        f"{per_contig * 1e3:.1f} ms per contig, more than the size of the assembly."
     )
     idx = RETRIEVAL[(RETRIEVAL["way"] == "index") & RETRIEVAL["query"].isin(["genome", "genome_pair"])]
+    medians = idx.groupby(["query", "dataset"])["seconds"].median()
     lines.append(
         f"* Read through genome_offset, retrieval stays below **{human(idx['seconds'].max())}** for any "
         f"genome or genome pair across the entire range ({CONTIGS[first]:,} to {CONTIGS[last]:,} contigs, "
-        f"{SUMMARY[first]['genomes']:,} to {SUMMARY[last]['genomes']:,} genomes; median "
-        f"{human(med['index', first])} to {human(med['index', last])})."
+        f"{SUMMARY[first]['genomes']:,} to {SUMMARY[last]['genomes']:,} genomes; medians "
+        f"{human(medians.min())} to {human(medians.max())}; read with h5py, see the in-process section)."
     )
-    if ("metacooler", last) in med:
+    if all(("metacooler", ds) in med for ds in DATASETS):
         lines.append(
-            f"* The MetaCooler API as released takes {human(med['metacooler', first])} to "
-            f"**{human(med['metacooler', last])}** for the same queries: it locates a genome's bins "
-            f"by scanning the bin table rather than through genome_offset."
+            "* The MetaCooler API as released (`pixels_for_genome_pair`) takes "
+            f"{series({ds: human(med['metacooler', ds]) for ds in DATASETS})} for the same MAGs: it finds "
+            "a genome's bins by scanning the whole bin table, and a pair's pixels by reading every pixel "
+            "row between the two genomes, rather than through genome_offset."
         )
 agg, _ = mean_wall("aggregate", last, "metacooler", "genome-level .cool")
 if agg is not None:
+    s = SUMMARY[last]
+    net, _ = mean_wall("aggregate", last, "metacooler", "genome network")
+    scan, scan_ended = mean_wall("aggregate", last, "cooler", "genome network")
     lines.append(
         f"* A full genome-by-genome aggregated matrix is computed in **{human(agg)}** for a community of "
-        f"**{SUMMARY[last]['genomes']:,} genomes** ({CONTIGS[last]:,} contigs, "
-        f"{SUMMARY[last]['pairs'] / 1e6:,.0f} M read pairs; `metacooler aggregate --level genome`)."
+        f"**{s['genomes']:,} genomes** ({s['mags']:,} MAGs and {s['mge_bins']:,} small bins; "
+        f"{CONTIGS[last]:,} contigs, {s['pairs'] / 1e6:,.0f} M read pairs; "
+        f"`metacooler aggregate --level genome`). Its edge list takes {human(net)} "
+        f"(`metacooler network --level genome`), against "
+        f"{'> ' if scan_ended == 'timeout' else ''}{human(scan)} for cooler's scan."
     )
 print("\n".join(lines) if lines else "*Not enough datasets in this render.*")
 ```

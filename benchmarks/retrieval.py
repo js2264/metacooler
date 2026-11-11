@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Time contig, genome and genome-pair queries in-process, three ways.
 
-    python retrieval.py --cool M.cool --metacool M.metacool --contigs contigs.tsv
+    python retrieval.py --cool M.cool --metacool M.metacool \
+        --contigs contigs.tsv --sizes contigs.sizes --genomes genomes.tsv
 
 One query is one contact block, returned as the stored (upper-triangle) pixels:
 a contig against itself, a genome against itself, or two genomes against each
@@ -167,8 +168,14 @@ class API:
         return self._sum(self.mc.pixels_for_genome_pair(a, b))
 
 
-def pick_queries(table, sizes, n, seed):
-    """``n`` genomes of at least 500 kb, one of their contigs, and ``n`` pairs."""
+def pick_queries(table, sizes, abundance, n, seed):
+    """``n`` genomes of at least 500 kb, one contig of each, and ``n`` pairs.
+
+    The genomes are drawn uniformly. The pairs are drawn in proportion to
+    abundance x length, as the simulated library joins two genomes, so that a
+    pair shares contacts: two MAGs drawn uniformly from a thousand have one in
+    the median, and a query that returns nothing checks nothing.
+    """
     rng = np.random.default_rng(seed)
     t = table.join(sizes, on="contig_name")
     t = t[t["genome_name"] != "__unbinned__"]
@@ -178,7 +185,9 @@ def pick_queries(table, sizes, n, seed):
         mags = length.sort_values().index[-n:].to_numpy()
     genomes = rng.choice(mags, size=min(n, len(mags)), replace=False)
     contigs = [rng.choice(t.loc[t["genome_name"] == g, "contig_name"]) for g in genomes]
-    pairs = [tuple(rng.choice(mags, 2, replace=False)) for _ in range(n)]
+    weight = abundance.reindex(mags).to_numpy() * length[mags].to_numpy()
+    weight = weight / weight.sum()
+    pairs = [tuple(rng.choice(mags, 2, replace=False, p=weight)) for _ in range(n)]
     return (
         [("contig", c) for c in contigs]
         + [("genome", g) for g in genomes]
@@ -192,6 +201,9 @@ def main(argv=None):
     parser.add_argument("--metacool", type=Path)
     parser.add_argument("--contigs", required=True, type=Path, help="binning table")
     parser.add_argument("--sizes", required=True, type=Path, help="contig lengths")
+    parser.add_argument(
+        "--genomes", required=True, type=Path, help="genome table, with abundance"
+    )
     parser.add_argument("--dataset", default="")
     parser.add_argument("--queries", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
@@ -199,7 +211,7 @@ def main(argv=None):
     parser.add_argument(
         "--targets",
         action="store_true",
-        help="only print one contig, one genome and another genome, and exit",
+        help="only print one contig, one genome and a genome pair, and exit",
     )
     args = parser.parse_args(argv)
     if not args.targets and not (args.cool and args.metacool):
@@ -209,17 +221,21 @@ def main(argv=None):
     sizes = pd.read_csv(
         args.sizes, sep="\t", header=None, names=["contig_name", "length"]
     ).set_index("contig_name")
-    queries = pick_queries(table, sizes, args.queries, args.seed)
+    abundance = pd.read_csv(args.genomes, sep="\t", index_col="genome_name")[
+        "abundance"
+    ]
+    queries = pick_queries(table, sizes, abundance, args.queries, args.seed)
     if args.targets:
-        contig = next(t for q, t in queries if q == "contig")
-        genome, other = [t for q, t in queries if q == "genome"][:2]
-        print(contig, genome, other)
+        first = {}
+        for query, target in queries:
+            first.setdefault(query, target)
+        print(first["contig"], first["genome"], *first["genome_pair"])
         return
     n_contigs = len(table)
     n_genomes = table.loc[
         table["genome_name"] != "__unbinned__", "genome_name"
     ].nunique()
-    del table, sizes
+    del table, sizes, abundance
 
     rows, answers = [], {}
     paths = {"cool": args.cool, "index": args.metacool, "metacooler": args.metacool}
