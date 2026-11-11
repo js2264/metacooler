@@ -175,13 +175,21 @@ def wide(section, value="wall_s", fmt="{:,.1f}"):
     return out.reindex(columns=[d for d in DATASETS if d in out.columns]).reset_index()
 
 
+def compact(n):
+    """1,000 as 1k, 2,000,000 as 2M: tick labels that fit four panels abreast."""
+    for div, unit in ((1e6, "M"), (1e3, "k")):
+        if n >= div:
+            return f"{n / div:.3g}{unit}"
+    return f"{n:,}"
+
+
 def contig_axis(ax):
     """Datasets along x, at their contig counts."""
     ax.set_xscale("log")
     ax.xaxis.set_minor_locator(NullLocator())
     ax.set_xticks(
         [CONTIGS[d] for d in DATASETS],
-        [f"{d}\n{CONTIGS[d]:,}" for d in DATASETS],
+        [f"{d}\n{compact(CONTIGS[d])}" for d in DATASETS],
     )
     ax.set_xlim(min(CONTIGS.values()) / 2.5, max(CONTIGS.values()) * 2.5)
     ax.set_xlabel("contigs in the assembly")

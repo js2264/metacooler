@@ -7,9 +7,9 @@
 # and `timeout`, after deleting OUTPUT (the file it writes, '-' for none) and
 # its sidecars; and appends one row per run to $RESULTS/timings.tsv, with its
 # status: ok, timeout (stopped at $TIMEOUT s), oom (killed by the kernel for
-# want of memory) or error. A run
-# that was already timed, and whose output is still there, is not run again
-# (BENCH_REDO=1 forces it), so a page can be re-rendered without re-timing.
+# want of memory) or error. A run that was already timed, and whose output is
+# still there, is not run again (BENCH_REDO=1 forces it), so a page can be
+# re-rendered without re-timing.
 
 set -uo pipefail
 
