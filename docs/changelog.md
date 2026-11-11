@@ -270,6 +270,17 @@
 
 ### Fixed
 
+- **`create pairs --sort-strategy external` works on large inputs with cooler
+  < 0.12.** Its pixel chunks reached cooler's unordered writer unsorted, and
+  cooler before 0.12 indexes each chunk as if it were sorted. Once the merge
+  took more than one `mergebuf` epoch (20 M records), the output had
+  out-of-order and duplicated pixels, and `validate()` rejected it at the very
+  end of the run (`bin1_offset disagrees with pixels/bin1_id`), as it did on
+  30 M pairs over 200 k contigs in the benchmarks. `create pairs` past its in-memory
+  budget under `auto`, `create cool` with the external sort, and `reassign`'s
+  regroup path streamed unsorted chunks in the same way. Every unordered write
+  now sorts each chunk that is not sorted already (one vectorised check for
+  those that are).
 - **`MetaCooler.pixels(join=True)` names the contigs.** `chrom1` and `chrom2`
   held contig *ids* (`0`, `1`, …): `/bins/chrom` is a plain integer column in a
   metacool file, and cooler's join reports such a column as ids where

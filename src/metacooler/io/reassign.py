@@ -624,8 +624,8 @@ def _rewrite_regrouped(
             chunksize=chunksize,
         ),
         binsize=binsize,
-        # Chunks are individually sorted but the sequence is not globally
-        # ordered: a permutation moves a late bin pair anywhere.
+        # Neither the chunks nor their sequence are ordered: a permutation
+        # moves a late bin pair anywhere. write_cooler sorts each chunk.
         ordered=False,
         symmetric_upper=True,
         assembly=mc.info.get("assembly") or "unknown",
