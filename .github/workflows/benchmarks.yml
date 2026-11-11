@@ -71,7 +71,7 @@ jobs:
           uv sync --locked
           case "$COOLER" in
             locked) ;;
-            latest) uv pip install --python .venv/bin/python --upgrade cooler ;;
+            latest) uv pip install --python .venv/bin/python --upgrade-package cooler cooler ;;
             *) uv pip install --python .venv/bin/python "cooler==$COOLER" ;;
           esac
           # The notebook's bash cells call `metacooler`, `cooler` and `python`
