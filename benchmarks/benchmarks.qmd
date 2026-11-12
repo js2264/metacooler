@@ -747,7 +747,16 @@ def peak(section, ds, tool, task):
 
 
 def human(s):
-    return "–" if s is None else (f"{s * 1e3:,.0f} ms" if s < 1 else f"{s:,.1f} s" if s < 120 else f"{s / 60:,.1f} min")
+    """Seconds as ms, s or min: 650 ms, 61.3 s, 30 min."""
+    if s is None:
+        return "–"
+    value, unit = (s * 1e3, "ms") if s < 1 else (s, "s") if s < 120 else (s / 60, "min")
+    return f"{value:,.0f} ms" if unit == "ms" else f"{value:,.1f}".removesuffix(".0") + f" {unit}"
+
+
+def times(f):
+    """A fold as the text says it: 5.6-fold, 41-fold."""
+    return f"{f:.1f}" if f < 10 else f"{f:.0f}"
 
 
 def series(values):
@@ -774,7 +783,7 @@ if cooler_built:
     ds = cooler_built[-1]
     f, _ = fold("create", "cload pairs", "create pairs", ds)
     lines.append(
-        f"* metacooler {mc_v} creates metacool files **{f:.0f}-fold** faster than cooler v{cooler_v} "
+        f"* metacooler {mc_v} creates metacool files **{times(f)}-fold** faster than cooler v{cooler_v} "
         f"creates the equivalent .cool file for an assembly of **{CONTIGS[ds]:,} contigs** "
         f"({human(mean_wall('create', ds, 'metacooler', 'create pairs')[0])} against "
         f"{human(mean_wall('create', ds, 'cooler', 'cload pairs')[0])}), while also ingesting and indexing "
