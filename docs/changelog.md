@@ -358,6 +358,35 @@
   helpers (`_aggregate_sparse` / `_aggregate_pixel_stream`) instead of
   duplicating it across call sites.
 
+### Performance
+
+- **Genome and contig retrieval goes through the offset indexes.** A genome
+  resolves to its contigs through `indexes/genome_offset` (or, under a
+  `fasta`/`alpha`/`cool`/`custom` ordering, `/contigs/genome_id`), a contig to
+  its bins through `indexes/chrom_offset`, and a bin range to its pixel rows
+  through `indexes/bin1_offset`; those rows are then read with cooler's own bin
+  and pixel selectors, and nothing scans the bin table or the pixels outside
+  them. `pixels_for_genome_pair`, `genome_bin_ids`, `genome_extent`,
+  `contig_extent`, `bins_for_genome`, `bins_for_contig`, `dump -r/-r2` (long
+  and wide), `dump -t pixels --genomes/--contigs/--filter` and `extract` all use
+  it. On a 200 k-contig map, `dump -t pixels -r <contig>` went from 3.0 s to
+  0.8 s (cooler: 1.0 s) and `pixels_for_genome_pair(g, g)` from 119 ms to
+  3.5 ms. `genome_extent` still raises for a genome that is not contiguous.
+  `extract` of a `symmetric-upper` map now writes in order, without cooler's
+  merge. New public `MetaCooler.genome_contig_ids()` and
+  `MetaCooler.genome_bin_ranges()`.
+- **Opening a file runs only the structural checks.** `MetaCooler()` used to run
+  the whole of `schema.validate()`, O(n_bins), on every open (2.8 s on a
+  2 M-contig map). It now checks format attributes, required groups and
+  columns, column lengths, the `/chroms` link, the count attributes and the
+  length and endpoints of every offset index — O(n_columns) reads.
+  `schema.validate(uri, full=False)` runs that subset; `metacooler validate`,
+  `schema.validate()` and every writer still run the full check. A file
+  cooler cannot decode (non-ASCII names) still fails the open with the named
+  `MetaCoolerFormatError`. `pixels_for_genome_pair` now returns every pixel
+  column, typed, when nothing matches (it returned an untyped three-column
+  frame).
+
 ### Packaging and CI
 
 - The MIT license text ships as `LICENSE` (PEP 639 metadata).

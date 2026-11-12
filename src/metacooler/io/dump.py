@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
-from metacooler.api import MetaCooler
+from metacooler.api import MetaCooler, _merge_ranges, _ranges_to_ids
 from metacooler.io._utils import (
     check_output_path,
     chrom_codes,
     resolve_contig_selection,
 )
-from metacooler.schema import DEFAULT_CHUNKSIZE, DENSE_MATRIX_BIN_LIMIT
+from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -32,6 +33,58 @@ def _decode_chrom(series: pd.Series) -> pd.Series:
     ):
         series = series.str.decode("utf-8")
     return series
+
+
+def _selected_pixels(
+    mc: MetaCooler,
+    valid_bin_ids: np.ndarray | None,
+    range_bounds: tuple[int, int, int, int] | None,
+) -> Iterator[pd.DataFrame]:
+    """Yield the stored pixels a ``dump -t pixels`` selection keeps, in order.
+
+    Only the pixel rows that can match are read, located through
+    ``indexes/bin1_offset``: the row blocks of the two ``--range`` dimensions,
+    or of the selected contigs' bins.  A pixel ``(bin1, bin2)`` is kept when it
+    links the row range to the column range in either orientation, and both its
+    bins are selected.
+
+    Args:
+        mc: Open map.
+        valid_bin_ids: Sorted bins of the ``--genomes``/``--contigs``/
+            ``--filter`` selection, or ``None`` for every bin.
+        range_bounds: ``(i0, i1, j0, j1)`` half-open bin ranges of ``--range``
+            and ``--range2``, or ``None``.
+
+    Yields:
+        Non-empty pixel frames, in file order.
+    """
+    n_bins = mc.shape[0]
+    is_valid: np.ndarray | None = None
+    if valid_bin_ids is not None:
+        is_valid = np.zeros(n_bins, dtype=bool)
+        is_valid[valid_bin_ids] = True
+
+    if range_bounds is not None:
+        i0, i1, j0, j1 = range_bounds
+        rows = _merge_ranges(np.array([i0, j0]), np.array([i1, j1]))
+    elif valid_bin_ids is not None:
+        rows = _merge_ranges(valid_bin_ids, valid_bin_ids + 1)
+    else:
+        rows = np.array([[0, n_bins]], dtype=np.int64)
+
+    def keep(b1: np.ndarray, b2: np.ndarray) -> np.ndarray:
+        mask = np.ones(len(b1), dtype=bool)
+        if range_bounds is not None:
+            i0, i1, j0, j1 = range_bounds
+            mask = ((b1 >= i0) & (b1 < i1) & (b2 >= j0) & (b2 < j1)) | (
+                (b1 >= j0) & (b1 < j1) & (b2 >= i0) & (b2 < i1)
+            )
+        if is_valid is not None:
+            mask &= is_valid[b1] & is_valid[b2]
+        return mask
+
+    selective = range_bounds is not None or is_valid is not None
+    yield from mc._iter_pixel_rows(rows, keep if selective else None)
 
 
 def dump_table(
@@ -163,11 +216,10 @@ def dump_table(
         # Pre-compute filter parameters that are independent of chunk
         valid_bin_ids: np.ndarray | None = None
         if selected_contig_ids is not None:
-            bins = mc.bins()
-            bin_chrom_codes = chrom_codes(bins)
-            valid_bin_ids = np.where(
-                np.isin(bin_chrom_codes, list(selected_contig_ids))
-            )[0]
+            # Through chrom_offset, not the bin table.
+            valid_bin_ids = _ranges_to_ids(
+                mc._contig_bin_ranges(np.array(sorted(selected_contig_ids)))
+            )
 
         range_bounds: tuple[int, int, int, int] | None = None
         if range1 is not None:
@@ -214,31 +266,14 @@ def dump_table(
             local_of_bin[selected_bins] = np.arange(n_sel, dtype=np.int64)
 
             mat = np.zeros((n_sel, n_sel), dtype=np.float64)
-            n_pix = len(mc._clr.pixels())
-            chunksize = DEFAULT_CHUNKSIZE
-            for lo in range(0, n_pix, chunksize):
-                chunk = mc._clr.pixels()[lo : lo + chunksize]
-                if valid_bin_ids is not None:
-                    mask = np.isin(chunk["bin1_id"].values, valid_bin_ids) & np.isin(
-                        chunk["bin2_id"].values, valid_bin_ids
-                    )
-                    chunk = chunk[mask]
-                if range_bounds is not None:
-                    i0, i1, j0, j1 = range_bounds
-                    in_row = chunk["bin1_id"].between(i0, i1 - 1)
-                    in_col = chunk["bin2_id"].between(j0, j1 - 1)
-                    in_row2 = chunk["bin1_id"].between(j0, j1 - 1)
-                    in_col2 = chunk["bin2_id"].between(i0, i1 - 1)
-                    chunk = chunk[(in_row & in_col) | (in_row2 & in_col2)]
-                if not len(chunk):
-                    continue
-                b1 = local_of_bin[chunk["bin1_id"].values.astype(np.int64)]
-                b2 = local_of_bin[chunk["bin2_id"].values.astype(np.int64)]
+            for chunk in _selected_pixels(mc, valid_bin_ids, range_bounds):
+                b1 = local_of_bin[chunk["bin1_id"].to_numpy(dtype=np.int64)]
+                b2 = local_of_bin[chunk["bin2_id"].to_numpy(dtype=np.int64)]
                 keep = (b1 >= 0) & (b2 >= 0)
                 if not keep.any():
                     continue
                 b1, b2 = b1[keep], b2[keep]
-                vals = chunk[weight].values[keep].astype(np.float64)
+                vals = chunk[weight].to_numpy()[keep].astype(np.float64)
                 mat[b1, b2] = vals
                 mat[b2, b1] = vals
             if join:
@@ -283,31 +318,12 @@ def dump_table(
             out_stream = open(out, "w") if out else sys.stdout  # noqa: SIM115
             try:
                 first_chunk = True
-                n_pix = len(mc._clr.pixels())
-                chunksize = DEFAULT_CHUNKSIZE
-                for lo in range(0, n_pix, chunksize):
-                    chunk = mc._clr.pixels()[lo : lo + chunksize]
-                    if valid_bin_ids is not None:
-                        mask = np.isin(
-                            chunk["bin1_id"].values, valid_bin_ids
-                        ) & np.isin(chunk["bin2_id"].values, valid_bin_ids)
-                        chunk = chunk[mask]
-                    if range_bounds is not None:
-                        i0, i1, j0, j1 = range_bounds
-                        in_row = chunk["bin1_id"].between(i0, i1 - 1)
-                        in_col = chunk["bin2_id"].between(j0, j1 - 1)
-                        in_row2 = chunk["bin1_id"].between(j0, j1 - 1)
-                        in_col2 = chunk["bin2_id"].between(i0, i1 - 1)
-                        chunk = chunk[(in_row & in_col) | (in_row2 & in_col2)]
+                for chunk in _selected_pixels(mc, valid_bin_ids, range_bounds):
                     if join:
                         assert ann is not None
-                        if len(chunk):
-                            assert isinstance(chunk, pd.DataFrame)
-                            chunk = cooler.api.annotate(
-                                chunk, ann, replace=True
-                            ).rename(columns={"chrom1": "contig1", "chrom2": "contig2"})
-                        else:
-                            chunk = pd.DataFrame(columns=joined_empty_cols)
+                        chunk = cooler.api.annotate(chunk, ann, replace=True).rename(
+                            columns={"chrom1": "contig1", "chrom2": "contig2"}
+                        )
                     chunk.to_csv(
                         out_stream,
                         sep="\t",
@@ -315,6 +331,14 @@ def dump_table(
                         header=header and first_chunk,
                     )
                     first_chunk = False
+                if first_chunk and header:
+                    # Nothing matched: still honour --header.
+                    empty = (
+                        pd.DataFrame(columns=joined_empty_cols)
+                        if join
+                        else mc._empty_pixels()
+                    )
+                    empty.to_csv(out_stream, sep="\t", index=False, header=True)
             finally:
                 if out:
                     out_stream.close()

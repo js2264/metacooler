@@ -156,10 +156,13 @@ metacooler.extract("gut_T0.metacool", output="MAG_01.cool", genomes=["MAG_01"])
 metacooler.network("gut_T0.metacool", out="genome_network.tsv", level="genome")
 ```
 
-!!! tip "Skipping validation on very large files"
-    `MetaCooler()` validates the file structure on every construction. On a
-    file with hundreds of millions of bins that rescan is noticeable, so there
-    is a fast path — use it only on a file you know to be well-formed:
+!!! tip "What an open checks"
+    `MetaCooler()` checks the file's *structure* on every construction (format
+    attributes, groups, columns, offset index lengths and endpoints), which
+    costs milliseconds at any size. The full O(n_bins) check is
+    `metacooler validate` / `metacooler.schema.validate()`, which every
+    metacooler writer also runs on its output. `validate=False` skips even the
+    structural checks — use it only on a file you know to be well-formed:
 
     ```python
     mc = metacooler.MetaCooler("huge.metacool", validate=False)

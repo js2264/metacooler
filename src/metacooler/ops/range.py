@@ -39,17 +39,19 @@ def parse_metacooler_range(mc: MetaCooler, range_str: str) -> tuple[int, int]:
     """
     label = range_str.split(":")[0]
 
-    genome_names = mc.genomes["name"].tolist()
-    contig_names = mc.contigs["name"].tolist()
+    # Membership through the name -> id maps the open file already holds: the
+    # contig names are only listed in the error message, never scanned.
+    is_genome = label in mc._genome_ids
+    is_contig = label in mc._contig_ids
 
     # A coordinate suffix only makes sense on a contig, so when the label is
     # both (``binnify --level genome`` names each ligated contig after its
     # genome) the suffix decides: "G_a:1-6000" is a contig range, which used to
     # be refused because the genome branch was tried first.
-    if ":" in range_str and label in contig_names:
+    if ":" in range_str and is_contig:
         return mc._clr.extent(range_str)
 
-    if label in genome_names:
+    if is_genome:
         if ":" in range_str:
             raise ValueError(
                 f"Range {range_str!r}: {label!r} is a genome name — coordinate "
@@ -57,7 +59,7 @@ def parse_metacooler_range(mc: MetaCooler, range_str: str) -> tuple[int, int]:
             )
         return mc.genome_extent(label)
 
-    if label in contig_names:
+    if is_contig:
         # Delegate to cooler — handles both "contig" and "contig:start-end"
         return mc._clr.extent(range_str)
 
@@ -68,6 +70,6 @@ def parse_metacooler_range(mc: MetaCooler, range_str: str) -> tuple[int, int]:
 
     raise ValueError(
         f"Range {range_str!r}: {label!r} is not a known genome or contig.\n"
-        f"  Genomes: {_truncate(genome_names)}\n"
-        f"  Contigs: {_truncate(contig_names)}"
+        f"  Genomes: {_truncate(mc.genomes['name'].tolist())}\n"
+        f"  Contigs: {_truncate(mc.chromnames)}"
     )

@@ -263,6 +263,28 @@ def _check_offset_array(
         )
 
 
+def _check_offset_ends(
+    ds: h5py.Dataset, name: str, expected_len: int, total: int
+) -> None:
+    """The O(1) part of :func:`_check_offset_array`: length and both endpoints.
+
+    Reads two elements, not the array, so it is what an open can afford on a
+    file whose ``bin1_offset`` has millions of entries.
+
+    Raises:
+        MetaCoolerFormatError: If the length or an endpoint is wrong.
+    """
+    if len(ds) != expected_len:
+        raise MetaCoolerFormatError(f"{name} length ({len(ds)}) != {expected_len}")
+    if len(ds) == 0:
+        return
+    first, last = int(ds[0]), int(ds[len(ds) - 1])
+    if first != 0 or last != total:
+        raise MetaCoolerFormatError(
+            f"{name} endpoints ({first}, {last}) do not bracket the table (0, {total})"
+        )
+
+
 def _is_text_dtype(dtype: object) -> bool:
     """Return ``True`` for a dtype that can hold text (NumPy, h5py, or pandas)."""
     return getattr(dtype, "kind", "") in ("O", "S", "U") or str(dtype) == "string"
@@ -413,20 +435,29 @@ def is_metacooler(uri: str | Path) -> bool:
         return False
 
 
-def validate(uri: str | Path) -> None:
+def validate(uri: str | Path, *, full: bool = True) -> None:
     """Validate that *uri* is a well-formed ``.metacool`` file.
 
     Performs a structural integrity check: required groups, columns,
     indexes, and cross-count consistency.
 
     Every check is O(n_bins) / O(n_contigs) at worst — the pixel table is
-    never scanned end to end — because this runs on every ``MetaCooler``
-    construction.
+    never scanned end to end.  That is still seconds on a multi-million-contig
+    metagenome, so ``MetaCooler()`` only runs the *structural* subset
+    (``full=False``) on open; ``metacooler validate`` and every writer run the
+    whole thing.
 
     Args:
         uri: Path to the ``.metacool`` file, or a URI of the form
             ``file.mmetacool::entries/entry`` to validate a sub-group inside
             an mmetacool file.
+        full: If ``False``, stop after the checks that cost O(n_columns)
+            reads: format attributes, required groups and columns, equal
+            column lengths, the ``/chroms`` link, the count attributes, and
+            the length and endpoints of every offset index.  Those are what a
+            reader needs before it can trust an index lookup; the O(n_bins)
+            content checks (bin geometry, offset monotonicity, genome tables,
+            names, pixel samples) are skipped.
 
     Raises:
         MetaCoolerFormatError: If any required group, dataset, or attribute
@@ -538,25 +569,6 @@ def validate(uri: str | Path) -> None:
                 f"{link.path!r} {where}"
             )
 
-        # --- name uniqueness ---
-        contig_names = np.array(c["name"])
-        genome_names = np.array(g["name"])
-        if len(np.unique(contig_names)) != n_contigs:
-            raise MetaCoolerFormatError("contig names are not unique")
-        if len(np.unique(genome_names)) != n_genomes:
-            raise MetaCoolerFormatError("genome names are not unique")
-
-        # --- names must be ASCII (cooler compatibility) ---
-        # Without this, a file with an accented contig name passes every other
-        # check here and then raises UnicodeDecodeError the moment cooler opens
-        # it — validate() vouching for a file that cannot be read.
-        violations = ascii_violations(g, c)
-        if violations:
-            raise MetaCoolerFormatError(
-                f"{file_path} holds names cooler cannot decode:\n"
-                + format_ascii_violations(violations)
-            )
-
         # --- attribute consistency ---
         # Every one of these is optional (docs/format.md allows a file written
         # by an older writer to omit them), but must agree with the tables when
@@ -587,10 +599,42 @@ def validate(uri: str | Path) -> None:
                 f"attrs['storage-mode'] must be one of {sorted(STORAGE_MODES)}, "
                 f"got {storage_mode!r}"
             )
+        # --- offset indexes: length and endpoints, read without the body ---
+        for ds_name, expected_len, total in (
+            ("chrom_offset", n_contigs + 1, n_bins),
+            ("bin1_offset", n_bins + 1, n_pixels),
+            ("genome_offset", n_genomes + 1, n_contigs),
+        ):
+            if ds_name not in idx:
+                raise MetaCoolerFormatError(f"indexes/{ds_name} is missing")
+            _check_offset_ends(idx[ds_name], ds_name, expected_len, total)
+
+        if not full:
+            return
+
         if storage_mode == "square":
             logger.warning(
                 "storage-mode='square': skipping the upper-triangle check "
                 "(metacooler writes 'symmetric-upper')"
+            )
+
+        # --- name uniqueness ---
+        contig_names = np.array(c["name"])
+        genome_names = np.array(g["name"])
+        if len(np.unique(contig_names)) != n_contigs:
+            raise MetaCoolerFormatError("contig names are not unique")
+        if len(np.unique(genome_names)) != n_genomes:
+            raise MetaCoolerFormatError("genome names are not unique")
+
+        # --- names must be ASCII (cooler compatibility) ---
+        # Without this, a file with an accented contig name passes every other
+        # check here and then raises UnicodeDecodeError the moment cooler opens
+        # it — validate() vouching for a file that cannot be read.
+        violations = ascii_violations(g, c)
+        if violations:
+            raise MetaCoolerFormatError(
+                f"{file_path} holds names cooler cannot decode:\n"
+                + format_ascii_violations(violations)
             )
 
         # --- contig lengths must be positive ---
@@ -687,8 +731,6 @@ def validate(uri: str | Path) -> None:
         _check_offset_array(chrom_offset, "chrom_offset", n_contigs + 1, n_bins)
         bin1_offset = np.array(idx["bin1_offset"]).astype(np.int64)
         _check_offset_array(bin1_offset, "bin1_offset", n_bins + 1, n_pixels)
-        if "genome_offset" not in idx:
-            raise MetaCoolerFormatError("indexes/genome_offset is missing")
         genome_offset = np.array(idx["genome_offset"]).astype(np.int64)
         _check_offset_array(genome_offset, "genome_offset", n_genomes + 1, n_contigs)
 
