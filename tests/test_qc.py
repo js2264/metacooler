@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 from _cli_output import flat as _flat
 
+import metacooler.qc as qc_engine
 from metacooler.api import MetaCooler
 from metacooler.io.create import from_cool, from_pairs
 from metacooler.ops.qc import qc
@@ -17,6 +18,7 @@ from metacooler.qc import (
     QC_CATEGORIES,
     QC_GENOME_COLUMNS,
     QC_METADATA_KEY,
+    BinMaps,
     ContactQC,
     strip_qc_columns,
     strip_qc_metadata,
@@ -166,6 +168,130 @@ def test_genome_table_rejects_mismatched_names():
 def test_negative_threshold_rejected():
     with pytest.raises(ValueError, match="distance_threshold"):
         ContactQC(n_genomes=1, distance_threshold=-1)
+
+
+# ----------------------------------------------------------------------
+# The fused, blocked tally: the definition's numbers, at any block size
+# ----------------------------------------------------------------------
+def _by_definition(contig1, contig2, genome1, genome2, distance, weights, unbinned):
+    """The four categories spelled out, one masked selection each."""
+    w = np.ones(len(contig1), dtype=np.int64) if weights is None else weights
+    same_contig = contig1 == contig2
+    same_genome = (genome1 == genome2) & (same_contig | (genome1 != unbinned))
+    masks = [
+        same_contig & (distance < 1000),
+        same_contig & (distance >= 1000),
+        ~same_contig & same_genome,
+        ~same_genome,
+    ]
+    totals = np.array([w[m].sum() for m in masks])
+
+    def credit(genome: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        return np.bincount(genome[mask], weights=w[mask].astype(float), minlength=6)
+
+    per_genome = np.stack([credit(genome1, m) for m in masks], axis=1)
+    per_genome[:, 3] += credit(genome2, masks[3])
+    return totals, per_genome
+
+
+def _random_contacts(rng: np.random.Generator, n: int) -> tuple[np.ndarray, ...]:
+    """*n* contacts over 30 contigs in 6 genomes, half of them intra-contig."""
+    genome_of = rng.integers(0, 6, 30)
+    contig1 = rng.integers(0, 30, n)
+    contig2 = np.where(rng.random(n) < 0.5, contig1, rng.integers(0, 30, n))
+    distance = rng.integers(0, 5000, n)
+    return contig1, contig2, genome_of[contig1], genome_of[contig2], distance
+
+
+class TestBlockedTally:
+    @pytest.mark.parametrize("block", [1, 7, 1 << 18])
+    @pytest.mark.parametrize("unbinned", [None, 0])
+    @pytest.mark.parametrize("weights", [None, "int32", "int64", "float64"])
+    def test_matches_the_definition(self, monkeypatch, block, unbinned, weights):
+        monkeypatch.setattr(qc_engine, "_TALLY_BLOCK", block)
+        rng = np.random.default_rng(block)
+        contacts = _random_contacts(rng, 2_000)
+        w = None
+        if weights == "float64":
+            w = rng.random(2_000) * 9
+        elif weights is not None:
+            w = rng.integers(1, 1_000, 2_000).astype(weights)
+        tally = ContactQC(6, distance_threshold=1000, unbinned_genome=unbinned)
+        tally.tally(*contacts, weights=w)
+        totals, per_genome = _by_definition(
+            *contacts, w, -1 if unbinned is None else unbinned
+        )
+        # Exact, floats included: within a (genome, category) cell the fused
+        # bincount adds the same values in the same order as a masked pass.
+        np.testing.assert_array_equal(tally.counts, totals)
+        np.testing.assert_array_equal(tally.per_genome, per_genome)
+
+    def test_float_bits_do_not_depend_on_the_block(self, monkeypatch):
+        """Once float, every chunk is one pass: float addition does not associate."""
+        rng = np.random.default_rng(3)
+        chunks = [
+            (_random_contacts(rng, 1_500), w)
+            for w in (
+                rng.integers(1, 100, 1_500),
+                rng.random(1_500) * 7,
+                rng.integers(1, 100, 1_500),  # integers onto float accumulators
+                None,
+                (rng.random(1_500) * 3).astype(np.float32),
+            )
+        ]
+        tallies = []
+        for block in (1, 1 << 18):
+            monkeypatch.setattr(qc_engine, "_TALLY_BLOCK", block)
+            tally = ContactQC(6, distance_threshold=1000, unbinned_genome=2)
+            for contacts, w in chunks:
+                tally.tally(*contacts, weights=w)
+            tallies.append(tally)
+        blocked, whole = tallies
+        assert blocked.counts.dtype == np.float64
+        assert blocked.counts.tobytes() == whole.counts.tobytes()
+        assert blocked.per_genome.tobytes() == whole.per_genome.tobytes()
+
+    def test_a_block_never_undercuts_the_genome_table(self, monkeypatch):
+        monkeypatch.setattr(qc_engine, "_TALLY_BLOCK", 2)
+        tally = ContactQC(n_genomes=10)
+        assert [len(range(100)[s]) for s in tally._blocks(100)] == [40, 40, 20]
+        assert list(tally._blocks(0)) == []
+        tally._promote_for(np.array([0.5]))
+        assert list(tally._blocks(100)) == [slice(0, 100)]
+
+    def test_an_empty_float_chunk_promotes_nothing(self):
+        """As before: a chunk with no pixel leaves the counts integers."""
+        tally = ContactQC(n_genomes=2)
+        none = np.array([], dtype=np.int64)
+        maps = BinMaps(none, none, none)
+        tally.tally_pixels(none, none, np.array([], dtype=np.float64), maps)
+        assert tally.counts.dtype == np.int64
+        assert tally.summary()["n_contacts"] == 0
+
+    def test_pixels_are_looked_up_block_by_block(self, monkeypatch):
+        monkeypatch.setattr(qc_engine, "_TALLY_BLOCK", 5)
+        rng = np.random.default_rng(4)
+        # 8 contigs of four 1 kb bins, in 3 genomes.
+        contig = np.repeat(np.arange(8), 4)
+        start = np.tile(np.arange(0, 4000, 1000), 8)
+        genome_of_contig = np.array([0, 0, 1, 1, 2, 2, 0, 1])
+        maps = BinMaps(contig, genome_of_contig[contig], start + 500)
+        bin1 = rng.integers(0, 32, 500).astype(np.int32)
+        bin2 = rng.integers(0, 32, 500)
+        counts = rng.integers(1, 9, 500).astype(np.int32)
+        by_pixels = ContactQC(3, distance_threshold=1500, unbinned_genome=2)
+        by_pixels.tally_pixels(bin1, bin2, counts, maps)
+        direct = ContactQC(3, distance_threshold=1500, unbinned_genome=2)
+        direct.tally(
+            maps.contig[bin1],
+            maps.contig[bin2],
+            maps.genome[bin1],
+            maps.genome[bin2],
+            np.abs(maps.mid[bin2] - maps.mid[bin1]),
+            counts,
+        )
+        np.testing.assert_array_equal(by_pixels.counts, direct.counts)
+        np.testing.assert_array_equal(by_pixels.per_genome, direct.per_genome)
 
 
 # ----------------------------------------------------------------------

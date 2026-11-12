@@ -6,18 +6,15 @@ import logging
 from pathlib import Path
 
 import cooler
-import h5py
 import numpy as np
 import pandas as pd
 
 from metacooler.io._utils import (
-    chrom_codes,
     enforce_upper_triangle,
     resolve_contig_selection,
     resolve_count_dtype,
     write_cooler,
 )
-from metacooler.schema import DEFAULT_CHUNKSIZE
 
 logger = logging.getLogger("metacooler")
 
@@ -113,66 +110,53 @@ def _extract_contig_ids(
     output: Path,
     assembly: str = "unknown",
 ) -> None:
-    """Extract bins/pixels for a set of contig IDs and write a cool file."""
-    all_bins = mc.bins()
-    bin_chrom_codes = chrom_codes(all_bins)
+    """Extract bins/pixels for a set of contig IDs and write a cool file.
 
-    # Boolean mask: bins belonging to selected contigs
-    genome_bin_mask = np.isin(bin_chrom_codes, contig_ids)
-    genome_bin_indices = np.where(genome_bin_mask)[0]
+    The selection is resolved to bin ranges through ``indexes/chrom_offset``
+    and its pixels are read by row block through ``indexes/bin1_offset``, so
+    neither the whole bin table nor the pixels outside the selected rows are
+    read.  Renumbering the kept bins in order is monotonic, so a
+    ``symmetric-upper`` source streams out sorted and is written without a
+    merge.
+    """
+    from metacooler.api import _in_ranges
 
-    global_to_local_bin = {
-        int(gbin): local for local, gbin in enumerate(genome_bin_indices)
-    }
-
-    genome_bins = all_bins.iloc[genome_bin_indices].copy()
-    genome_bins_chrom_names = genome_bins["chrom"].values
+    ranges = mc._contig_bin_ranges(np.asarray(sorted(contig_ids), dtype=np.int64))
+    genome_bins = mc._bins_in_ranges(ranges)
+    genome_bin_indices = genome_bins.index.to_numpy(dtype=np.int64)
 
     bins_df = pd.DataFrame(
         {
-            "chrom": genome_bins_chrom_names,
-            "start": genome_bins["start"].values.astype(np.int32),
-            "end": genome_bins["end"].values.astype(np.int32),
+            "chrom": genome_bins["chrom"].values,
+            "start": genome_bins["start"].to_numpy().astype(np.int32),
+            "end": genome_bins["end"].to_numpy().astype(np.int32),
         }
     )
 
     # Preserve the width of the source ``count`` column: a binnified source
     # writes int64 and would silently wrap if narrowed back to int32 here.
     count_dtype = resolve_count_dtype(
-        mc._clr.pixels()[:0]["count"].dtype, context="extract"
+        mc._empty_pixels()["count"].dtype, context="extract"
     )
-
-    genome_bin_set = set(genome_bin_indices.tolist())
-    genome_bin_array = np.array(sorted(genome_bin_set), dtype=np.int64)
-    valid_min, valid_max = genome_bin_array[0], genome_bin_array[-1]
-    chunksize = DEFAULT_CHUNKSIZE
-
-    # Use bin1_offset index to find pixel range for this genome's bins
-    with h5py.File(str(mc.store), "r") as _f:
-        _root = _f[mc._group_path.lstrip("/")] if mc._group_path != "/" else _f
-        bin1_offset = _root["indexes"]["bin1_offset"][:]
-    pix_lo = int(bin1_offset[valid_min])
-    n_pix = len(mc._clr.pixels())
-    pix_hi = (
-        int(bin1_offset[valid_max + 1]) if valid_max + 1 < len(bin1_offset) else n_pix
-    )
+    square = mc.info.get("storage-mode") == "square"
 
     def _pixel_stream():
-        for _i in range(pix_lo, pix_hi, chunksize):
-            chunk = mc._clr.pixels()[_i : _i + chunksize].copy()
-            mask = chunk["bin1_id"].isin(genome_bin_set) & chunk["bin2_id"].isin(
-                genome_bin_set
+        rows = mc._iter_pixel_rows(ranges, lambda b1, b2: _in_ranges(b2, ranges))
+        for chunk in rows:
+            local = pd.DataFrame(
+                {
+                    "bin1_id": np.searchsorted(
+                        genome_bin_indices, chunk["bin1_id"].to_numpy()
+                    ).astype(np.int64),
+                    "bin2_id": np.searchsorted(
+                        genome_bin_indices, chunk["bin2_id"].to_numpy()
+                    ).astype(np.int64),
+                    "count": chunk["count"].to_numpy().astype(count_dtype),
+                }
             )
-            if not mask.any():
-                continue
-            chunk = chunk[mask].copy()
-            chunk["bin1_id"] = chunk["bin1_id"].map(global_to_local_bin)
-            chunk["bin2_id"] = chunk["bin2_id"].map(global_to_local_bin)
-            chunk["bin1_id"] = chunk["bin1_id"].astype(np.int64)
-            chunk["bin2_id"] = chunk["bin2_id"].astype(np.int64)
-            chunk["count"] = chunk["count"].astype(count_dtype)
-            enforce_upper_triangle(chunk)
-            yield chunk[["bin1_id", "bin2_id", "count"]]
+            if square:
+                enforce_upper_triangle(local)
+            yield local
 
     pixel_stream = _pixel_stream()
     try:
@@ -202,11 +186,13 @@ def _extract_contig_ids(
             yield first_chunk
             yield from pixel_stream
 
+        # Kept bins are renumbered in order, so an upper-triangle source stays
+        # sorted; a square one is folded per chunk and needs the merge.
         write_cooler(
             output,
             bins_df,
             _all_chunks(),
-            ordered=False,
+            ordered=not square,
             symmetric_upper=True,
             assembly=assembly,
             dtypes={"count": count_dtype},

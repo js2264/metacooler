@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -12,9 +13,9 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from metacooler.io._utils import chrom_codes
 from metacooler.schema import (
     DEFAULT_CHUNKSIZE,
+    GENOME_GROUPED_ORDERINGS,
     read_table,
 )
 from metacooler.schema import (
@@ -43,18 +44,20 @@ class MetaCooler:
         Args:
             store: File path, optionally with a URI group suffix
                 (``file.mmetacool::entries/entry_name``).
-            validate: If ``True`` (default), run
-                :func:`metacooler.schema.validate` on the store before
-                opening it.  Pass ``False`` to skip that check as a fast
-                path on very large files, where a full structural rescan
-                (indexes, column lengths, pixel ordering) costs a
-                noticeable amount of I/O on every single ``MetaCooler()``
-                construction.  **Only skip validation on a file you know
-                to be well-formed**: with ``validate=False`` a corrupt or
-                truncated file is not diagnosed here, and instead surfaces
-                later as an opaque ``IndexError``/``KeyError`` from
-                cooler, or — worse — as silently wrong slices if only the
-                indexes are stale.
+            validate: If ``True`` (default), run the *structural* checks of
+                :func:`metacooler.schema.validate` (``full=False``) before
+                opening: format attributes, required groups and columns,
+                equal column lengths, the ``/chroms`` link, and the length
+                and endpoints of every offset index.  They read O(n_columns)
+                values, so an open costs milliseconds even on a
+                multi-million-contig metagenome.  The O(n_bins) content
+                checks (bin geometry, offset monotonicity, genome tables,
+                name rules, sampled pixel order) are what ``metacooler
+                validate`` and :func:`metacooler.schema.validate` run, and
+                every metacooler writer runs them on what it writes.  Pass
+                ``False`` to skip even the structural checks; a malformed
+                file then surfaces later as an opaque ``IndexError`` or
+                ``KeyError`` from cooler.
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -88,10 +91,8 @@ class MetaCooler:
                 if group_path.lstrip("/") not in f:
                     raise KeyError(f"Group {group_path!r} not found in {self._store}")
             if validate:
-                _validate(f"{self._store}::{group_path}")
-            # Use cooler URI to open the specific group
-            cooler_uri = f"{self._store}::{group_path}"
-            self._clr = cooler.Cooler(cooler_uri)
+                _validate(f"{self._store}::{group_path}", full=False)
+            self._cooler_uri = f"{self._store}::{group_path}"
         else:
             from metacooler.schema import is_mmetacooler, list_metacoolers
 
@@ -104,8 +105,58 @@ class MetaCooler:
                     f"{self._store}::{entries[0] if entries else '/entries/<name>'}."
                 )
             if validate:
-                _validate(self._store)
-            self._clr = cooler.Cooler(str(self._store))
+                _validate(self._store, full=False)
+            self._cooler_uri = str(self._store)
+        self._validate_on_open = validate
+        if validate:
+            self._check_decodable()
+
+    @functools.cached_property
+    def _clr(self) -> cooler.Cooler:
+        """The ``cooler.Cooler`` this map delegates to, opened on first use.
+
+        Opening one reads every contig name into a dict (1.5 s for two million
+        contigs), which the index-based selectors, ``info``, ``binsize`` and
+        ``shape`` never need; so an open, and a genome or contig query, does not
+        pay for it.
+        """
+        return _open_cooler(self._cooler_uri, self._validate_on_open)
+
+    def _check_decodable(self) -> None:
+        """Fail now, by name, if cooler could not decode ``/contigs``.
+
+        cooler decodes every byte-string column of ``/chroms`` (= ``/contigs``)
+        as ASCII when it opens a map; the open used to fail there.  With cooler
+        opened lazily, the same condition -- a byte at or above 0x80 -- is
+        checked here, vectorised, and handed to the full validation, whose
+        error names the offending values.
+        """
+        with self.open() as grp:
+            columns = grp["contigs"]
+            for key in columns:
+                column = columns[key]
+                if (
+                    isinstance(column, h5py.Dataset)
+                    and column.dtype.kind == "S"
+                    and len(column)
+                    and int(np.max(np.ascontiguousarray(column[()]).view(np.uint8)))
+                    >= 0x80
+                ):
+                    _validate(self._cooler_uri)
+                    raise UnicodeDecodeError(  # pragma: no cover - validate raised
+                        "ascii", b"", 0, 1, f"/contigs/{key} is not ASCII"
+                    )
+
+    def _attrs(self) -> dict:
+        """The map's attributes as ``cooler.Cooler.info`` reads them, fresh."""
+        from cooler.api import info as cooler_info
+
+        with self.open() as grp:
+            return cooler_info(grp)
+
+    @functools.cached_property
+    def _attrs_at_open(self) -> dict:
+        return self._attrs()
 
     @property
     def filename(self) -> str:
@@ -122,7 +173,9 @@ class MetaCooler:
         ``/`` for a ``.metacool``; ``/entries/<name>`` for an ``.mmetacool``
         entry (it used to claim ``/`` for those too).
         """
-        return self._clr.root
+        from cooler.util import parse_cooler_uri
+
+        return parse_cooler_uri(self._cooler_uri)[1]
 
     @property
     def store(self) -> Path:
@@ -252,7 +305,7 @@ class MetaCooler:
     @property
     def binsize(self) -> int | None:
         """Uniform bin size in base pairs, or ``None`` if bins are variable-width."""
-        return self._clr.binsize
+        return self._attrs_at_open["bin-size"]
 
     @property
     def chromnames(self) -> list[str]:
@@ -267,7 +320,8 @@ class MetaCooler:
     @property
     def shape(self) -> tuple[int, int]:
         """Shape of the square contact matrix ``(n_bins, n_bins)``."""
-        return self._clr.shape
+        n_bins = self._attrs_at_open["nbins"]
+        return (n_bins, n_bins)
 
     @property
     def info(self) -> dict:
@@ -284,7 +338,7 @@ class MetaCooler:
             ``format-version``, ``bin-size``, ``nbins``, ``nnz``, ``sum``,
             ``ngenomes``, ``ncontigs``, ``ordering``, and ``assembly``.
         """
-        base = dict(self._clr.info)
+        base = dict(self._attrs())
         base["format"] = base.pop("metacooler-format", None)
         base["format-url"] = base.pop("metacooler-format-url", None)
         base["format-version"] = base.pop("metacooler-format-version", None)
@@ -329,7 +383,7 @@ class MetaCooler:
             Nested dictionary of user-defined metadata values, or ``{}``
             if the file contains no metadata.
         """
-        base = dict(self._clr.info)
+        base = dict(self._attrs())
         meta = base.pop("metadata", None)
         if meta is None:
             return {}
@@ -372,6 +426,217 @@ class MetaCooler:
         return read_table(self._store, "contigs")
 
     # ------------------------------------------------------------------
+    # Index lookups
+    #
+    # Everything below resolves names to bin ranges through the three offset
+    # indexes, never through the bin table: a genome to its contigs via
+    # ``indexes/genome_offset`` (or, when the contig ordering does not group
+    # genomes, ``/contigs/genome_id``), a contig to its bins via
+    # ``indexes/chrom_offset``, and a bin range to its pixel rows via
+    # ``indexes/bin1_offset``.  Each of those is O(n_contigs) at worst, so a
+    # genome or contig query costs milliseconds whatever the size of the map.
+    # ------------------------------------------------------------------
+    def _read_index(self, name: str) -> np.ndarray:
+        with self.open() as grp:
+            return grp["indexes"][name][:].astype(np.int64)
+
+    @functools.cached_property
+    def _chrom_offset(self) -> np.ndarray:
+        return self._read_index("chrom_offset")
+
+    @functools.cached_property
+    def _genome_offset(self) -> np.ndarray:
+        return self._read_index("genome_offset")
+
+    @functools.cached_property
+    def _bin1_offset(self) -> np.ndarray:
+        return self._read_index("bin1_offset")
+
+    @functools.cached_property
+    def _contig_genome_ids(self) -> np.ndarray:
+        with self.open() as grp:
+            return grp["contigs"]["genome_id"][:].astype(np.int64)
+
+    @functools.cached_property
+    def _contig_names_raw(self) -> np.ndarray:
+        """``/contigs/name`` as stored: fixed-width bytes, never decoded."""
+        with self.open() as grp:
+            return grp["contigs"]["name"][()]
+
+    def _find_contig(self, contig: str) -> int | None:
+        """Row of *contig* in ``/contigs``, or ``None``.
+
+        One vectorised comparison over the stored bytes: a few milliseconds for
+        two million names, where a name -> id dict costs half a second to build.
+        """
+        if "_clr" in self.__dict__:  # cooler already holds that dict
+            return self._clr._chromids.get(contig)
+        try:
+            key = contig.encode("ascii")  # names are ASCII (check_ascii_names)
+        except UnicodeEncodeError:
+            return None
+        hits = np.flatnonzero(self._contig_names_raw == key)
+        return int(hits[0]) if hits.size else None
+
+    @functools.cached_property
+    def _genome_ids(self) -> dict[str, int]:
+        return {str(name): i for i, name in enumerate(self.genomes["name"])}
+
+    @functools.cached_property
+    def _genome_grouped(self) -> bool:
+        """Whether ``genome_offset`` delimits each genome's contig block."""
+        with self.open() as grp:
+            ordering = grp.attrs.get("contig-ordering")
+        if isinstance(ordering, bytes):
+            ordering = ordering.decode()
+        return ordering in GENOME_GROUPED_ORDERINGS
+
+    def _genome_id(self, genome: str) -> int:
+        gid = self._genome_ids.get(genome)
+        if gid is None:
+            raise KeyError(
+                f"Genome {genome!r} not found. "
+                f"Available: {self.genomes['name'].tolist()}"
+            )
+        return gid
+
+    def _contig_id(self, contig: str) -> int:
+        cid = self._find_contig(contig)
+        if cid is None:
+            raise KeyError(f"Contig {contig!r} not found. Available: {self.chromnames}")
+        return cid
+
+    def genome_contig_ids(self, genome: str) -> np.ndarray:
+        """Return the sorted contig ids (row numbers of ``/contigs``) of *genome*.
+
+        Under a genome-grouped contig ordering this is one slice of
+        ``indexes/genome_offset``; otherwise it is the rows of
+        ``/contigs/genome_id`` equal to the genome's id.  The bin table is
+        never read.
+
+        Args:
+            genome: Name of the genome as it appears in the ``/genomes`` table.
+
+        Returns:
+            1-D ``int64`` array of contig ids (possibly empty).
+
+        Raises:
+            KeyError: If *genome* is not present in this file.
+        """
+        gid = self._genome_id(genome)
+        if self._genome_grouped:
+            lo, hi = self._genome_offset[gid : gid + 2]
+            return np.arange(lo, hi, dtype=np.int64)
+        return np.flatnonzero(self._contig_genome_ids == gid).astype(np.int64)
+
+    def _contig_bin_ranges(self, contig_ids: np.ndarray) -> np.ndarray:
+        """Half-open bin ranges of *contig_ids* (sorted), adjacent ones merged.
+
+        Returns:
+            ``(k, 2)`` ``int64`` array of ``[lo, hi)`` rows, sorted, disjoint
+            and non-adjacent; empty contigs contribute nothing.
+        """
+        cids = np.asarray(contig_ids, dtype=np.int64)
+        lo = self._chrom_offset[cids]
+        hi = self._chrom_offset[cids + 1]
+        return _merge_ranges(lo, hi)
+
+    def genome_bin_ranges(self, genome: str) -> np.ndarray:
+        """Return *genome*'s bins as sorted, disjoint half-open ranges.
+
+        One range under a genome-grouped ordering; one per run of
+        consecutive contigs otherwise.
+
+        Args:
+            genome: Name of the genome as it appears in the ``/genomes`` table.
+
+        Returns:
+            ``(k, 2)`` ``int64`` array whose rows are ``[lo, hi)`` bin ranges.
+
+        Raises:
+            KeyError: If *genome* is not present in this file.
+        """
+        return self._contig_bin_ranges(self.genome_contig_ids(genome))
+
+    def _bins_in_ranges(self, ranges: np.ndarray) -> pd.DataFrame:
+        """The bin table rows in *ranges*, as :meth:`bins` would show them.
+
+        Read with cooler's bin selector, one range at a time (or, for many
+        short runs, their span at once), so nothing outside the span is read.
+        """
+        bins = self._clr.bins()
+        if not len(ranges):
+            return cast(pd.DataFrame, bins[0:0])
+        if len(ranges) <= _MAX_RANGE_READS:
+            parts = [cast(pd.DataFrame, bins[int(lo) : int(hi)]) for lo, hi in ranges]
+            return pd.concat(parts) if len(parts) > 1 else parts[0]
+        # Many short runs: one read of the span beats thousands of small ones,
+        # each of which decompresses a whole chunk.
+        lo, hi = int(ranges[0, 0]), int(ranges[-1, 1])
+        return cast(pd.DataFrame, bins[lo:hi]).iloc[_ranges_to_ids(ranges) - lo]
+
+    def _pixel_offsets(self, bins: np.ndarray) -> np.ndarray:
+        """``bin1_offset`` at each of *bins* (int64 array of bin ids)."""
+        if len(bins) > _MAX_RANGE_READS or "_bin1_offset" in self.__dict__:
+            return self._bin1_offset[bins]
+        with self.open() as grp:
+            ds = grp["indexes"]["bin1_offset"]
+            return np.array([int(ds[int(b)]) for b in bins], dtype=np.int64)
+
+    def _iter_pixel_rows(
+        self,
+        row_ranges: np.ndarray,
+        keep: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+        chunksize: int = DEFAULT_CHUNKSIZE,
+    ) -> Iterator[pd.DataFrame]:
+        """Yield the stored pixels whose ``bin1_id`` lies in *row_ranges*.
+
+        Each range of rows is turned into a block of pixel rows through
+        ``indexes/bin1_offset``, and the blocks are read with cooler's pixel
+        selector; blocks that nearly touch are read together, and nothing
+        outside them is read.  Frames come out in file order, so their
+        concatenation is sorted by ``(bin1_id, bin2_id)``.
+
+        Args:
+            row_ranges: ``(k, 2)`` sorted, disjoint ``[lo, hi)`` bin ranges.
+            keep: Optional ``keep(bin1, bin2) -> bool mask`` applied to every
+                block (after the row-range test).
+            chunksize: Most pixel rows read at once.
+
+        Yields:
+            Non-empty pixel DataFrames, every column of ``/pixels``, indexed
+            by pixel row like :meth:`pixels`.
+        """
+        ranges = np.asarray(row_ranges, dtype=np.int64).reshape(-1, 2)
+        ranges = ranges[ranges[:, 1] > ranges[:, 0]]
+        if not len(ranges):
+            return
+        offsets = self._pixel_offsets(ranges.ravel()).reshape(-1, 2)
+        spans = _merge_ranges(offsets[:, 0], offsets[:, 1], gap=_PIXEL_READ_GAP)
+        exact = len(spans) == len(ranges)  # no gap rows were swept in
+        pixels = self._clr.pixels()
+        for p0, p1 in spans:
+            for lo in range(int(p0), int(p1), chunksize):
+                chunk = cast(pd.DataFrame, pixels[lo : min(lo + chunksize, int(p1))])
+                if not exact or keep is not None:
+                    b1 = chunk["bin1_id"].to_numpy()
+                    mask = (
+                        np.ones(len(chunk), dtype=bool)
+                        if exact
+                        else _in_ranges(b1, ranges)
+                    )
+                    if keep is not None:
+                        mask &= keep(b1, chunk["bin2_id"].to_numpy())
+                    if not mask.all():
+                        chunk = chunk[mask]
+                if len(chunk):
+                    yield chunk
+
+    def _empty_pixels(self) -> pd.DataFrame:
+        """The pixel table's columns, typed, without a row (cooler's selector)."""
+        return cast(pd.DataFrame, self._clr.pixels()[:0])
+
+    # ------------------------------------------------------------------
     # Selectors
     # ------------------------------------------------------------------
     def bins_for_genome(self, genome: str) -> pd.DataFrame:
@@ -382,23 +647,14 @@ class MetaCooler:
                 table.
 
         Returns:
-            Subset of the bins table (copy) containing only rows whose
-            ``chrom`` (contig) belongs to *genome*.  Index values are
-            preserved from the original bins table.
+            Subset of the bins table containing only rows whose ``chrom``
+            (contig) belongs to *genome*.  Index values are preserved from
+            the original bins table.
 
         Raises:
             KeyError: If *genome* is not present in this file.
         """
-        genomes = self.genomes
-        contigs = self.contigs
-        if genome not in genomes["name"].values:
-            raise KeyError(
-                f"Genome {genome!r} not found. Available: {genomes['name'].tolist()}"
-            )
-        gid = genomes.loc[genomes["name"] == genome].index[0]
-        contig_ids = contigs.index[contigs["genome_id"] == gid].tolist()
-        bins = self.bins()
-        return bins[np.isin(chrom_codes(bins), contig_ids)].copy()
+        return self._bins_in_ranges(self.genome_bin_ranges(genome))
 
     def bins_for_contig(self, contig: str) -> pd.DataFrame:
         """Return all bins belonging to *contig*.
@@ -408,28 +664,23 @@ class MetaCooler:
                 table.
 
         Returns:
-            Subset of the bins table (copy) containing only rows whose
-            ``chrom`` equals *contig*.  Index values are preserved from
-            the original bins table.
+            Subset of the bins table containing only rows whose ``chrom``
+            equals *contig*.  Index values are preserved from the original
+            bins table.
 
         Raises:
             KeyError: If *contig* is not present in this file.
         """
-        contigs = self.contigs
-        if contig not in contigs["name"].values:
-            raise KeyError(
-                f"Contig {contig!r} not found. Available: {contigs['name'].tolist()}"
-            )
-        cid = contigs.loc[contigs["name"] == contig].index[0]
-        bins = self.bins()
-        return bins[chrom_codes(bins) == cid].copy()
+        cid = self._contig_id(contig)
+        return self._bins_in_ranges(self._contig_bin_ranges(np.array([cid])))
 
     def pixels_for_genome_pair(self, g1: str, g2: str) -> pd.DataFrame:
         """Return pixels where one bin is in *g1* and the other is in *g2*.
 
-        Uses ``genome_extent`` index lookups to limit the scan to the
-        relevant pixel rows — the full pixel table is never loaded into
-        memory.
+        Reads only the pixel rows of the two genomes' bins, located through
+        ``indexes/bin1_offset``, and keeps those whose other end lies in the
+        other genome — milliseconds per genome pair, whatever the size of the
+        map.  Correct under any contig ordering, and for ``square`` storage.
 
         Args:
             g1: Name of the first genome.
@@ -437,63 +688,36 @@ class MetaCooler:
                 retrieve intra-genomic contacts.
 
         Returns:
-            DataFrame with columns ``bin1_id``, ``bin2_id``, and ``count``
-            (plus any extra pixel columns).  Returns an empty DataFrame with
-            those columns if no matching pixels exist.
+            DataFrame with every column of the pixel table (``bin1_id``,
+            ``bin2_id``, ``count``, ...), sorted by ``(bin1_id, bin2_id)``
+            and indexed from 0.  Empty (with those columns) if no pixel
+            matches.
 
         Raises:
             KeyError: If either *g1* or *g2* is not present in this file.
         """
-        genomes = self.genomes
-        for g in (g1, g2):
-            if g not in genomes["name"].values:
-                raise KeyError(
-                    f"Genome {g!r} not found. Available: {genomes['name'].tolist()}"
+        a = self.genome_bin_ranges(g1)
+        b = self.genome_bin_ranges(g2)
+        if g1 == g2:
+            rows = a
+
+            def keep(b1: np.ndarray, b2: np.ndarray) -> np.ndarray:
+                return _in_ranges(b2, a)
+        else:
+            # Two genomes share no contig, so their ranges are disjoint.
+            rows = _merge_ranges(
+                np.concatenate([a[:, 0], b[:, 0]]),
+                np.concatenate([a[:, 1], b[:, 1]]),
+            )
+
+            def keep(b1: np.ndarray, b2: np.ndarray) -> np.ndarray:
+                return (_in_ranges(b1, a) & _in_ranges(b2, b)) | (
+                    _in_ranges(b1, b) & _in_ranges(b2, a)
                 )
 
-        bins = self._bins_cache
-        bin_to_contig = chrom_codes(bins)
-
-        contigs = self.contigs
-        gid1 = int(genomes.loc[genomes["name"] == g1].index[0])
-        gid2 = int(genomes.loc[genomes["name"] == g2].index[0])
-        cids1 = set(contigs.index[contigs["genome_id"] == gid1].tolist())
-        cids2 = set(contigs.index[contigs["genome_id"] == gid2].tolist())
-
-        valid1 = np.where(np.isin(bin_to_contig, list(cids1)))[0]
-        valid2 = np.where(np.isin(bin_to_contig, list(cids2)))[0]
-        set1 = set(valid1.tolist())
-        set2 = set(valid2.tolist())
-
-        # Bounding bin range over both genomes. Computed from bin membership
-        # (not genome_extent) so it works even when a genome's bins are not
-        # contiguous under the file's ordering.
-        all_valid = np.concatenate([valid1, valid2])
-        if all_valid.size == 0:
-            return pd.DataFrame(columns=["bin1_id", "bin2_id", "count"])
-        lo = int(all_valid.min())
-        hi = int(all_valid.max()) + 1
-
-        chunks = []
-        chunksize = DEFAULT_CHUNKSIZE
-        n_pix = self.info["nnz"]
-        # Use bin1_offset index to find the pixel range for bins [lo, hi)
-        with h5py.File(self._store, "r") as f:
-            root = f[self._group_path.lstrip("/")] if self._group_path != "/" else f
-            bin1_offset = root["indexes"]["bin1_offset"][:]
-        pix_lo = int(bin1_offset[lo])
-        pix_hi = int(bin1_offset[hi]) if hi < len(bin1_offset) else n_pix
-
-        for i in range(pix_lo, pix_hi, chunksize):
-            chunk = self._clr.pixels()[i : i + chunksize]
-            b1 = chunk["bin1_id"]
-            b2 = chunk["bin2_id"]
-            sel = (b1.isin(set1) & b2.isin(set2)) | (b1.isin(set2) & b2.isin(set1))
-            if sel.any():
-                chunks.append(chunk[sel])
-
+        chunks = list(self._iter_pixel_rows(rows, keep))
         if not chunks:
-            return pd.DataFrame(columns=["bin1_id", "bin2_id", "count"])
+            return self._empty_pixels()
         return pd.concat(chunks, ignore_index=True)
 
     # ------------------------------------------------------------------
@@ -514,16 +738,7 @@ class MetaCooler:
         Raises:
             KeyError: If *genome* is not present in this file.
         """
-        genomes = self.genomes
-        contigs = self.contigs
-        if genome not in genomes["name"].values:
-            raise KeyError(
-                f"Genome {genome!r} not found. Available: {genomes['name'].tolist()}"
-            )
-        gid = genomes.loc[genomes["name"] == genome].index[0]
-        cids = contigs.index[contigs["genome_id"] == gid].tolist()
-        bins = self.bins()
-        return bins.index[np.isin(chrom_codes(bins), cids)].to_numpy(dtype=np.int64)
+        return _ranges_to_ids(self.genome_bin_ranges(genome))
 
     def genome_extent(self, genome: str) -> tuple[int, int]:
         """Return the half-open bin-index range for all bins in *genome*.
@@ -531,10 +746,10 @@ class MetaCooler:
         This is only well-defined when the genome's bins form one contiguous
         block — i.e. the file uses a genome-grouped contig ordering
         (``genome-then-length`` / ``genome-then-alpha``, the default).  For
-        non-grouped orderings (``fasta``, ``alpha``, ``cool``) a genome's
-        contigs may be interleaved with others', so a single bin interval would
-        silently include foreign bins; in that case this method raises rather
-        than return a misleading range.
+        non-grouped orderings (``fasta``, ``alpha``, ``cool``, ``custom``) a
+        genome's contigs may be interleaved with others', so a single bin
+        interval would silently include foreign bins; in that case this method
+        raises rather than return a misleading range.
 
         Args:
             genome: Name of the genome as it appears in the ``/genomes``
@@ -550,11 +765,10 @@ class MetaCooler:
             ValueError: If the genome's bins are not contiguous under the
                 file's contig ordering.
         """
-        ids = self.genome_bin_ids(genome)
-        if ids.size == 0:
+        ranges = self.genome_bin_ranges(genome)
+        if len(ranges) == 0:
             return (0, 0)
-        lo, hi = int(ids[0]), int(ids[-1]) + 1
-        if hi - lo != ids.size:
+        if len(ranges) > 1:
             ordering = self.info.get("ordering")
             raise ValueError(
                 f"Genome {genome!r} is not contiguous in bin space under "
@@ -563,7 +777,7 @@ class MetaCooler:
                 f"ordering (genome-then-length/genome-then-alpha), or select by "
                 f"contig membership (e.g. 'dump --genomes' / 'extract --genomes')."
             )
-        return (lo, hi)
+        return (int(ranges[0, 0]), int(ranges[0, 1]))
 
     def contig_extent(self, contig: str) -> tuple[int, int]:
         """Return the half-open bin-index range for all bins in *contig*.
@@ -580,17 +794,9 @@ class MetaCooler:
         Raises:
             KeyError: If *contig* is not present in this file.
         """
-        contigs = self.contigs
-        if contig not in contigs["name"].values:
-            raise KeyError(
-                f"Contig {contig!r} not found. Available: {contigs['name'].tolist()}"
-            )
-        cid = contigs.loc[contigs["name"] == contig].index[0]
-        bins = self.bins()
-        sel = bins[chrom_codes(bins) == cid]
-        if sel.empty:
-            return (0, 0)
-        return (int(sel.index[0]), int(sel.index[-1]) + 1)
+        cid = self._contig_id(contig)
+        lo, hi = (int(x) for x in self._chrom_offset[cid : cid + 2])
+        return (0, 0) if lo == hi else (lo, hi)
 
     # ------------------------------------------------------------------
     # Export
@@ -645,3 +851,73 @@ class MetaCooler:
                 yield f[self._group_path.lstrip("/")]
             else:
                 yield f
+
+
+def _open_cooler(uri: str, validate: bool) -> cooler.Cooler:
+    """``cooler.Cooler(uri)``, naming the problem when cooler cannot decode it.
+
+    cooler decodes every ``/chroms`` (= ``/contigs``) column as ASCII, so a
+    file holding a non-ASCII name fails here with a bare ``UnicodeDecodeError``.
+    The structural checks of an open do not read names (that is O(n_contigs));
+    on that failure the full validation runs instead, and its error names the
+    offending values.
+    """
+    try:
+        return cooler.Cooler(uri)
+    except UnicodeDecodeError:
+        if validate:
+            _validate(uri)
+        raise
+
+
+#: Up to this many ranges are read one by one; past it, one read of their span.
+_MAX_RANGE_READS = 256
+
+#: Pixel row blocks closer than this are read in one go (and the rows between
+#: them filtered out): one h5py read per block costs more than a few thousand
+#: extra rows of decompression.
+_PIXEL_READ_GAP = 1 << 16
+
+
+def _merge_ranges(lo: np.ndarray, hi: np.ndarray, gap: int = 0) -> np.ndarray:
+    """Sort half-open ranges and merge those that overlap or are within *gap*.
+
+    Empty ranges are dropped.  Vectorised: one sort and one cumulative max.
+
+    Returns:
+        ``(k, 2)`` ``int64`` array of merged ``[lo, hi)`` rows.
+    """
+    lo = np.asarray(lo, dtype=np.int64)
+    hi = np.asarray(hi, dtype=np.int64)
+    keep = hi > lo
+    lo, hi = lo[keep], hi[keep]
+    if not len(lo):
+        return np.empty((0, 2), dtype=np.int64)
+    order = np.argsort(lo, kind="stable")
+    lo, hi = lo[order], hi[order]
+    reach = np.maximum.accumulate(hi)
+    starts = np.ones(len(lo), dtype=bool)
+    starts[1:] = lo[1:] > reach[:-1] + gap
+    first = np.flatnonzero(starts)
+    last = np.append(first[1:], len(lo)) - 1
+    return np.column_stack([lo[first], reach[last]])
+
+
+def _in_ranges(values: np.ndarray, ranges: np.ndarray) -> np.ndarray:
+    """Boolean mask: which *values* fall in one of the sorted disjoint *ranges*."""
+    if not len(ranges):
+        return np.zeros(len(values), dtype=bool)
+    if len(ranges) == 1:
+        return (values >= ranges[0, 0]) & (values < ranges[0, 1])
+    i = np.searchsorted(ranges[:, 0], values, side="right") - 1
+    return (i >= 0) & (values < ranges[np.maximum(i, 0), 1])
+
+
+def _ranges_to_ids(ranges: np.ndarray) -> np.ndarray:
+    """Concatenate ``arange(lo, hi)`` over *ranges*, without a Python loop."""
+    if not len(ranges):
+        return np.empty(0, dtype=np.int64)
+    lengths = ranges[:, 1] - ranges[:, 0]
+    total = int(lengths.sum())
+    shift = np.repeat(ranges[:, 0] - (np.cumsum(lengths) - lengths), lengths)
+    return shift + np.arange(total, dtype=np.int64)

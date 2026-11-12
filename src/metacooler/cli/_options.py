@@ -158,6 +158,21 @@ def force_option(f):
     )(f)
 
 
+def nproc_option(help_text: str):
+    """Attach the standard ``--nproc`` option (default 1, at least 1)."""
+
+    def decorate(f):
+        return click.option(
+            "--nproc",
+            type=click.IntRange(min=1),
+            default=1,
+            show_default=True,
+            help=help_text,
+        )(f)
+
+    return decorate
+
+
 def verbose_option(f):
     """Attach the standard ``-v/--verbose`` flag to a command."""
     return click.option(

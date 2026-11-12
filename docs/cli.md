@@ -182,6 +182,7 @@ metacooler create pairs --pairs P --bins B --contigs C -o OUT.metacool [OPTIONS]
 | `--ps-bins-per-decade` | `10` | Log-grid resolution of the P(s) table. |
 | `--chunksize` | `50000000` | Pairs processed per chunk. This is chunk *granularity*, not read memory (the pyarrow read block is capped separately). Under `external` sorting each chunk becomes a temporary cooler at a fixed per-call cost that scales with contig count, so smaller chunks cost disproportionately more. |
 | `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (`memory` unless the binned pixels exceed 100 M rows), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
+| `--nproc` | `1` | Threads binning pairs while the file is read and decompressed (which stays on one thread: one gzip stream). The output, QC block, P(s) table and drop report are identical whatever the value; each thread holds one more batch of pairs. Two threads take ~15 % off a 30 M-pair run; more add little. |
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -544,7 +545,7 @@ metacooler binnify METACOOL_PATH --binsize N -o OUT.metacool [OPTIONS]
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--binsize` | *required* | New bin size in bp. See the constraints below. |
 | `--level` | `contig` | Tiling strategy: `contig` (tile each contig independently) or `genome` (ligate a genome's contigs by decreasing length, then tile — the output's contigs become the ligated genomes). |
-| `--chunksize` | `1000000` | Source pixels read, remapped, and aggregated per chunk (peak-memory control). |
+| `--chunksize` | `50000000` | Source pixels read, remapped, and aggregated per chunk (peak-memory control). |
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -580,6 +581,11 @@ metacooler binnify METACOOL_PATH --binsize N -o OUT.metacool [OPTIONS]
   with no contigs are skipped.
 - Pixels are re-assigned and re-aggregated for the new layout; integer counts are
   widened to `int64` so a coarse bin pair cannot overflow.
+- At `--level contig` the re-binning keeps every pixel's row order, so the source
+  is processed one block of whole output rows at a time (located through
+  `bin1_offset`) and the output is written in order, with no temporary files and
+  memory proportional to one `--chunksize` block. `--level genome` reorders
+  contigs, so it re-aggregates through cooler's external merge.
 
 ```bash
 # 1 kb → 5 kb (5000 = 5 × 1000 ✓)
@@ -607,11 +613,16 @@ metacooler zoomify METACOOL_PATH -o OUT.mmetacool [--levels N | --resolutions R]
 | `-o, --output` | *required* | Output `.mmetacool` path. |
 | `--levels` | `5` | Number of bin-size doublings (used when `--resolutions` is not set). |
 | `-r, --resolutions` | — | Resolution ladder in cooler's ladder-token grammar (see below). Takes precedence over `--levels`. |
-| `--temp-dir` | system temp | Directory for the intermediate per-level files. Mirrors cooler's `zoomify --temp-dir`; point it at fast local scratch with room for **one** level. |
+| `--temp-dir` | system temp | Directory for the intermediate per-level files. Mirrors cooler's `zoomify --temp-dir`; point it at fast local scratch with room for **one** level (with `--nproc`, for the levels being built and the levels they are coarsened from). |
+| `--nproc` | `1` | Levels built at once, each in its own process; a level waits for the finer level it is coarsened from (with `-r 1000,2000,5000,10000`: 2 kb and 5 kb together, then 10 kb). Levels are appended in ladder order, so the output is identical whatever the value; memory is one level's chunk per process. |
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
-Entries are addressed as `file.mmetacool::entries/<binsize>`.
+Entries are addressed as `file.mmetacool::entries/<binsize>`. Each level is
+re-binned from the coarsest level already written whose bin size divides it
+(with `-r 1000,2000,5000,10000`: 2 kb and 5 kb from 1 kb, 10 kb from 5 kb), as
+cooler's `zoomify` does; since every level nests in the base, the counts are
+those of re-binning the base directly.
 
 !!! note "`--resolutions` is a ladder grammar, not a plain list"
     Unlike `--genomes`/`--contigs`, which take a plain comma-separated list,

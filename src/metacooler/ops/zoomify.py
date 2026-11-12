@@ -183,16 +183,22 @@ def zoomify(
     resolutions: str | None = None,
     temp_dir: str | Path | None = None,
     force: bool = False,
+    nproc: int = 1,
 ) -> None:
     """Create a multi-resolution ``.mmetacool`` file.
 
     The input must be a fixed-bin metacooler.  Each resolution is stored as an
     mmetacool entry named ``entries/<binsize>`` (open it as
     ``file.mmetacool::entries/<binsize>``).  The base resolution is streamed
-    verbatim into the output; every coarser resolution is produced by re-binning
-    the base with :func:`metacooler.ops.binnify.binnify` (so bins stay aligned
-    to the base) into *temp_dir*, appended to the output, and deleted right
-    away — peak temporary disk use is one level, not a whole second pyramid.
+    verbatim into the output; every coarser resolution is produced by
+    re-binning, with :func:`metacooler.ops.binnify.binnify`, the coarsest level
+    already written whose bin size divides it (10 kb from 5 kb, 2 kb and 5 kb
+    from a 1 kb base), as cooler's zoomify does.  Every bin size is a multiple
+    of the base, so bins stay aligned to the base and each level holds exactly
+    the counts re-binning the base would give, from far fewer pixels.  A level
+    is written into *temp_dir*, appended to the output and deleted right away —
+    peak temporary disk use is one level, not a whole second pyramid.  Its
+    provenance names the base file, as if re-binned from it.
 
     Resolutions are chosen one of two ways:
 
@@ -218,6 +224,11 @@ def zoomify(
         temp_dir: Directory for the intermediate re-binned files. Defaults to
             the system temporary directory. Created if missing.
         force: If True, overwrite *output* when it already exists.
+        nproc: Levels built at once, each in its own process: with
+            ``1000,2000,5000,10000``, 2 kb and 5 kb are built together, then
+            10 kb.  Levels are appended in ladder order, so the output is that
+            of ``nproc=1``.  A level's file is then kept in *temp_dir* until
+            the levels coarsened from it are built.
 
     Raises:
         FileExistsError: If *output* exists and *force* is False.
@@ -228,7 +239,7 @@ def zoomify(
     from metacooler.api import MetaCooler
     from metacooler.io._utils import check_output_path
     from metacooler.io.mmetacool import add_entry, create_mmetacool
-    from metacooler.ops.binnify import binnify
+    from metacooler.ops.binnify import _binnify
 
     output = Path(output)
     check_output_path(output, force, inputs=[uri])
@@ -300,20 +311,46 @@ def zoomify(
         len(plan),
         [str(r) for r in plan],
     )
+    if nproc < 1:
+        raise ValueError(f"nproc must be at least 1, got {nproc}")
     source_path = Path(mc._store)
     try:
         with tempfile.TemporaryDirectory(
             dir=None if temp_dir is None else str(temp_dir)
         ) as tmpdir:
             tmpdir_path = Path(tmpdir)
+            if nproc > 1 and len(plan) > 2:
+                _build_levels_in_parallel(
+                    plan, source_path, mc.metadata, output, tmpdir_path, nproc, force
+                )
+                logger.info("Written multi-resolution mmetacool to %s", output)
+                return
+            built: list[int] = []
             for res in plan:
                 if res == base_binsize:
                     # Base resolution: stream the source straight into the output.
                     create_mmetacool(output, {str(res): source_path}, force=force)
+                    built.append(res)
                     continue
+                # The coarsest level written so far that nests in this one; the
+                # base always does (_check_divisible).
+                parent = max(r for r in built if res % r == 0)
+                parent_mc = (
+                    mc
+                    if parent == base_binsize
+                    else MetaCooler(f"{output}::entries/{parent}")
+                )
                 res_path = tmpdir_path / f"res_{res}.metacool"
-                binnify(uri=source_path, output=res_path, binsize=res)
+                logger.info("Coarsening %d -> %d", parent, res)
+                _binnify(
+                    parent_mc,
+                    res_path,
+                    res,
+                    source_uri=source_path,
+                    source_metadata=mc.metadata,
+                )
                 add_entry(output, str(res), res_path)
+                built.append(res)
                 # Reclaim the space before computing the next level.
                 res_path.unlink(missing_ok=True)
     except Exception:
@@ -323,3 +360,98 @@ def zoomify(
         raise
 
     logger.info("Written multi-resolution mmetacool to %s", output)
+
+
+def _parents(plan: list[int]) -> dict[int, int]:
+    """The level each non-base level of *plan* is coarsened from.
+
+    The coarsest earlier level whose bin size divides it -- the base always
+    does (``_check_divisible``).
+    """
+    return {
+        res: max(r for r in plan[:i] if res % r == 0)
+        for i, res in enumerate(plan)
+        if i > 0
+    }
+
+
+def _build_level(
+    parent: str, output: str, binsize: int, source_uri: str, source_metadata: dict
+) -> None:
+    """Coarsen *parent* into *output* (one zoomify level, in a worker process)."""
+    from metacooler.api import MetaCooler
+    from metacooler.ops.binnify import _binnify
+
+    _binnify(
+        MetaCooler(parent),
+        Path(output),
+        binsize,
+        source_uri=source_uri,
+        source_metadata=source_metadata,
+    )
+
+
+def _build_levels_in_parallel(
+    plan: list[int],
+    source_path: Path,
+    source_metadata: dict,
+    output: Path,
+    tmpdir: Path,
+    nproc: int,
+    force: bool,
+) -> None:
+    """Build every level of *plan* on a pool of *nproc* processes.
+
+    A level is submitted as soon as its parent (see :func:`_parents`) exists --
+    as a file in *tmpdir*, since the output is only written from this process.
+    Finished levels are appended in ladder order, and a level's file is deleted
+    once it is appended and every level coarsened from it is built.
+    """
+    import multiprocessing
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+    from metacooler.io.mmetacool import add_entry, create_mmetacool
+
+    base = plan[0]
+    parents = _parents(plan)
+    create_mmetacool(output, {str(base): source_path}, force=force)
+    path_of: dict[int, Path] = {base: source_path}
+    done: set[int] = {base}
+    appended = 1  # plan[:appended] are in the output
+    running: dict = {}
+
+    # spawn: a forked worker would inherit this process's HDF5 state.
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=nproc, mp_context=context) as pool:
+
+        def submit_ready() -> None:
+            for res in plan[1:]:
+                if res in done or res in running.values() or parents[res] not in done:
+                    continue
+                path_of[res] = tmpdir / f"res_{res}.metacool"
+                logger.info("Coarsening %d -> %d", parents[res], res)
+                future = pool.submit(
+                    _build_level,
+                    str(path_of[parents[res]]),
+                    str(path_of[res]),
+                    res,
+                    str(source_path),
+                    source_metadata,
+                )
+                running[future] = res
+
+        submit_ready()
+        while running:
+            finished, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for future in finished:
+                res = running.pop(future)
+                future.result()  # re-raise a worker's error here
+                done.add(res)
+            while appended < len(plan) and plan[appended] in done:
+                add_entry(output, str(plan[appended]), path_of[plan[appended]])
+                appended += 1
+            for res in plan[1:appended]:
+                children = [c for c, p in parents.items() if p == res]
+                if all(c in done for c in children):
+                    path_of[res].unlink(missing_ok=True)
+            submit_ready()

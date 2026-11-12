@@ -974,13 +974,13 @@ class TestZoomify:
 
         temp_dir = tmp_path / "scratch"
         seen: list[Path] = []
-        real_binnify = binnify_mod.binnify
+        real_binnify = binnify_mod._binnify
 
-        def _spy(*args, **kwargs):
-            seen.append(Path(kwargs["output"]))
-            return real_binnify(*args, **kwargs)
+        def _spy(mc, output, *args, **kwargs):
+            seen.append(Path(output))
+            return real_binnify(mc, output, *args, **kwargs)
 
-        monkeypatch.setattr(binnify_mod, "binnify", _spy)
+        monkeypatch.setattr(binnify_mod, "_binnify", _spy)
 
         out = tmp_path / "pyramid.mmetacool"
         zoomify(tiny_metacooler, out, levels=3, temp_dir=temp_dir)

@@ -12,6 +12,9 @@ import pandas as pd
 from metacooler.io._utils import (
     check_output_path,
     chrom_codes,
+    pixel_keys,
+    pixels_from_keys,
+    reduce_sorted_keys,
     resolve_count_dtype,
     to_upper_triangle,
 )
@@ -83,7 +86,34 @@ def binnify(
         raise ValueError(f"binsize must be a positive integer, got {binsize}.")
 
     mc = MetaCooler(uri)
+    _binnify(
+        mc,
+        output,
+        binsize,
+        level=level,
+        chunksize=chunksize,
+        source_uri=uri,
+        source_metadata=mc.metadata,
+    )
 
+
+def _binnify(
+    mc: MetaCooler,
+    output: Path,
+    binsize: int,
+    *,
+    level: Literal["contig", "genome"] = "contig",
+    chunksize: int = DEFAULT_CHUNKSIZE,
+    source_uri: str | Path,
+    source_metadata: dict,
+) -> None:
+    """:func:`binnify` of an open map, with its provenance given separately.
+
+    ``zoomify`` coarsens a level from a finer level it has already written,
+    but records the *base* map as the source, as it did when every level was
+    re-binned from the base; hence *source_uri* and *source_metadata*.
+    """
+    uri = source_uri
     contigs = mc.contigs
     genomes = mc.genomes
     old_bins = mc.bins()
@@ -119,19 +149,21 @@ def binnify(
     valid_mask = old_to_new >= 0
 
     # Build output bins with contig names
-    contig_names = contigs["name"].values
+    # Contig *ids*, as create writes them: cooler.create only needs a chrom
+    # value per bin, and the /chroms table it derives from them is replaced by
+    # the link to /contigs (_finalize_metacool_file).  Names would make cooler
+    # build and iterate a column of two million Arrow strings, several times,
+    # on every level of a zoomify.
     new_bins_out = pd.DataFrame(
         {
-            "chrom": contig_names[new_bins["chrom"].values.astype(int)],
+            "chrom": new_bins["chrom"].to_numpy(dtype=np.int32),
             "start": new_bins["start"].values.astype(np.int32),
             "end": new_bins["end"].values.astype(np.int32),
         }
     )
 
     # Recompute n_bins per genome from the new bins
-    new_bin_genome_ids = contigs["genome_id"].values[
-        pd.Categorical(new_bins_out["chrom"], categories=contigs["name"].values).codes
-    ]
+    new_bin_genome_ids = contigs["genome_id"].values[new_bins_out["chrom"].to_numpy()]
     new_genome_bin_counts = np.bincount(
         new_bin_genome_ids.astype(np.int64), minlength=len(genomes)
     ).astype(np.int64)
@@ -147,20 +179,35 @@ def binnify(
         _DEFAULT_COUNT_DTYPE if src_count_dtype.kind == "i" else src_count_dtype
     )
 
+    # The row-block path needs every source pixel's new row to be the new row
+    # of its bin1: true when the map is monotonic (contig order is kept and
+    # bins only coarsen within a contig, i.e. --level contig) and the source
+    # stores the upper triangle (a square source's lower half folds over).
+    ordered = mc._clr.info.get("storage-mode") != "square" and _is_monotonic(
+        old_to_new[valid_mask]
+    )
+    if ordered:
+        pixels = _coarsen_row_blocks(
+            mc, old_to_new, chunksize=chunksize, count_dtype=count_dtype
+        )
+    else:
+        pixels = _remap_pixel_chunks(
+            mc, old_to_new, valid_mask, chunksize=chunksize, count_dtype=count_dtype
+        )
+
     # Write as a new metacool file using cooler + h5py so the metacooler
     # structure is preserved.
     _write_rebinned_metacool(
         output=output,
         bins=new_bins_out,
-        pixels=_remap_pixel_chunks(
-            mc, old_to_new, valid_mask, chunksize=chunksize, count_dtype=count_dtype
-        ),
+        pixels=pixels,
+        ordered=ordered,
         genomes=genomes,
         contigs=contigs,
         binsize=binsize,
         level=level,
         source_uri=uri,
-        source_metadata=mc.metadata,
+        source_metadata=source_metadata,
         count_dtype=count_dtype,
         assembly_name=mc.info.get("assembly"),
         # api.info always inserts "ordering" (possibly None), so .get()'s
@@ -319,17 +366,113 @@ def _remap_pixel_chunks(
         # Enforce upper triangle
         new_b1, new_b2 = to_upper_triangle(new_b1, new_b2)
 
-        chunk_df = pd.DataFrame(
-            {"bin1_id": new_b1, "bin2_id": new_b2, "count": new_counts}
-        )
-        # sort=True: cooler requires each chunk sorted and duplicate-free.
+        # Sorted and duplicate-free, as cooler's unordered writer requires.
         emitted = True
-        yield chunk_df.groupby(["bin1_id", "bin2_id"], sort=True, as_index=False)[
-            "count"
-        ].sum()
+        yield _sum_by_key(new_b1, new_b2, new_counts)
 
     if not emitted:
         # cooler's unordered path needs at least one chunk to merge.
+        yield pd.DataFrame(
+            {
+                "bin1_id": np.array([], dtype=np.int64),
+                "bin2_id": np.array([], dtype=np.int64),
+                "count": np.array([], dtype=count_dtype),
+            }
+        )
+
+
+def _is_monotonic(values: np.ndarray) -> bool:
+    return bool(len(values) < 2 or (values[1:] >= values[:-1]).all())
+
+
+def _sum_by_key(b1: np.ndarray, b2: np.ndarray, counts: np.ndarray) -> pd.DataFrame:
+    """Sum *counts* per ``(b1, b2)``; the result is sorted (see aggregate_pixels).
+
+    Re-mapped source pixels arrive as one sorted run per source row (a bin map
+    that keeps contig order within each contig keeps each row's ``bin2`` order),
+    which a stable sort merges about twice as fast as quicksort sorts them.
+    """
+    keys = pixel_keys(b1, b2)
+    order = np.argsort(keys, kind="stable")
+    return pixels_from_keys(*reduce_sorted_keys(keys[order], counts[order]))
+
+
+def _row_blocks(
+    old_to_new: np.ndarray, bin1_offset: np.ndarray, chunksize: int
+) -> list[tuple[int, int]]:
+    """Cut the source rows into blocks of whole *output* rows, ~*chunksize* pixels.
+
+    With a monotonic *old_to_new*, the source bins of one output row are
+    contiguous, so the source can be cut wherever the output row changes.  The
+    cuts are chosen so each block holds about *chunksize* source pixels (a
+    single output row larger than that is one block on its own).
+
+    Returns:
+        ``[(lo, hi), ...]`` half-open source-bin ranges, in order, covering
+        every source bin.
+    """
+    n_old = len(old_to_new)
+    if n_old == 0:
+        return []
+    # A dropped bin (-1) inside an output row must not start a new row:
+    # carry the previous row over it (a running max is a forward fill here,
+    # since the kept ids never decrease).
+    rows = np.maximum.accumulate(old_to_new)
+    starts = np.flatnonzero(np.concatenate(([True], rows[1:] != rows[:-1])))
+    pixels_before = bin1_offset[starts]
+    targets = np.arange(chunksize, int(bin1_offset[-1]), chunksize, dtype=np.int64)
+    picks = np.searchsorted(pixels_before, targets, side="right") - 1
+    cuts = np.unique(np.concatenate(([0], starts[np.maximum(picks, 0)], [n_old])))
+    return [(int(lo), int(hi)) for lo, hi in zip(cuts[:-1], cuts[1:], strict=True)]
+
+
+def _coarsen_row_blocks(
+    mc: MetaCooler,
+    old_to_new: np.ndarray,
+    chunksize: int = DEFAULT_CHUNKSIZE,
+    count_dtype: np.dtype = _DEFAULT_COUNT_DTYPE,
+) -> Generator[pd.DataFrame, None, None]:
+    """Stream the re-binned pixels in final order, one block of output rows at a time.
+
+    Requires a monotonic *old_to_new* and an upper-triangular source (see
+    :func:`binnify`): then a source pixel ``(b1, b2)`` lands on ``(old_to_new[b1],
+    old_to_new[b2])`` with the new ``bin1 <= bin2``, and every pixel of an
+    output row comes from one contiguous run of source rows.  Each block's rows
+    are located through ``indexes/bin1_offset`` and read with cooler's pixel
+    selector, then mapped, sorted on their pixel key and reduced;
+    blocks follow each other in output-row order, so their concatenation is the
+    finished, sorted pixel table, written without cooler's external merge, in
+    memory proportional to one block.
+
+    Args:
+        mc: Open source map.
+        old_to_new: Map from source bin id to output bin id (``-1`` = drop).
+        chunksize: Source pixels per block (whole output rows are kept together).
+        count_dtype: dtype of the accumulated ``count`` column.
+
+    Yields:
+        Sorted, duplicate-free pixel frames, in order (at least one, possibly
+        empty, so cooler's ordered writer always has a frame to write).
+    """
+    bin1_offset = mc._bin1_offset
+    pixels = mc._clr.pixels()[["bin1_id", "bin2_id", "count"]]
+    emitted = False
+    for lo, hi in _row_blocks(old_to_new, bin1_offset, chunksize):
+        p0, p1 = int(bin1_offset[lo]), int(bin1_offset[hi])
+        if p0 == p1:
+            continue
+        chunk = pixels[p0:p1]
+        b1 = old_to_new[chunk["bin1_id"].to_numpy()]
+        b2 = old_to_new[chunk["bin2_id"].to_numpy()]
+        counts = chunk["count"].to_numpy().astype(count_dtype)
+        keep = (b1 >= 0) & (b2 >= 0)
+        if not keep.all():
+            b1, b2, counts = b1[keep], b2[keep], counts[keep]
+        if not len(b1):
+            continue
+        emitted = True
+        yield _sum_by_key(b1, b2, counts)
+    if not emitted:
         yield pd.DataFrame(
             {
                 "bin1_id": np.array([], dtype=np.int64),
@@ -553,6 +696,7 @@ def _write_rebinned_metacool(
     genomes: pd.DataFrame,
     contigs: pd.DataFrame,
     binsize: int,
+    ordered: bool = False,
     level: str = "contig",
     source_uri: str | Path = "",
     source_metadata: dict | None = None,
@@ -564,10 +708,13 @@ def _write_rebinned_metacool(
 
     Args:
         output: Destination path for the output ``.metacool`` file.
-        bins: Bins DataFrame with contig names in the ``chrom`` column.
+        bins: Bins DataFrame whose ``chrom`` column holds contig ids (row
+            numbers of *contigs*), sorted.
         pixels: Iterable of pixel DataFrames, consumed one chunk at a time.
         genomes: Genomes DataFrame.
         contigs: Contigs DataFrame.
+        ordered: Whether *pixels* arrive in final order (row blocks of a
+            monotonic re-binning), so cooler appends them without its merge.
         binsize: New bin size in base pairs.  Written explicitly to the output's
             ``bin-size``/``bin-type`` attributes: cooler infers ``None`` (hence
             ``bin-type="variable"``) as soon as every contig collapses to a
@@ -587,9 +734,7 @@ def _write_rebinned_metacool(
 
     # Pre-compute index offsets from the bins DataFrame
     contig_names = contigs["name"].values
-    bin_chrom_codes = pd.Categorical(
-        bins["chrom"].values, categories=contig_names
-    ).codes.astype(np.int64)
+    bin_chrom_codes = bins["chrom"].to_numpy(dtype=np.int64)
     chrom_counts = np.bincount(bin_chrom_codes, minlength=len(contig_names))
     chrom_offset = np.concatenate([[0], np.cumsum(chrom_counts)]).astype(np.int64)
 
@@ -614,17 +759,18 @@ def _write_rebinned_metacool(
     genomes = strip_qc_columns(genomes)
     contigs = strip_qc_columns(contigs)
 
-    # Pixel chunks arrive sorted and de-duplicated but the chunk sequence is not
-    # globally ordered, so ordered=False (cooler's merge pass sums duplicate bin
-    # pairs across chunks). int64/float64 counts so a coarse bin pair summing
-    # >2**31 source contacts is not saturated by cooler's default int32.
+    # Pixel chunks arrive sorted and de-duplicated.  Row blocks of a monotonic
+    # re-binning are also globally ordered; otherwise the chunk sequence is not,
+    # and cooler's merge pass sums duplicate bin pairs across chunks. int64 /
+    # float64 counts so a coarse bin pair summing >2**31 source contacts is not
+    # saturated by cooler's default int32.
     write_cooler(
         output,
         bins,
         pixels,
         binsize=binsize,
         dtypes={"count": count_dtype},
-        ordered=False,
+        ordered=ordered,
         symmetric_upper=True,
         metadata=metadata,
     )

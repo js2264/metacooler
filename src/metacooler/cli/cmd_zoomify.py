@@ -9,6 +9,7 @@ import rich_click as click
 from metacooler.cli._options import (
     check_output,
     force_option,
+    nproc_option,
     quiet_option,
     verbose_option,
 )
@@ -50,8 +51,14 @@ from metacooler.cli.main import MetaCoolURI, cli
     help=(
         "Directory for the intermediate per-level files (default: the system "
         "temporary directory). Mirrors cooler's own [cyan]zoomify --temp-dir[/cyan]; "
-        "point it at fast local scratch with room for one level."
+        "point it at fast local scratch with room for one level "
+        "(with --nproc, room for the levels being built and their parents)."
     ),
+)
+@nproc_option(
+    "Levels built at once, each in its own process (a level waits for the "
+    "finer level it is coarsened from). The output is identical whatever the "
+    "value; each process holds one level's chunk in memory."
 )
 @force_option
 @verbose_option
@@ -62,6 +69,7 @@ def cmd_zoomify(
     levels: int,
     resolutions: str | None,
     temp_dir: Path | None,
+    nproc: int,
     force: bool,
     verbose: bool,
     quiet: bool,
@@ -86,5 +94,6 @@ def cmd_zoomify(
         resolutions=resolutions,
         temp_dir=temp_dir,
         force=force,
+        nproc=nproc,
     )
     click.echo(f"Zoomified {metacool_path} → {output}")

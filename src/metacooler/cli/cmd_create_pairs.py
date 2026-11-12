@@ -7,7 +7,7 @@ from typing import Literal, cast
 
 import rich_click as click
 
-from metacooler.cli._options import check_output
+from metacooler.cli._options import check_output, nproc_option
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
 from metacooler.ps import DEFAULT_BINS_PER_DECADE
@@ -73,6 +73,11 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     "per-call cost that scales with contig count, so smaller chunks cost "
     "disproportionately more.",
 )
+@nproc_option(
+    "Threads binning pairs while the file is read and decompressed (which "
+    "stays on one thread). The output is identical whatever the value; each "
+    "thread holds one more batch of pairs in memory."
+)
 @click.option(
     "--ps/--no-ps",
     default=True,
@@ -127,6 +132,7 @@ def cmd_create_pairs(
     qc_threshold: str,
     ps: bool,
     ps_bins_per_decade: int,
+    nproc: int,
 ) -> None:
     """
     Create a metacool file from a pairs file, bins, and contig assignments.
@@ -192,4 +198,5 @@ def cmd_create_pairs(
         ps=ps,
         ps_bins_per_decade=ps_bins_per_decade,
         force=force,
+        nproc=nproc,
     )
