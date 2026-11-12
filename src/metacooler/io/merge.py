@@ -13,7 +13,7 @@ import h5py
 import numpy as np
 
 from metacooler._version import __version__
-from metacooler.io._utils import check_output_path, cooler_writer_shims
+from metacooler.io._utils import check_output_path, cooler_writer_shims, write_column
 from metacooler.qc import QC_COLUMN_PREFIX, QC_METADATA_KEY
 from metacooler.schema import (
     COOLER_FORMAT,
@@ -259,7 +259,7 @@ def merge(
         # with the metacooler schema that stores it as plain int32.
         chrom_data = fdst["bins"]["chrom"][:]
         del fdst["bins"]["chrom"]
-        fdst["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+        write_column(fdst["bins"], "chrom", chrom_data, dtype=np.int32)
 
         # Set attrs
         fdst.attrs["format"] = COOLER_FORMAT

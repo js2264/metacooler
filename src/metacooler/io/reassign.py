@@ -49,10 +49,10 @@ import pandas as pd
 
 from metacooler.io._utils import (
     _finalize_metacool_file,
-    _str_to_hdf5,
     check_ascii_names,
     check_output_path,
     resolve_count_dtype,
+    write_column,
     write_cooler,
 )
 from metacooler.io.create import (
@@ -552,19 +552,17 @@ def _write_relabelled(
         del grp["genomes"]
         genomes_group = grp.create_group("genomes", track_order=True)
         for column in genomes.columns:
-            genomes_group.create_dataset(
-                column, data=_str_to_hdf5(genomes[column].values)
-            )
+            write_column(genomes_group, column, genomes[column].values)
 
         del grp["contigs"]["genome_id"]
-        grp["contigs"].create_dataset(
-            "genome_id", data=contigs["genome_id"].to_numpy(np.int32)
+        write_column(
+            grp["contigs"], "genome_id", contigs["genome_id"].to_numpy(np.int32)
         )
 
         indexes = grp["indexes"]
         if "genome_offset" in indexes:
             del indexes["genome_offset"]
-        indexes.create_dataset("genome_offset", data=genome_offset.astype(np.int64))
+        write_column(indexes, "genome_offset", genome_offset, dtype=np.int64)
 
         grp.attrs["ngenomes"] = len(genomes)
         grp.attrs["contig-ordering"] = ordering

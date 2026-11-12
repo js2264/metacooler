@@ -401,6 +401,15 @@
   Together with the key-based aggregation, on a 200 k-contig, 30 M-pair
   library: `create pairs` 76.0 s / 3.54 GB → 28.1 s / 2.56 GB, `--sort-strategy
   external` 78.8 s / 3.67 GB → 39.9 s / 3.50 GB; outputs identical.
+- **metacooler's own tables are compressed** like cooler's (gzip level 6,
+  shuffle, chunked): `/genomes`, `/contigs`, `/bins/chrom`,
+  `indexes/chrom_offset`, `indexes/genome_offset` and the QC columns, through
+  one `io/_utils.write_column`, in `create`, `binnify`, `merge`, `reassign` and
+  QC storage. They were written uncompressed: on a 200 k-contig map they took
+  11.8 of 47.5 MB (`bins/chrom` alone 3.4 MB, against 0.15 MB now), and the
+  file shrinks from 48.1 to 38.9 MB. A storage change only: filters are
+  transparent to readers, and existing files read as before (see
+  [Storage filters](format.md#storage-filters)).
 
 ### Packaging and CI
 

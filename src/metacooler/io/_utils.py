@@ -32,6 +32,8 @@ from metacooler.schema import (
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 
+    import numpy.typing as npt
+
     from metacooler.api import MetaCooler
 
 logger = logging.getLogger("metacooler")
@@ -336,6 +338,42 @@ def to_upper_triangle(
         not modified.
     """
     return np.minimum(bin1, bin2), np.maximum(bin1, bin2)
+
+
+#: Storage filters for every dataset metacooler writes itself (``/genomes``,
+#: ``/contigs``, ``bins/chrom``, ``chrom_offset``, ``genome_offset``, the QC
+#: columns): cooler's own defaults -- gzip level 6 behind the shuffle filter,
+#: chunked by h5py -- so these tables compress like the ``/bins`` and
+#: ``/pixels`` cooler writes beside them.  Filters are transparent to readers.
+H5_STORAGE: dict[str, object] = {
+    "compression": "gzip",
+    "compression_opts": 6,
+    "shuffle": True,
+}
+
+
+def write_column(
+    group: h5py.Group, name: str, data: object, dtype: npt.DTypeLike | None = None
+) -> h5py.Dataset:
+    """Create the dataset *name* in *group* from *data*, compressed.
+
+    The single way metacooler writes a table column of its own: with
+    :data:`H5_STORAGE`, and with text converted to fixed-length bytes (h5py
+    cannot write ``object`` or ``StringDtype`` arrays).
+
+    Args:
+        group: Table group to write into.
+        name: Column name.
+        data: Column values.
+        dtype: Optional dtype to cast to.
+
+    Returns:
+        The new dataset.
+    """
+    arr = _str_to_hdf5(np.asarray(data))
+    if dtype is not None:
+        arr = arr.astype(dtype)
+    return group.create_dataset(name, data=arr, **H5_STORAGE)
 
 
 #: A pixel's sort key is ``bin1 << 32 | bin2``: one int64 whose integer order is
@@ -950,19 +988,19 @@ def _finalize_metacool_file(
             del f["genomes"]
         g = f.create_group("genomes", track_order=True)
         for col in genomes.columns:
-            g.create_dataset(col, data=_str_to_hdf5(genomes[col].values))
+            write_column(g, col, genomes[col].values)
 
         # Write /contigs
         if "contigs" in f:
             del f["contigs"]
         c = f.create_group("contigs", track_order=True)
         for col in contigs.columns:
-            c.create_dataset(col, data=_str_to_hdf5(contigs[col].values))
+            write_column(c, col, contigs[col].values)
 
         # Strip cooler's enum dtype from bins/chrom so it stores plain int32
         chrom_data = f["bins"]["chrom"][:]
         del f["bins"]["chrom"]
-        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+        write_column(f["bins"], "chrom", chrom_data, dtype=np.int32)
 
         # Compute chrom_offset from bins if not provided
         if chrom_offset is None:
@@ -981,7 +1019,7 @@ def _finalize_metacool_file(
         ):
             if key in idx:
                 del idx[key]
-            idx.create_dataset(key, data=data.astype(np.int64))
+            write_column(idx, key, data, dtype=np.int64)
 
         # Format attributes
         f.attrs["format"] = COOLER_FORMAT
@@ -1068,7 +1106,7 @@ def store_qc(
         for column in QC_GENOME_COLUMNS:
             if column in genomes:
                 del genomes[column]
-            genomes.create_dataset(column, data=per_genome[column].to_numpy())
+            write_column(genomes, column, per_genome[column].to_numpy())
 
 
 def _filter_by_genomes_and_contigs(
