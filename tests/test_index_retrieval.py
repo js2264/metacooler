@@ -290,3 +290,14 @@ class TestDumpAndExtractRowBlocks:
             pd.DataFrame(cooler.Cooler(str(plain)).pixels()[:]),
             pd.DataFrame(cooler.Cooler(str(square)).pixels()[:]),
         )
+
+
+def test_network_folds_many_chunks(tiny_metacooler: Path, tmp_path: Path):
+    """More chunks than _FOLD_EVERY: the running fold gives the same edges."""
+    from metacooler.io.network import network
+
+    one = tmp_path / "one.tsv"
+    many = tmp_path / "many.tsv"
+    network(tiny_metacooler, level="contig", out=one)
+    network(tiny_metacooler, level="contig", out=many, chunksize=1)
+    assert one.read_text() == many.read_text()

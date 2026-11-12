@@ -393,6 +393,10 @@
   instead of a pandas `groupby` over two columns. `create pairs` bins each chunk
   by sorting its keys and counting runs, and its in-memory sort frees each
   frame as soon as it is keyed. Count dtypes are kept exactly as before.
+  `aggregate` and `network` aggregate their chunks the same way, and every
+  caller lets `aggregate_pixels` choose the sort: a stable sort (which merges
+  existing runs) when the keys come mostly in order, as a genome-grouped remap
+  does, quicksort when they are scrambled.
 - **Pair contig names are dictionary-encoded.** `create pairs` and `ps --pairs`
   ask pyarrow for the two chrom columns as `dictionary<int32, string>`, so the
   names are never materialised per pair and are mapped to contig ids once per

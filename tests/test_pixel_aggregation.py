@@ -165,6 +165,16 @@ def test_from_cool_sums_duplicate_source_pixels(tmp_path):
     ]
 
 
+def test_sort_kind_follows_run_length():
+    from metacooler.io._utils import _sort_kind
+
+    runs = np.concatenate([np.arange(i, i + 50) for i in range(0, 5000, 7)])
+    assert _sort_kind(runs) == "stable"
+    scrambled = np.random.default_rng(0).permutation(5000)
+    assert _sort_kind(scrambled) == "quicksort"
+    assert _sort_kind(scrambled, runs_known_sorted=True) == "stable"
+
+
 class TestRemapBins:
     def test_remap_bins_by_names_or_categories(self):
         from metacooler.io.create import _remap_bins

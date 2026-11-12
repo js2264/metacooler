@@ -20,7 +20,12 @@ import pandas as pd
 from scipy import sparse
 
 from metacooler.api import MetaCooler
-from metacooler.io._utils import chrom_codes, to_upper_triangle, write_cooler
+from metacooler.io._utils import (
+    aggregate_pixels,
+    chrom_codes,
+    to_upper_triangle,
+    write_cooler,
+)
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -149,9 +154,9 @@ def _aggregate_pixel_stream(
     n_pix = len(mc._clr.pixels())
     for i in range(0, n_pix, chunksize):
         chunk = mc._clr.pixels()[i : i + chunksize]
-        c1 = mapping[chunk["bin1_id"].values].copy()
-        c2 = mapping[chunk["bin2_id"].values].copy()
-        vals = chunk[count_col].values
+        c1 = mapping[chunk["bin1_id"].to_numpy()]
+        c2 = mapping[chunk["bin2_id"].to_numpy()]
+        vals = chunk[count_col].to_numpy()
         # Promote integer counts to int64 (a genome pair can exceed 2**31
         # contacts on real data); preserve float weights (e.g. balanced
         # values) instead of truncating them to zero.
@@ -162,15 +167,12 @@ def _aggregate_pixel_stream(
         c1, c2 = to_upper_triangle(c1, c2)
 
         df = pd.DataFrame(
-            {
-                "bin1_id": c1.astype(np.int64),
-                "bin2_id": c2.astype(np.int64),
-                "count": vals,
-            }
+            {"bin1_id": c1, "bin2_id": c2, "count": vals},
+            copy=False,
         )
-        # Aggregate within-chunk duplicates to reduce cooler's external sort load
-        df = df.groupby(["bin1_id", "bin2_id"], as_index=False)["count"].sum()
-        yield df[["bin1_id", "bin2_id", "count"]]
+        # Aggregate within-chunk duplicates to reduce cooler's external sort
+        # load; the result is sorted and duplicate-free.
+        yield aggregate_pixels([df])
 
 
 def _write_aggregated_cool(

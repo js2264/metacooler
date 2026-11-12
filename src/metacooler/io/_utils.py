@@ -11,7 +11,7 @@ import os
 import re
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import h5py
 import numpy as np
@@ -432,6 +432,26 @@ def _is_sorted(values: np.ndarray) -> bool:
     return bool(len(values) < 2 or (values[1:] >= values[:-1]).all())
 
 
+#: Mean length of the already-sorted runs in a key array above which a stable
+#: sort (timsort, which merges existing runs) beats quicksort.  Measured on a
+#: 200 k-contig map: a genome-grouped remap has runs of ~40-60 keys and sorts
+#: 1.5-4x faster stably; scrambled keys have runs of ~2 and sort 2x faster
+#: with quicksort.
+_STABLE_SORT_MIN_RUN = 8
+
+
+def _sort_kind(
+    keys: np.ndarray, runs_known_sorted: bool = False
+) -> Literal["stable", "quicksort"]:
+    """Pick the faster ``np.argsort`` kind for *keys* (see above)."""
+    if runs_known_sorted:
+        return "stable"
+    descents = int(np.count_nonzero(keys[1:] < keys[:-1]))
+    return (
+        "stable" if len(keys) >= _STABLE_SORT_MIN_RUN * (descents + 1) else "quicksort"
+    )
+
+
 def reduce_sorted_keys(
     keys: np.ndarray, counts: np.ndarray | None
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -493,7 +513,7 @@ def aggregate_pixels(
     counts = np.concatenate(counts_list) if n_frames > 1 else counts_list[0]
     del keys_list, counts_list
     if not (all_sorted and n_frames == 1):
-        order = np.argsort(keys, kind="stable" if all_sorted else "quicksort")
+        order = np.argsort(keys, kind=_sort_kind(keys, all_sorted))
         keys = keys[order]
         counts = counts[order]
         del order

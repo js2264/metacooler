@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from metacooler.io._utils import check_output_path, chrom_codes
+from metacooler.io._utils import (
+    aggregate_pixels,
+    check_output_path,
+    chrom_codes,
+    to_upper_triangle,
+)
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -25,20 +30,20 @@ logger = logging.getLogger("metacooler")
 _FOLD_EVERY = 32
 
 
-def _fold(frames: list[pd.DataFrame], *, sort: bool = False) -> pd.DataFrame:
-    """Concatenate per-chunk edge frames and re-sum duplicated node pairs.
+def _fold(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Merge per-chunk edge frames, re-summing node pairs seen more than once.
+
+    The frames are pixel-shaped (``bin1_id``/``bin2_id``/``count`` standing for
+    ``node1``/``node2``/``value``), so this is :func:`aggregate_pixels`: a
+    key-based merge whose output is sorted by node pair.
 
     Args:
-        frames: Non-empty list of frames with ``node1``/``node2``/``value``.
-        sort: Sort the output by node pair (only worth paying once, at the end).
+        frames: Non-empty list of sorted, duplicate-free edge frames.
 
     Returns:
-        One frame with a single row per ``(node1, node2)`` pair.
+        One frame with a single row per node pair, sorted.
     """
-    combined = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
-    return combined.groupby(["node1", "node2"], sort=sort, as_index=False)[
-        "value"
-    ].sum()
+    return aggregate_pixels(frames)
 
 
 def _aggregate_pairs(
@@ -66,23 +71,25 @@ def _aggregate_pairs(
 
     for lo in range(0, n_pix, chunksize):
         chunk = mc._clr.pixels()[lo : lo + chunksize]
-        n1 = bin_to_node[chunk["bin1_id"].values].copy()
-        n2 = bin_to_node[chunk["bin2_id"].values].copy()
-
-        swap = n1 > n2
-        n1[swap], n2[swap] = n2[swap].copy(), n1[swap].copy()
-
-        df = pd.DataFrame({"node1": n1, "node2": n2, "value": chunk[weight].values})
-        pending.append(
-            df.groupby(["node1", "node2"], sort=False, as_index=False)["value"].sum()
+        n1, n2 = to_upper_triangle(
+            bin_to_node[chunk["bin1_id"].to_numpy()],
+            bin_to_node[chunk["bin2_id"].to_numpy()],
         )
+        df = pd.DataFrame(
+            {"bin1_id": n1, "bin2_id": n2, "count": chunk[weight].to_numpy()},
+            copy=False,
+        )
+        pending.append(aggregate_pixels([df]))
         if len(pending) >= _FOLD_EVERY:
             running = _fold(pending if running is None else [running, *pending])
             pending = []
 
     if running is None and not pending:
         return None
-    return _fold(pending if running is None else [running, *pending], sort=True)
+    edges = _fold(pending if running is None else [running, *pending])
+    return edges.rename(
+        columns={"bin1_id": "node1", "bin2_id": "node2", "count": "value"}
+    )
 
 
 def network(
