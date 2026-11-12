@@ -1,8 +1,17 @@
 name: CI
 
 on:
+  # Feature branches are tested through their pull request only. An unfiltered
+  # `push` fired alongside `pull_request` on every push to a PR branch, and the
+  # concurrency group below cannot dedupe the pair (`github.ref` is
+  # `refs/heads/<branch>` for one, `refs/pull/<n>/merge` for the other), so the
+  # whole matrix ran twice. A branch with no PR can still be tested by hand.
   push:
+    branches:
+      - devel
+      - main
   pull_request:
+  workflow_dispatch:
 
 # A rapid series of pushes to the same ref only bills the last one.
 concurrency:

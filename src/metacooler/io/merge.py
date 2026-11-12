@@ -26,7 +26,7 @@ from metacooler.schema import (
 from metacooler.uri import parse_uri
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Generator, Iterable
 
 
 def _hash_group(f: h5py.Group, group: str) -> str:
@@ -94,7 +94,7 @@ def _binsize(f: h5py.Group) -> int | None:
 
 
 @contextlib.contextmanager
-def _open_uri(uri: str) -> Iterator[h5py.Group]:
+def _open_uri(uri: str) -> Generator[h5py.Group, None, None]:
     """Open the map a ``file`` or ``file::group`` URI addresses, read-only.
 
     Args:

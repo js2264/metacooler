@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import cooler
 import pytest
@@ -584,8 +585,8 @@ class TestCreateCoolMatchesSource:
 
         pd.testing.assert_frame_equal(_bins_frame(src), _bins_frame(got))
         pd.testing.assert_frame_equal(
-            src.pixels()[:].reset_index(drop=True),
-            got.pixels()[:].reset_index(drop=True),
+            cast(pd.DataFrame, src.pixels()[:]).reset_index(drop=True),
+            cast(pd.DataFrame, got.pixels()[:]).reset_index(drop=True),
         )
         assert got.info["sum"] == src.info["sum"]
         assert len(got.pixels()[:]) > 0
@@ -606,8 +607,8 @@ class TestCreateCoolMatchesSource:
         back = cooler.Cooler(str(flat))
         pd.testing.assert_frame_equal(_bins_frame(src), _bins_frame(back))
         pd.testing.assert_frame_equal(
-            src.pixels()[:].reset_index(drop=True),
-            back.pixels()[:].reset_index(drop=True),
+            cast(pd.DataFrame, src.pixels()[:]).reset_index(drop=True),
+            cast(pd.DataFrame, back.pixels()[:]).reset_index(drop=True),
         )
 
     @pytest.mark.parametrize(("label", "source"), SOURCES, ids=[s[0] for s in SOURCES])

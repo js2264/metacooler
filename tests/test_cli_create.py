@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import h5py
 import pytest
@@ -1036,8 +1037,8 @@ class TestCreatePairsPixelCorrectness:
         pd.testing.assert_frame_equal(bins_ref, bins_got)
 
         # --- pixels ---
-        pix_ref = ref.pixels()[:].reset_index(drop=True)
-        pix_got = got.pixels()[:].reset_index(drop=True)
+        pix_ref = cast(pd.DataFrame, ref.pixels()[:]).reset_index(drop=True)
+        pix_got = cast(pd.DataFrame, got.pixels()[:]).reset_index(drop=True)
         pd.testing.assert_frame_equal(pix_ref, pix_got, check_like=False)
 
         # Guard the guard: an empty reference would satisfy everything above.

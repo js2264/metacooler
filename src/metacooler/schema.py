@@ -283,7 +283,7 @@ def non_ascii_values(values: object) -> list[str]:
     if (
         arr.dtype.kind == "S"
         and arr.dtype.itemsize > 0
-        and int(np.ascontiguousarray(arr).view(np.uint8).max()) < 0x80
+        and int(np.max(np.ascontiguousarray(arr).view(np.uint8))) < 0x80
     ):
         return []
     out: list[str] = []
@@ -601,7 +601,7 @@ def validate(uri: str | Path) -> None:
         # --- bins/chrom range and ordering ---
         bins_chrom = np.array(b["chrom"]).astype(np.int64)
         if n_bins > 0:
-            if bins_chrom.min() < 0 or bins_chrom.max() >= n_contigs:
+            if np.min(bins_chrom) < 0 or np.max(bins_chrom) >= n_contigs:
                 raise MetaCoolerFormatError(
                     f"bins/chrom values out of range [0, {n_contigs})"
                 )
@@ -694,7 +694,7 @@ def validate(uri: str | Path) -> None:
 
         # --- contig genome_ids must be in range ---
         genome_ids = np.array(c["genome_id"]).astype(np.int64)
-        if genome_ids.min() < 0 or genome_ids.max() >= n_genomes:
+        if np.min(genome_ids) < 0 or np.max(genome_ids) >= n_genomes:
             raise MetaCoolerFormatError(
                 f"genome_id values out of range [0, {n_genomes})"
             )
@@ -777,7 +777,7 @@ def validate(uri: str | Path) -> None:
                 positions = np.arange(start, stop)
                 b1 = np.array(p["bin1_id"][start:stop]).astype(np.int64)
                 b2 = np.array(p["bin2_id"][start:stop]).astype(np.int64)
-                if b1.min() < 0 or b2.max() >= n_bins:
+                if np.min(b1) < 0 or np.max(b2) >= n_bins:
                     raise MetaCoolerFormatError(
                         f"pixel bin ids out of range [0, {n_bins})"
                     )
@@ -1050,7 +1050,12 @@ def _deep_pixel_problems(path: Path, group_path: str) -> list[str]:
             if integer_counts:
                 total += int(np.array(pixels["count"][lo:hi]).astype(np.int64).sum())
 
-            if b1.min() < 0 or b2.min() < 0 or b1.max() >= n_bins or b2.max() >= n_bins:
+            if (
+                np.min(b1) < 0
+                or np.min(b2) < 0
+                or np.max(b1) >= n_bins
+                or np.max(b2) >= n_bins
+            ):
                 once("range", f"pixel bin ids out of range [0, {n_bins})")
             if not square and np.any(b1 > b2):
                 bad = int(np.argmax(b1 > b2))
