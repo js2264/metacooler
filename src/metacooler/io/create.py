@@ -57,7 +57,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
     from typing import Literal
 
 
@@ -1975,7 +1975,7 @@ def _stream_remapped_pixels(
 
 
 @contextlib.contextmanager
-def _staged_output(final: Path) -> Iterator[Path]:
+def _staged_output(final: Path) -> Generator[Path, None, None]:
     """Build the output at a sibling temp path, moving it into place on success.
 
     Writing straight to the final path meant a partial or invalid file could sit

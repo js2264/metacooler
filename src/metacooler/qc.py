@@ -188,7 +188,10 @@ class ContactQC:
         self.source = source
         self.unbinned_genome = unbinned_genome
         self.counts = np.zeros(len(QC_CATEGORIES), dtype=np.int64)
-        self.per_genome = np.zeros((self.n_genomes, len(QC_CATEGORIES)), dtype=np.int64)
+        # int64 until `_promote_for` widens it to float64 for fractional weights.
+        self.per_genome: np.ndarray = np.zeros(
+            (self.n_genomes, len(QC_CATEGORIES)), dtype=np.int64
+        )
 
     # ------------------------------------------------------------------
     # Accumulation
