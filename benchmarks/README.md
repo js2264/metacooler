@@ -17,9 +17,9 @@ Each command runs as a fresh process under GNU `time` and `timeout`. The results
 are one row per run in `_results/timings.tsv`, and every table and figure is
 drawn from that file.
 
-Every timing is against **cooler 0.12.1**, pinned as `COOLER_VERSION` in
-`bench.sh`: the notebook refuses to run with any other cooler, and the workflow
-installs that one. (`uv.lock` pins an older cooler for the test suite.)
+Every timing is against **cooler 0.12.1**, the version `uv.lock` pins.
+`bench.sh` names it (`COOLER_VERSION`) and the notebook refuses to time any
+other, so a lock that moves cooler on has to move that line too.
 
 | file | what |
 |---|---|
@@ -31,16 +31,13 @@ installs that one. (`uv.lock` pins an older cooler for the test suite.)
 ## Render
 
 ```bash
-uv sync && uv pip install cooler==0.12.1   # the cooler the benchmarks are against
-source .venv/bin/activate                    # metacooler, cooler and jupyter on PATH
+uv sync && source .venv/bin/activate   # metacooler, cooler and jupyter on PATH
 cd benchmarks
 quarto render benchmarks.qmd                         # the whole ladder: ~4 h on 4 cores, 16 GB RAM
 BENCH_DATASETS="S M" quarto render benchmarks.qmd    # a quick look: minutes
 ```
 
 Needs GNU `time` (`apt install time`); `pigz` speeds up dataset generation.
-Call the tools from the activated environment, not through `uv run`: `uv run`
-and `uv sync` put back the cooler that `uv.lock` pins.
 
 | variable | default | |
 |---|---|---|

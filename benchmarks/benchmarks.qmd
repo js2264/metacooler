@@ -68,13 +68,13 @@ Every command below runs **as a fresh process, from bash, as a user would type i
 (wall clock; CPU = user + system, including children; peak resident memory of the largest process)
 and `timeout`. Each run is one row of `timings.tsv`; every table and figure is drawn from it.
 cooler and metacooler get the same inputs and must produce the same contacts — that is checked,
-not assumed. cooler is version 0.12.1, its latest release, pinned in `bench.sh`: the settings cell
-refuses to time any other. A command that hits the time limit is stopped and reported as a lower bound; one
+not assumed. cooler is version 0.12.1, the one `uv.lock` pins; `bench.sh` names it, and the
+settings cell refuses to time any other. A command that hits the time limit is stopped and reported as a lower bound; one
 that the kernel kills for want of memory is reported as out of memory.
 
 ```bash
 # Render (runs the benchmarks: hours for the full ladder; minutes for S and M)
-uv sync && uv pip install cooler==0.12.1 && source .venv/bin/activate
+uv sync && source .venv/bin/activate
 cd benchmarks && quarto render benchmarks.qmd
 BENCH_DATASETS="S M" quarto render benchmarks.qmd   # a quick look
 ```
@@ -248,8 +248,8 @@ cooler --version
 # Every timing is against one cooler: refuse to time another.
 installed=$(python -c 'import cooler; print(cooler.__version__)')
 if [[ $installed != "$COOLER_VERSION" ]]; then
-    echo "cooler $installed is installed; these benchmarks are against cooler $COOLER_VERSION:" >&2
-    echo "    uv pip install cooler==$COOLER_VERSION" >&2
+    echo "cooler $installed is installed; these benchmarks are against cooler $COOLER_VERSION." >&2
+    echo "Run uv sync (uv.lock pins it), or bump COOLER_VERSION in bench.sh with the lock." >&2
     exit 1
 fi
 ```
