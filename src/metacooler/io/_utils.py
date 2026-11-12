@@ -995,12 +995,13 @@ def _sorted_pixel_chunks(
     output has out-of-order and *duplicate* pixels.  That is how
     ``create pairs --sort-strategy external`` failed ``validate()`` (``bin1_offset
     disagrees with pixels/bin1_id``) on 30 M pairs over 200 k contigs, after the
-    whole run.  ``create pairs`` (aggregated with ``sort=False``), ``create
-    cool`` and ``reassign`` (re-mapped in source order) all stream such chunks.
+    whole run, when its chunks still came out of a pandas groupby with
+    ``sort=False``.  ``create cool`` and ``reassign``, which re-map pixels in
+    source order, stream such chunks.
 
-    A chunk that is already sorted, as ``binnify``'s, ``aggregate``'s and
-    ``extract``'s are, costs one vectorised comparison and is passed through
-    as is.
+    A chunk that is already sorted, as those of ``create pairs``, ``binnify``,
+    ``aggregate`` and ``extract`` are, costs one vectorised comparison and is
+    passed through as is.
 
     Args:
         pixels: Pixel chunks with ``bin1_id`` and ``bin2_id`` columns.
