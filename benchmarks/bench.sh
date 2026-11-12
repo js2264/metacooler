@@ -26,6 +26,7 @@ TIMINGS=$RESULTS/timings.tsv
 DATASETS=${BENCH_DATASETS:-S M L XL}
 BINSIZE=${BENCH_BINSIZE:-1000}
 TIMEOUT=${BENCH_TIMEOUT:-1800}         # seconds, per run
+COOLER_VERSION=0.12.1                  # the cooler every timing is against; CI installs it
 ZOOMS=${BENCH_RESOLUTIONS:-$BINSIZE,$((2 * BINSIZE)),$((5 * BINSIZE)),$((10 * BINSIZE))}
 
 mkdir -p "$DATA" "$MAPS" "$QUERIES" "$SCRATCH" "$LOGS" "$RESULTS"

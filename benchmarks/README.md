@@ -12,28 +12,35 @@ four reproducible synthetic metagenomes, from 10³ to 2 × 10⁶ contigs:
 
 It covers building a map from pairs (`cooler cload pairs` vs `metacooler create
 pairs`), converting between the formats, multi-resolution pyramids (`zoomify`),
-querying a contig, a genome and a genome pair (command line and in-process),
-and genome-level aggregation. Each command runs as a fresh process under GNU
-`time` and `timeout`. The results are one row per run in `_results/timings.tsv`,
-and every table and figure is drawn from that file.
+querying a contig, a genome and a genome pair, and genome-level aggregation.
+Each command runs as a fresh process under GNU `time` and `timeout`. The results
+are one row per run in `_results/timings.tsv`, and every table and figure is
+drawn from that file.
+
+Every timing is against **cooler 0.12.1**, pinned as `COOLER_VERSION` in
+`bench.sh`: the notebook refuses to run with any other cooler, and the workflow
+installs that one. (`uv.lock` pins an older cooler for the test suite.)
 
 | file | what |
 |---|---|
 | `benchmarks.qmd` | the notebook: bash cells that run and time the commands; Python for tables and figures |
 | `bench.sh` | settings, and `bench`, the timing function every bash cell sources |
 | `simulate.py` | the dataset generator: presets, seeds, model |
-| `retrieval.py` | in-process query latency, three ways (cool + binning table, `MetaCooler` API, raw indexes) |
+| `targets.py` | what the queries ask for: one contig, one MAG and one MAG pair per dataset, from a fixed seed |
 
 ## Render
 
 ```bash
-uv sync && source .venv/bin/activate   # metacooler, cooler and jupyter on PATH
+uv sync && uv pip install cooler==0.12.1   # the cooler the benchmarks are against
+source .venv/bin/activate                    # metacooler, cooler and jupyter on PATH
 cd benchmarks
 quarto render benchmarks.qmd                         # the whole ladder: ~4 h on 4 cores, 16 GB RAM
 BENCH_DATASETS="S M" quarto render benchmarks.qmd    # a quick look: minutes
 ```
 
 Needs GNU `time` (`apt install time`); `pigz` speeds up dataset generation.
+Call the tools from the activated environment, not through `uv run`: `uv run`
+and `uv sync` put back the cooler that `uv.lock` pins.
 
 | variable | default | |
 |---|---|---|
@@ -51,7 +58,7 @@ and re-rendered without re-running the benchmarks.
 
 [`.github/workflows/benchmarks.yml`](../.github/workflows/benchmarks.yml)
 renders the notebook for every `v*` tag and on demand (Actions → Benchmarks →
-Run workflow, to pick the datasets, the time limit and the cooler version). The
+Run workflow, to pick the datasets and the time limit). The
 page, the tables, the figures and the command logs are kept as a workflow
 artifact. On a release, the page and a zip of `_results/` are attached to it.
 
