@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import bz2
+import functools
 import gzip
 from pathlib import Path
 
 import cooler
 import h5py
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -397,6 +399,94 @@ class TestCoolerWriterShims:
             dset = f["bins"]["chrom"]
             assert dset.dtype == "int32"
             assert h5py.check_enum_dtype(dset.dtype) is None
+
+
+class TestUnorderedWrites:
+    """cooler's unordered writer is only correct when every chunk is sorted.
+
+    Before cooler 0.12 it indexes each chunk as if it were, so a merge that takes
+    more than one ``mergebuf`` epoch interleaves them: out-of-order and duplicate
+    pixels, which ``validate()`` rejected only once the whole run was over.
+    """
+
+    @staticmethod
+    def _unsorted_chunks(n_bins: int) -> list[pd.DataFrame]:
+        """Upper-triangle pixels, aggregated with ``sort=False`` as ``create`` does."""
+        rng = np.random.default_rng(0)
+        chunks = []
+        for _ in range(4):
+            bin1, bin2 = np.sort(rng.integers(0, n_bins, (2, 300)), axis=0)
+            frame = pd.DataFrame({"bin1_id": bin1, "bin2_id": bin2, "count": 1})
+            grouped = frame.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)
+            chunks.append(grouped["count"].sum())
+        return chunks
+
+    def test_sorts_only_the_chunks_that_need_it(self):
+        from metacooler.io._utils import _sorted_pixel_chunks
+
+        done = pd.DataFrame(
+            {"bin1_id": [0, 0, 2], "bin2_id": [1, 3, 2], "count": [1, 2, 3]}
+        )
+        todo = done.iloc[::-1]
+        first, second = _sorted_pixel_chunks([done, todo], n_bins=4)
+        assert first is done
+        assert second.to_numpy().tolist() == done.to_numpy().tolist()
+
+    def test_multi_epoch_merge_of_unsorted_chunks(self, tmp_path):
+        from metacooler.io._utils import write_cooler
+
+        n_bins = 40
+        chunks = self._unsorted_chunks(n_bins)
+        assert not all(c["bin1_id"].is_monotonic_increasing for c in chunks)
+        expected = (
+            pd.concat(chunks)
+            .groupby(["bin1_id", "bin2_id"], as_index=False)["count"]
+            .sum()
+        )
+        bins = pd.DataFrame(
+            {
+                "chrom": ["a"] * n_bins,
+                "start": np.arange(n_bins) * 10,
+                "end": np.arange(1, n_bins + 1) * 10,
+            }
+        )
+        out = tmp_path / "x.cool"
+        # ~1,000 records through a 50-record buffer: some twenty merge epochs.
+        write_cooler(out, bins, iter(chunks), ordered=False, mergebuf=50)
+
+        got = pd.DataFrame(cooler.Cooler(str(out)).pixels()[:])
+        pd.testing.assert_frame_equal(got, expected, check_dtype=False)
+        with h5py.File(out, "r") as f:
+            offsets = f["indexes/bin1_offset"][:]
+        starts = np.searchsorted(got["bin1_id"].to_numpy(), np.arange(n_bins + 1))
+        assert offsets.tolist() == starts.tolist()
+
+    def test_create_pairs_external_sort(
+        self, tmp_path, tiny_bins_bed, tiny_pairs, tiny_contigs_table, monkeypatch
+    ):
+        """``create pairs --sort-strategy external`` gives the in-memory result."""
+
+        def create(name: str, sort_in_memory: bool):
+            out = tmp_path / f"{name}.metacool"
+            from_pairs(
+                uri=out,
+                bins=tiny_bins_bed,
+                pairs=tiny_pairs,
+                contig_genome_map=tiny_contigs_table,
+                chunksize=20,
+                sort_in_memory=sort_in_memory,
+            )
+            return pd.DataFrame(cooler.Cooler(str(out)).pixels()[:])
+
+        memory = create("memory", sort_in_memory=True)
+        # Ten chunks of 20 pairs, merged through a 10-record buffer.
+        monkeypatch.setattr(
+            cooler,
+            "create_cooler",
+            functools.partial(cooler.create_cooler, mergebuf=10),
+        )
+        external = create("external", sort_in_memory=False)
+        pd.testing.assert_frame_equal(external, memory, check_dtype=False)
 
 
 class TestBuildContigsTableExtra:

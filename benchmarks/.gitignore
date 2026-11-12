@@ -1,0 +1,9 @@
+# Quarto's own
+/.quarto/
+**/*.quarto_ipynb
+
+# What a render makes: data, maps and logs; tables and figures; the page
+/_work/
+/_results/
+/benchmarks.html
+/benchmarks_files/

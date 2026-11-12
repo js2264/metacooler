@@ -916,6 +916,10 @@ def write_cooler(
     chunk that is tens of calls, so a cost of ~2 h per call on a 1.9 M-contig
     metagenome turns a re-binning run into one that never finishes.
 
+    An unordered stream also has its chunks sorted on the way in (see
+    :func:`_sorted_pixel_chunks`): cooler's unordered writer is only correct
+    when each of them is, and several writers stream theirs in source order.
+
     Args:
         path: Destination ``.cool``/``.metacool`` path.
         bins: Bins table, sorted by ``chrom`` then ``start``.
@@ -930,12 +934,17 @@ def write_cooler(
     import cooler
 
     if kwargs.get("ordered") is False and not isinstance(pixels, pd.DataFrame | dict):
-        pixels, was_empty = _skip_empty_frames(cast("Iterable[pd.DataFrame]", pixels))
+        stream, was_empty = _skip_empty_frames(cast("Iterable[pd.DataFrame]", pixels))
         if was_empty:
             # cooler's unordered writer concatenates its per-chunk files and
             # fails with "No objects to concatenate" when there are none; an
             # empty table is trivially sorted, so write it on the ordered path.
             kwargs["ordered"] = True
+            pixels = stream
+        else:
+            pixels = _sorted_pixel_chunks(
+                cast("Iterable[pd.DataFrame]", stream), len(bins)
+            )
     resolved = binsize if binsize is not None else infer_binsize(bins)
     with cooler_writer_shims(resolved):
         cooler.create_cooler(str(path), bins=bins, pixels=pixels, **kwargs)
@@ -970,6 +979,45 @@ def _skip_empty_frames(
         )
         return empty, True
     return itertools.chain([first], frames), False
+
+
+def _sorted_pixel_chunks(
+    pixels: Iterable[pd.DataFrame], n_bins: int
+) -> Iterator[pd.DataFrame]:
+    """Yield each chunk of an unordered pixel stream sorted by ``(bin1, bin2)``.
+
+    cooler's unordered writer writes every chunk to a temporary cooler and
+    merges those, reading each one through its ``bin1_offset`` index, one
+    ``mergebuf`` (20 M records) epoch at a time.  Before cooler 0.12 a chunk is
+    written as given and indexed as if it were sorted.  While a single epoch
+    holds every record the merge reads every row regardless, so an unsorted
+    chunk goes unnoticed; past that, rows are read into the wrong epoch, and the
+    output has out-of-order and *duplicate* pixels.  That is how
+    ``create pairs --sort-strategy external`` failed ``validate()`` (``bin1_offset
+    disagrees with pixels/bin1_id``) on 30 M pairs over 200 k contigs, after the
+    whole run, when its chunks still came out of a pandas groupby with
+    ``sort=False``.  ``create cool`` and ``reassign``, which re-map pixels in
+    source order, stream such chunks.
+
+    A chunk that is already sorted, as those of ``create pairs``, ``binnify``,
+    ``aggregate`` and ``extract`` are, costs one vectorised comparison and is
+    passed through as is.
+
+    Args:
+        pixels: Pixel chunks with ``bin1_id`` and ``bin2_id`` columns.
+        n_bins: Number of bins, so that ``bin1_id * n_bins + bin2_id`` orders
+            pixels as ``(bin1_id, bin2_id)`` does.
+
+    Yields:
+        Each chunk, sorted.
+    """
+    for chunk in pixels:
+        key = chunk["bin1_id"].to_numpy(np.int64) * n_bins + chunk["bin2_id"].to_numpy(
+            np.int64
+        )
+        if not (key[1:] >= key[:-1]).all():
+            chunk = chunk.iloc[np.argsort(key)]
+        yield chunk
 
 
 def _finalize_metacool_file(
