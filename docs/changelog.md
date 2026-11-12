@@ -410,6 +410,21 @@
   file shrinks from 48.1 to 38.9 MB. A storage change only: filters are
   transparent to readers, and existing files read as before (see
   [Storage filters](format.md#storage-filters)).
+- **`binnify` and `zoomify` stream re-binned pixels in order.** At `--level
+  contig` the source-to-target bin map is monotonic, so a source pixel's new
+  row is the new row of its `bin1` and the upper triangle is preserved: the
+  source is cut at output-row boundaries of its `bin1_offset` into blocks of
+  about `--chunksize` pixels, each block is read with cooler's pixel selector,
+  mapped, sorted on its pixel key and reduced, and the blocks are written in
+  order (`ordered=True`) — no temporary
+  coolers, no merge passes, memory proportional to one block. `--level genome`,
+  which reorders contigs, and `square` sources keep the unordered path (now
+  also key-aggregated). `zoomify` coarsens each level from the coarsest level
+  already written whose bin size divides it, as cooler's does (10 kb from 5 kb;
+  2 kb and 5 kb from 1 kb); each level's counts are those of re-binning the
+  base, and its provenance still names the base. On a 200 k-contig map,
+  `zoomify -r 1000,2000,5000,10000`: 82.7 s / 4.23 GB → 27.5 s / 2.62 GB, every
+  level identical to before.
 
 ### Packaging and CI
 

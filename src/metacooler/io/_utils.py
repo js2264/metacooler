@@ -413,13 +413,18 @@ def pixel_keys(bin1: np.ndarray, bin2: np.ndarray) -> np.ndarray:
 
 
 def pixels_from_keys(keys: np.ndarray, counts: np.ndarray) -> pd.DataFrame:
-    """Unfold :func:`pixel_keys` back into a ``bin1_id, bin2_id, count`` frame."""
+    """Unfold :func:`pixel_keys` back into a ``bin1_id, bin2_id, count`` frame.
+
+    ``copy=False`` keeps the three columns as separate blocks: by default pandas
+    consolidates same-dtype columns into one 2-D block, a copy of every pixel.
+    """
     return pd.DataFrame(
         {
             "bin1_id": keys >> _PIXEL_KEY_SHIFT,
             "bin2_id": keys & _PIXEL_KEY_MASK,
             "count": counts,
-        }
+        },
+        copy=False,
     )
 
 

@@ -544,7 +544,7 @@ metacooler binnify METACOOL_PATH --binsize N -o OUT.metacool [OPTIONS]
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--binsize` | *required* | New bin size in bp. See the constraints below. |
 | `--level` | `contig` | Tiling strategy: `contig` (tile each contig independently) or `genome` (ligate a genome's contigs by decreasing length, then tile — the output's contigs become the ligated genomes). |
-| `--chunksize` | `1000000` | Source pixels read, remapped, and aggregated per chunk (peak-memory control). |
+| `--chunksize` | `50000000` | Source pixels read, remapped, and aggregated per chunk (peak-memory control). |
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -580,6 +580,11 @@ metacooler binnify METACOOL_PATH --binsize N -o OUT.metacool [OPTIONS]
   with no contigs are skipped.
 - Pixels are re-assigned and re-aggregated for the new layout; integer counts are
   widened to `int64` so a coarse bin pair cannot overflow.
+- At `--level contig` the re-binning keeps every pixel's row order, so the source
+  is processed one block of whole output rows at a time (located through
+  `bin1_offset`) and the output is written in order, with no temporary files and
+  memory proportional to one `--chunksize` block. `--level genome` reorders
+  contigs, so it re-aggregates through cooler's external merge.
 
 ```bash
 # 1 kb → 5 kb (5000 = 5 × 1000 ✓)
@@ -611,7 +616,11 @@ metacooler zoomify METACOOL_PATH -o OUT.mmetacool [--levels N | --resolutions R]
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
-Entries are addressed as `file.mmetacool::entries/<binsize>`.
+Entries are addressed as `file.mmetacool::entries/<binsize>`. Each level is
+re-binned from the coarsest level already written whose bin size divides it
+(with `-r 1000,2000,5000,10000`: 2 kb and 5 kb from 1 kb, 10 kb from 5 kb), as
+cooler's `zoomify` does; since every level nests in the base, the counts are
+those of re-binning the base directly.
 
 !!! note "`--resolutions` is a ladder grammar, not a plain list"
     Unlike `--genomes`/`--contigs`, which take a plain comma-separated list,

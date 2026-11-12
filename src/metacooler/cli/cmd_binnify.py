@@ -51,10 +51,11 @@ if TYPE_CHECKING:
     type=int,
     default=DEFAULT_CHUNKSIZE,
     show_default=True,
-    help="Number of pixels read and aggregated per chunk. Each chunk is written "
-    "as a temporary cooler at a fixed per-call cost that scales with contig "
-    "count, so smaller chunks cost disproportionately more; the trade-off is "
-    "~24 bytes of peak memory per buffered pixel.",
+    help="Number of source pixels read and aggregated per chunk; peak memory "
+    "is ~40 bytes per pixel of one chunk. At --level contig whole output rows "
+    "are processed per chunk and written in order; at --level genome each chunk "
+    "is written as a temporary cooler at a fixed per-call cost that scales with "
+    "contig count, so smaller chunks cost disproportionately more there.",
 )
 @force_option
 @verbose_option

@@ -189,10 +189,15 @@ def zoomify(
     The input must be a fixed-bin metacooler.  Each resolution is stored as an
     mmetacool entry named ``entries/<binsize>`` (open it as
     ``file.mmetacool::entries/<binsize>``).  The base resolution is streamed
-    verbatim into the output; every coarser resolution is produced by re-binning
-    the base with :func:`metacooler.ops.binnify.binnify` (so bins stay aligned
-    to the base) into *temp_dir*, appended to the output, and deleted right
-    away — peak temporary disk use is one level, not a whole second pyramid.
+    verbatim into the output; every coarser resolution is produced by
+    re-binning, with :func:`metacooler.ops.binnify.binnify`, the coarsest level
+    already written whose bin size divides it (10 kb from 5 kb, 2 kb and 5 kb
+    from a 1 kb base), as cooler's zoomify does.  Every bin size is a multiple
+    of the base, so bins stay aligned to the base and each level holds exactly
+    the counts re-binning the base would give, from far fewer pixels.  A level
+    is written into *temp_dir*, appended to the output and deleted right away —
+    peak temporary disk use is one level, not a whole second pyramid.  Its
+    provenance names the base file, as if re-binned from it.
 
     Resolutions are chosen one of two ways:
 
@@ -228,7 +233,7 @@ def zoomify(
     from metacooler.api import MetaCooler
     from metacooler.io._utils import check_output_path
     from metacooler.io.mmetacool import add_entry, create_mmetacool
-    from metacooler.ops.binnify import binnify
+    from metacooler.ops.binnify import _binnify
 
     output = Path(output)
     check_output_path(output, force, inputs=[uri])
@@ -306,14 +311,32 @@ def zoomify(
             dir=None if temp_dir is None else str(temp_dir)
         ) as tmpdir:
             tmpdir_path = Path(tmpdir)
+            built: list[int] = []
             for res in plan:
                 if res == base_binsize:
                     # Base resolution: stream the source straight into the output.
                     create_mmetacool(output, {str(res): source_path}, force=force)
+                    built.append(res)
                     continue
+                # The coarsest level written so far that nests in this one; the
+                # base always does (_check_divisible).
+                parent = max(r for r in built if res % r == 0)
+                parent_mc = (
+                    mc
+                    if parent == base_binsize
+                    else MetaCooler(f"{output}::entries/{parent}")
+                )
                 res_path = tmpdir_path / f"res_{res}.metacool"
-                binnify(uri=source_path, output=res_path, binsize=res)
+                logger.info("Coarsening %d -> %d", parent, res)
+                _binnify(
+                    parent_mc,
+                    res_path,
+                    res,
+                    source_uri=source_path,
+                    source_metadata=mc.metadata,
+                )
                 add_entry(output, str(res), res_path)
+                built.append(res)
                 # Reclaim the space before computing the next level.
                 res_path.unlink(missing_ok=True)
     except Exception:
