@@ -454,7 +454,7 @@ class TestUnorderedWrites:
         # ~1,000 records through a 50-record buffer: some twenty merge epochs.
         write_cooler(out, bins, iter(chunks), ordered=False, mergebuf=50)
 
-        got = cooler.Cooler(str(out)).pixels()[:]
+        got = pd.DataFrame(cooler.Cooler(str(out)).pixels()[:])
         pd.testing.assert_frame_equal(got, expected, check_dtype=False)
         with h5py.File(out, "r") as f:
             offsets = f["indexes/bin1_offset"][:]
@@ -476,7 +476,7 @@ class TestUnorderedWrites:
                 chunksize=20,
                 sort_in_memory=sort_in_memory,
             )
-            return cooler.Cooler(str(out)).pixels()[:]
+            return pd.DataFrame(cooler.Cooler(str(out)).pixels()[:])
 
         memory = create("memory", sort_in_memory=True)
         # Ten chunks of 20 pairs, merged through a 10-record buffer.
