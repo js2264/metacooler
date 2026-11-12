@@ -31,6 +31,7 @@ from metacooler.io._utils import (
     reduce_sorted_keys,
     resolve_count_dtype,
     store_qc,
+    to_upper_triangle,
     write_cooler,
 )
 from metacooler.io.contigs import parse_contigs_table
@@ -1959,17 +1960,16 @@ def _stream_remapped_pixels(
     clr = cooler.Cooler(cool_path_str)
 
     def _remap_chunk(lo: int, hi: int) -> pd.DataFrame:
-        chunk = clr.pixels()[lo:hi].copy()
-        chunk["bin1_id"] = old_to_new_bin[chunk["bin1_id"].values.astype(np.int64)]
-        chunk["bin2_id"] = old_to_new_bin[chunk["bin2_id"].values.astype(np.int64)]
+        chunk = clr.pixels()[["bin1_id", "bin2_id", "count"]][lo:hi]
+        b1 = old_to_new_bin[chunk["bin1_id"].to_numpy(dtype=np.int64)]
+        b2 = old_to_new_bin[chunk["bin2_id"].to_numpy(dtype=np.int64)]
+        counts = chunk["count"].to_numpy().astype(count_dtype)
         # Drop pixels that touch a dropped contig (sentinel -1).
-        chunk = chunk[(chunk["bin1_id"] >= 0) & (chunk["bin2_id"] >= 0)].copy()
-        chunk["count"] = chunk["count"].astype(count_dtype)
-        swap = chunk["bin1_id"] > chunk["bin2_id"]
-        chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
-            swap, ["bin2_id", "bin1_id"]
-        ].values
-        return chunk[["bin1_id", "bin2_id", "count"]]
+        keep = (b1 >= 0) & (b2 >= 0)
+        if not keep.all():
+            b1, b2, counts = b1[keep], b2[keep], counts[keep]
+        b1, b2 = to_upper_triangle(b1, b2)
+        return pd.DataFrame({"bin1_id": b1, "bin2_id": b2, "count": counts}, copy=False)
 
     ranges = [(i, min(i + chunksize, n_pixels)) for i in range(0, n_pixels, chunksize)]
     con = Console(stderr=True)
@@ -2635,6 +2635,11 @@ def from_cool(
             raw_pixels, qc_tally, bin_maps(bins_remapped, contigs)
         )
     if sort_in_memory:
+        # Contigs are only reordered -- bins map one-to-one -- so the remapped
+        # pixels stay unique and this is one argsort on the pixel key: the
+        # reduction after it finds no repeated key and returns the counts as
+        # they are.  It is kept because a cooler written without cooler's
+        # duplicate check can repeat a pixel, which is then summed.
         pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
             pixel_iter=raw_pixels
         )

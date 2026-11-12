@@ -425,6 +425,14 @@
   base, and its provenance still names the base. On a 200 k-contig map,
   `zoomify -r 1000,2000,5000,10000`: 82.7 s / 4.23 GB → 27.5 s / 2.62 GB, every
   level identical to before.
+- **`create cool` remaps in NumPy and sorts on the pixel key.** The remap of
+  each source chunk (`_stream_remapped_pixels`, shared with `reassign`'s
+  regroup path) no longer copies the chunk and swaps through `.loc`; and since
+  contigs are only reordered, the in-memory sort is one argsort on the pixel
+  key whose reduction is a no-op — kept because a cooler written without
+  cooler's duplicate check can repeat a pixel, which is summed. On a
+  200 k-contig cool: 25.4 s / 2.99 GB → 16.7 s / 2.25 GB (together with the
+  key-based aggregation above), output identical.
 
 ### Packaging and CI
 

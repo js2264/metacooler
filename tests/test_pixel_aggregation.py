@@ -130,3 +130,78 @@ class TestDictionaryEncodedNames:
         assert stats.out_of_bounds == 1
         assert stats.unknown_names == {"zz", "yy"}
         np.testing.assert_array_equal(out[0], [0, 0])
+
+
+def test_from_cool_sums_duplicate_source_pixels(tmp_path):
+    """``create cool`` only permutes bins, but a cooler written without cooler's
+    duplicate check can still repeat a pixel; it is summed, never written twice.
+    """
+    import cooler
+
+    from metacooler.api import MetaCooler
+    from metacooler.io.create import from_cool
+    from metacooler.schema import validate
+
+    bins = pd.DataFrame(
+        {"chrom": ["a", "a", "b"], "start": [0, 100, 0], "end": [100, 200, 100]}
+    )
+    pixels = pd.DataFrame(
+        {"bin1_id": [0, 0, 0, 1], "bin2_id": [1, 1, 2, 2], "count": [2, 3, 1, 4]}
+    )
+    src = tmp_path / "dup.cool"
+    cooler.create_cooler(str(src), bins, pixels, ordered=True, dupcheck=False)
+    assert cooler.Cooler(str(src)).info["nnz"] == 4  # the repeat is stored
+
+    table = tmp_path / "t.tsv"
+    table.write_text("contig_name\tgenome_name\na\tG1\nb\tG2\n")
+    out = tmp_path / "out.metacool"
+    from_cool(src, out, table, contig_ordering="cool", qc=False)
+    validate(out)
+    got = MetaCooler(out).pixels()
+    assert got[["bin1_id", "bin2_id", "count"]].values.tolist() == [
+        [0, 1, 5],
+        [0, 2, 1],
+        [1, 2, 4],
+    ]
+
+
+class TestRemapBins:
+    def test_remap_bins_by_names_or_categories(self):
+        from metacooler.io.create import _remap_bins
+
+        bins = pd.DataFrame(
+            {
+                "chrom": ["a", "a", "b", "c", "c"],
+                "start": [0, 10, 0, 0, 10],
+                "end": [10, 20, 5, 10, 15],
+                "weight": [0.1, 0.2, 0.3, 0.4, 0.5],
+            }
+        )
+        order = ["c", "a"]  # b is dropped
+        for frame in (bins, bins.astype({"chrom": "category"})):
+            remapped, old_to_new = _remap_bins(frame, order, keep_extra_columns=True)
+            assert remapped["chrom"].tolist() == [0, 0, 1, 1]
+            assert remapped["start"].tolist() == [0, 10, 0, 10]
+            assert remapped["weight"].tolist() == [0.4, 0.5, 0.1, 0.2]
+            assert old_to_new.tolist() == [2, 3, -1, 0, 1]
+            assert remapped["chrom"].dtype == np.int32
+            bare, _ = _remap_bins(frame, order)
+            assert list(bare.columns) == ["chrom", "start", "end"]
+
+    def test_from_cool_reads_a_grouped_uri(
+        self, tmp_path, tiny_cool, tiny_contigs_table
+    ):
+        import cooler
+
+        from metacooler.io.create import from_cool
+
+        clr = cooler.Cooler(str(tiny_cool))
+        grouped = f"{tmp_path / 'multi.mcool'}::/resolutions/100"
+        cooler.create_cooler(grouped, clr.bins()[:], clr.pixels()[:], ordered=True)
+        a, b = tmp_path / "plain.metacool", tmp_path / "grouped.metacool"
+        from_cool(tiny_cool, a, tiny_contigs_table, qc=False)
+        from_cool(grouped, b, tiny_contigs_table, qc=False)
+        from metacooler.api import MetaCooler
+
+        pd.testing.assert_frame_equal(MetaCooler(a).pixels(), MetaCooler(b).pixels())
+        pd.testing.assert_frame_equal(MetaCooler(a).bins(), MetaCooler(b).bins())
