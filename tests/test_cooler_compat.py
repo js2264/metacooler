@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import cooler
 import cooler.fileops
@@ -527,8 +528,8 @@ class TestMmetacoolCoolerCompat:
             entry.bins()[:][["chrom", "start", "end"]].reset_index(drop=True),
         )
         pd.testing.assert_frame_equal(
-            mc.pixels()[:].reset_index(drop=True),
-            entry.pixels()[:].reset_index(drop=True),
+            cast(pd.DataFrame, mc.pixels()[:]).reset_index(drop=True),
+            cast(pd.DataFrame, entry.pixels()[:]).reset_index(drop=True),
         )
 
 
@@ -858,8 +859,8 @@ class TestCpdMmetacool:
         orig = cooler.Cooler(f"{cpd_mmetacool}::entries/original")
         copy = cooler.Cooler(f"{cpd_mmetacool}::entries/copy_of_original")
         pd.testing.assert_frame_equal(
-            orig.pixels()[:].reset_index(drop=True),
-            copy.pixels()[:].reset_index(drop=True),
+            cast(pd.DataFrame, orig.pixels()[:]).reset_index(drop=True),
+            cast(pd.DataFrame, copy.pixels()[:]).reset_index(drop=True),
         )
 
 
@@ -974,8 +975,8 @@ class TestCompoundMmetacool:
         orig = cooler.Cooler(f"{compound_mmetacool}::entries/alpha")
         copy = cooler.Cooler(f"{compound_mmetacool}::entries/alpha_copy")
         pd.testing.assert_frame_equal(
-            orig.pixels()[:].reset_index(drop=True),
-            copy.pixels()[:].reset_index(drop=True),
+            cast(pd.DataFrame, orig.pixels()[:]).reset_index(drop=True),
+            cast(pd.DataFrame, copy.pixels()[:]).reset_index(drop=True),
         )
 
     @pytest.mark.parametrize("entry", _COMPOUND_CHECK)

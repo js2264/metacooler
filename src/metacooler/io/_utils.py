@@ -30,7 +30,7 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 
     from metacooler.api import MetaCooler
 
@@ -607,7 +607,7 @@ def cooler_writer_module() -> types.ModuleType | None:
 
 
 @contextlib.contextmanager
-def cooler_writer_shims(binsize: int | None) -> Iterator[None]:
+def cooler_writer_shims(binsize: int | None) -> Generator[None, None, None]:
     """Neutralise two ``cooler.create`` costs that scale with *contig* count.
 
     Both are invisible on a genome assembly and dominate everything else on a
