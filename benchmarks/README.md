@@ -59,6 +59,15 @@ Run workflow, to pick the datasets and the time limit). The
 page, the tables, the figures and the command logs are kept as a workflow
 artifact. On a release, the page and a zip of `_results/` are attached to it.
 
+A run on a `v*` tag, or on `devel` with *publish-page* ticked (the default),
+also publishes the page on the documentation site, at
+<https://js2264.github.io/metacooler/benchmarks/>, with `_results/` beside it.
+Each Pages deployment replaces the whole site, so the run does not deploy the
+page itself. It replaces the two assets of the `benchmark-page` release and
+starts [`docs.yml`](../.github/workflows/docs.yml), which fetches them on
+every build. A run in which a command failed publishes nothing. Untick
+*publish-page* for a run that should not replace the published page.
+
 The datasets are deterministic, so they are only generated once per generator
 version. They are kept in the release `benchmark-data-v<GENERATOR_VERSION>`,
 one tarball per dataset, and fetched from there. Bump `GENERATOR_VERSION` in

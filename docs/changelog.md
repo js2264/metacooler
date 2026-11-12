@@ -517,8 +517,10 @@
   10⁶ contigs): creating a map from pairs, converting, zoomifying, querying a
   contig, a genome or a genome pair, and genome-level aggregation. The
   `benchmarks` workflow renders it for every release tag and on demand,
-  attaches the page and its TSV tables to the release, and keeps the datasets
-  in a `benchmark-data-v<N>` release.
+  attaches the page and its TSV tables to the release, publishes them on the
+  documentation site at `/benchmarks/` (the docs build fetches them from the
+  `benchmark-page` release), and keeps the datasets in a `benchmark-data-v<N>`
+  release.
 
 ---
 

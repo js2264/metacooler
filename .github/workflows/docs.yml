@@ -7,12 +7,17 @@ on:
       - main
     tags:
       - "v*"
-  workflow_dispatch:
+  workflow_dispatch: # also started by benchmarks.yml once it publishes a page
 
 permissions:
   contents: read
   pages: write
   id-token: write
+
+# One deployment at a time; one that is running is never cancelled.
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -39,6 +44,40 @@ jobs:
 
       - name: Build documentation
         run: uv run zensical build --clean
+
+      # A deployment replaces the whole site, so every build serves the latest
+      # benchmark page again, at /benchmarks/, with its tables and figures under
+      # /benchmarks/_results/: benchmarks.yml keeps both in the benchmark-page
+      # release.
+      - name: Add the benchmark page
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site/benchmarks "$RUNNER_TEMP/page"
+          gh release download benchmark-page --repo "$GITHUB_REPOSITORY" \
+            --pattern benchmarks.html --pattern benchmark-results.zip \
+            --dir "$RUNNER_TEMP/page" || true
+          if [[ -f $RUNNER_TEMP/page/benchmarks.html ]]; then
+            mv "$RUNNER_TEMP/page/benchmarks.html" site/benchmarks/index.html
+            if [[ -f $RUNNER_TEMP/page/benchmark-results.zip ]]; then
+              unzip -q "$RUNNER_TEMP/page/benchmark-results.zip" -d site/benchmarks
+            fi
+          else
+            echo "::notice::No benchmark page published yet; /benchmarks/ says so."
+            repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            cat > site/benchmarks/index.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>metacooler vs cooler: benchmarks</title>
+          <p>No benchmark run has been published yet. The
+          <a href="$repo/actions/workflows/benchmarks.yml">Benchmarks workflow</a>
+          publishes its page here; see <a href="$repo/tree/devel/benchmarks">benchmarks/</a>.</p>
+          <p><a href="../">metacooler documentation</a></p>
+          </html>
+          HTML
+          fi
 
       - name: Upload artifact for GitHub Pages
         uses: actions/upload-pages-artifact@v4

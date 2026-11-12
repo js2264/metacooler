@@ -32,6 +32,7 @@ nav = [
              { "Operations" = "api/ops.md" }
          ]}
      ]},
+     { "Benchmarks" = "benchmarks/" },
      { "Changelog" = "changelog.md" }
 ]
 

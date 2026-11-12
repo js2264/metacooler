@@ -81,7 +81,10 @@ BENCH_DATASETS="S M" quarto render benchmarks.qmd   # a quick look
 
 `bench.sh` holds the settings and the one timing function, `bench`; `simulate.py` makes the
 datasets; `targets.py` picks what the queries ask for. A second render re-uses runs already in
-`timings.tsv` (`BENCH_REDO=1` times them again).
+`timings.tsv` (`BENCH_REDO=1` times them again). The
+[Benchmarks workflow](https://github.com/js2264/metacooler/blob/devel/.github/workflows/benchmarks.yml)
+renders this page for every release, and on demand, and publishes it with the
+[metacooler documentation](https://js2264.github.io/metacooler/).
 
 ```{python}
 #| label: setup
@@ -257,9 +260,10 @@ fi
 ## Datasets
 
 Four synthetic communities, each an assembly binned into genomes plus a Hi-C library sequenced
-from it. They are drawn by [`simulate.py`](simulate.py) from a preset and a seed, so every render
-times the same data; the [workflow](../.github/workflows/benchmarks.yml) publishes them as a
-release (`benchmark-data-v<generator version>`) and fetches them from there.
+from it. They are drawn by
+[`simulate.py`](https://github.com/js2264/metacooler/blob/devel/benchmarks/simulate.py) from a
+preset and a seed, so every render times the same data; the workflow publishes them as a release
+(`benchmark-data-v<generator version>`) and fetches them from there.
 
 * **Genomes.** MAGs (log-normal, 2.5 Mb median) and small bins standing for plasmids, phages and
   other mobile elements (20 kb median) are binned. Low-abundance genomes that no binner would
@@ -829,7 +833,8 @@ print("\n".join(lines) if lines else "*Not enough datasets in this render.*")
 
 ## Artifacts
 
-Beside this page, in `_results/` (attached to the release, and to every workflow run):
+Beside this page, in `_results/`: published with it on the documentation site, and attached to
+every release and workflow run.
 
 ```{python}
 #| label: artifacts
@@ -839,9 +844,18 @@ problems = t[t["status"] == "error"]
 if len(problems):
     display(Markdown(f"**{len(problems)} run(s) failed** — see their logs in `_work/logs/`:"))
     display(show(problems[["section", "dataset", "tool", "task", "command"]]))
+
+
+def link(path):
+    """A file's name, linked when the page can reach it: written beside the page (the
+    notebook's directory), as _results/ is unless BENCH_RESULTS moves it."""
+    name, href = str(path.relative_to(RESULTS)), os.path.relpath(path)
+    return name if href.startswith("..") else f'<a href="{href}">{name}</a>'
+
+
 files = sorted(p for p in RESULTS.rglob("*") if p.is_file())
 show(pd.DataFrame({
-    "file": [str(p.relative_to(RESULTS)) for p in files],
+    "file": [link(p) for p in files],
     "kB": [p.stat().st_size / 1e3 for p in files],
 }), **{"kB": "{:,.1f}"})
 ```
