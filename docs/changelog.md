@@ -478,6 +478,17 @@
   `/contigs`) with the named error. At XL: opening 1.37 s → 0.055 s. Also,
   the pairs header scans read bytes, and `create pairs` maps each batch's
   name dictionary through an object array, halving that step.
+- **The contact-QC tally sums each block with one `bincount`.** Every
+  contact gets the index of its category, and one `bincount` keyed on
+  `(genome, category)` sums every category of every genome at once, where five
+  masked passes used to select each category's contacts first. A chunk is
+  classified in blocks of 2¹⁸ contacts, whose temporaries stay in cache,
+  rather than 50 M at a time (a float-weighted tally, whose sums do not
+  associate, still takes each chunk in one pass, so its bits are unchanged).
+  Tallying the 73 M pixels of a 2 M-contig map: 6.4 s → 2.2 s, with a few MB
+  of scratch memory instead of ~3 GB per 50 M-pixel chunk (the peak of
+  `create cool`); `metacooler qc` on that map: 25.8 s / 5.5 GB → 16.6 s /
+  3.6 GB; outputs identical.
 
 ### Packaging and CI
 

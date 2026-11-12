@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from typing import Any
 
 logger = logging.getLogger("metacooler")
@@ -90,6 +90,13 @@ QC_COLUMN_PREFIX = "qc_"
 QC_GENOME_COLUMNS = tuple(f"{QC_COLUMN_PREFIX}{c}" for c in QC_CATEGORIES) + (
     f"{QC_COLUMN_PREFIX}intra_genome_ratio",
 )
+
+# Records classified per pass.  Every temporary of one block -- a handful of
+# int64 and bool arrays this long -- stays in a core's L2 cache, where a whole
+# 50 M-row chunk at once streams gigabytes of them through main memory: the
+# blocking alone halves the tally's time, and caps its scratch memory at a few
+# MB instead of ~3 GB per chunk.
+_TALLY_BLOCK = 1 << 18
 
 
 def _jsonable(value: Any) -> Any:
@@ -204,50 +211,95 @@ class ContactQC:
             self.counts = self.counts.astype(np.float64)
             self.per_genome = self.per_genome.astype(np.float64)
 
-    def _add(
+    def _blocks(self, n: int) -> Iterator[slice]:
+        """Cut a chunk of *n* records into the slices :meth:`_tally_block` takes.
+
+        An integer tally is cut into cache-sized blocks (see
+        :data:`_TALLY_BLOCK`): integer sums are exact in any order.  Once a
+        float weight has turned the accumulators to float64 they are not --
+        float addition does not associate -- so each chunk is then classified
+        in one pass, which adds every value up in the order an unblocked tally
+        always has.  A block is never smaller than the per-genome table it is
+        summed into, which bounds the fixed cost of a block by the work it
+        does.
+        """
+        if self.counts.dtype.kind == "f":
+            step = max(n, 1)
+        else:
+            step = max(_TALLY_BLOCK, self.n_genomes * len(QC_CATEGORIES))
+        for lo in range(0, n, step):
+            yield slice(lo, lo + step)
+
+    def _tally_block(
         self,
-        category: int,
-        mask: np.ndarray,
-        genome_ids: np.ndarray,
+        contig1: np.ndarray,
+        contig2: np.ndarray,
+        genome1: np.ndarray,
+        genome2: np.ndarray,
+        distance: np.ndarray,
         weights: np.ndarray | None,
-        *,
-        add_total: bool = True,
     ) -> None:
-        """Add the masked records to one category, in total and per genome.
+        """Classify one block of records and add it to the tally.
+
+        Every record gets the index of its category in :data:`QC_CATEGORIES`,
+        and one ``bincount`` keyed on ``(genome of the first end, category)``
+        sums the whole block -- every category of every genome at once, in a
+        single pass, where five masked passes used to select each category's
+        records first.  Within each ``(genome, category)`` cell it adds the
+        same values in the same order as those did, so even float weights sum
+        to the same bits.
 
         ``np.bincount`` only accepts float64 weights, which is exact for
-        integer sums below 2**53 — six orders of magnitude above the contact
-        count of any real library — so the per-genome totals are cast back to
-        the accumulator dtype without loss.
-
-        Args:
-            category: Index into :data:`QC_CATEGORIES`.
-            mask: Which records of the current chunk fall in this category.
-            genome_ids: Genome id of the *side* of each record being credited.
-            weights: Contact count per record, or ``None`` for one each.
-            add_total: Whether to also add to the file-level total.  ``False``
-                for the second side of an inter-genome contact, which is
-                credited to both genomes but counted once overall.
+        integer sums below 2**53 -- six orders of magnitude above the contact
+        count of any real library -- so the sums are cast back to the
+        accumulator dtype without loss.
         """
-        if not mask.any():
-            return
-        if weights is None:
-            if add_total:
-                self.counts[category] += np.int64(mask.sum())
-            hits = np.bincount(genome_ids[mask], minlength=self.n_genomes)
-        else:
-            w = weights[mask]
-            if add_total:
-                self.counts[category] += w.sum()
-            hits = np.bincount(
-                genome_ids[mask],
-                weights=w.astype(np.float64, copy=False),
-                minlength=self.n_genomes,
-            )
+        n_categories = len(QC_CATEGORIES)
+        same_contig = contig1 == contig2
+        # Two genomes, or two different contigs that no binner assigned.
+        inter_genome = genome1 != genome2
+        if self.unbinned_genome is not None:
+            inter_genome |= genome1 == self.unbinned_genome
+        inter_genome &= ~same_contig
+        # 0/1: intra-contig short/long; 2: inter-contig, same genome;
+        # 3: inter-genome.  Bit 1 says "two contigs", bit 0 "two genomes" or,
+        # for one contig, "long-range".
+        category = (~same_contig).view(np.uint8) << 1
+        category |= inter_genome.view(np.uint8)
+        long_range = distance >= self.distance_threshold
+        long_range &= same_contig
+        category |= long_range.view(np.uint8)
+
+        key = np.multiply(genome1, n_categories, dtype=np.int64)
+        key += category
+        n_cells = self.n_genomes * n_categories
+        w = None if weights is None else weights.astype(np.float64, copy=False)
+        cells = np.bincount(key, weights=w, minlength=n_cells)
+        # An inter-genome contact belongs to two genomes: the cells above
+        # credit the first, this credits the second (and the file-level total
+        # counts it once).
+        second = np.bincount(
+            genome2[inter_genome],
+            weights=None if w is None else w[inter_genome],
+            minlength=self.n_genomes,
+        )
         # bincount sizes its output by the largest id seen; a genome id can
         # never exceed n_genomes-1, so this only ever trims the zero tail.
-        self.per_genome[:, category] += hits[: self.n_genomes].astype(
-            self.per_genome.dtype
+        per_genome = cells[:n_cells].reshape(self.n_genomes, n_categories)
+
+        if weights is not None and weights.dtype.kind == "f":
+            # Summed category by category in the weights' own dtype, as the
+            # masked passes did, so that a float total keeps its exact bits.
+            for k in range(n_categories):
+                selected = category == k
+                if selected.any():
+                    self.counts[k] += weights[selected].sum()
+        else:
+            self.counts += per_genome.sum(axis=0).astype(np.int64, copy=False)
+        dtype = self.per_genome.dtype
+        self.per_genome += per_genome.astype(dtype, copy=False)
+        self.per_genome[:, n_categories - 1] += second[: self.n_genomes].astype(
+            dtype, copy=False
         )
 
     def tally(
@@ -276,26 +328,15 @@ class ContactQC:
         if len(contig1) == 0:
             return
         self._promote_for(weights)
-
-        same_contig = contig1 == contig2
-        short = same_contig & (distance < self.distance_threshold)
-        long_range = same_contig & ~short
-        same_genome = genome1 == genome2
-        if self.unbinned_genome is not None:
-            # Two different unassigned contigs share no genome.
-            same_genome &= same_contig | (genome1 != self.unbinned_genome)
-        inter_contig_cis = ~same_contig & same_genome
-        inter_genome = ~same_genome
-
-        # The first three categories are intra-genome, so both ends carry the
-        # same genome id and one credit is the whole story.
-        self._add(0, short, genome1, weights)
-        self._add(1, long_range, genome1, weights)
-        self._add(2, inter_contig_cis, genome1, weights)
-        # An inter-genome contact belongs to two genomes: credit both, but
-        # count it once in the file-level total.
-        self._add(3, inter_genome, genome1, weights)
-        self._add(3, inter_genome, genome2, weights, add_total=False)
+        for block in self._blocks(len(contig1)):
+            self._tally_block(
+                contig1[block],
+                contig2[block],
+                genome1[block],
+                genome2[block],
+                distance[block],
+                None if weights is None else weights[block],
+            )
 
     def tally_pixels(
         self,
@@ -306,22 +347,30 @@ class ContactQC:
     ) -> None:
         """Classify a chunk of *pixels* using the per-bin lookup arrays.
 
+        The per-bin lookups are made block by block too (see :meth:`_blocks`),
+        so that none of the five arrays they build outgrows the cache.
+
         Args:
             bin1: ``bin1_id`` column of the chunk.
             bin2: ``bin2_id`` column of the chunk.
             counts: ``count`` column of the chunk.
             maps: Output of :func:`bin_maps` for the same file.
         """
-        b1 = np.asarray(bin1, dtype=np.int64)
-        b2 = np.asarray(bin2, dtype=np.int64)
-        self.tally(
-            maps.contig[b1],
-            maps.contig[b2],
-            maps.genome[b1],
-            maps.genome[b2],
-            np.abs(maps.mid[b2] - maps.mid[b1]),
-            np.asarray(counts),
-        )
+        bin1, bin2, counts = np.asarray(bin1), np.asarray(bin2), np.asarray(counts)
+        if len(counts) == 0:
+            return
+        self._promote_for(counts)
+        for block in self._blocks(len(counts)):
+            b1 = bin1[block].astype(np.int64, copy=False)
+            b2 = bin2[block].astype(np.int64, copy=False)
+            self.tally(
+                maps.contig[b1],
+                maps.contig[b2],
+                maps.genome[b1],
+                maps.genome[b2],
+                np.abs(maps.mid[b2] - maps.mid[b1]),
+                counts[block],
+            )
 
     # ------------------------------------------------------------------
     # Reporting
