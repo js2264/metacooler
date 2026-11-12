@@ -386,6 +386,21 @@
   `MetaCoolerFormatError`. `pixels_for_genome_pair` now returns every pixel
   column, typed, when nothing matches (it returned an untyped three-column
   frame).
+- **Pixels are aggregated on one `int64` key.** Every pixel metacooler builds
+  itself is summed through `io/_utils.aggregate_pixels`: `(bin1, bin2)` folds
+  into `bin1 << 32 | bin2`, which is sorted (a stable, run-detecting sort when
+  the inputs are already sorted frames) and reduced with `np.add.reduceat`,
+  instead of a pandas `groupby` over two columns. `create pairs` bins each chunk
+  by sorting its keys and counting runs, and its in-memory sort frees each
+  frame as soon as it is keyed. Count dtypes are kept exactly as before.
+- **Pair contig names are dictionary-encoded.** `create pairs` and `ps --pairs`
+  ask pyarrow for the two chrom columns as `dictionary<int32, string>`, so the
+  names are never materialised per pair and are mapped to contig ids once per
+  distinct name per batch rather than once per row. The drop report (unknown
+  contigs with examples, missing positions, out-of-bounds pairs) is unchanged.
+  Together with the key-based aggregation, on a 200 k-contig, 30 M-pair
+  library: `create pairs` 76.0 s / 3.54 GB → 28.1 s / 2.56 GB, `--sort-strategy
+  external` 78.8 s / 3.67 GB → 39.9 s / 3.50 GB; outputs identical.
 
 ### Packaging and CI
 

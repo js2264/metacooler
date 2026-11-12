@@ -22,9 +22,13 @@ from pyfaidx import Fasta
 
 from metacooler.io._utils import (
     _finalize_metacool_file,
+    aggregate_pixels,
     check_ascii_names,
     check_output_path,
     infer_binsize,
+    pixel_keys,
+    pixels_from_keys,
+    reduce_sorted_keys,
     resolve_count_dtype,
     store_qc,
     write_cooler,
@@ -1150,10 +1154,14 @@ def _stream_pairs(
     parse_opts = pa_csv.ParseOptions(delimiter="\t")
     convert_opts = pa_csv.ConvertOptions(
         include_columns=pa_col_names,
+        # Contig names arrive dictionary-encoded: each batch holds every
+        # distinct name once plus an int32 code per row, so the strings are
+        # never materialised per pair and _decode_pairs_chunk maps only the
+        # dictionary (a Python dict lookup per *distinct* name, not per row).
         column_types={
-            f"f{c1 - 1}": pa.string(),
+            f"f{c1 - 1}": pa.dictionary(pa.int32(), pa.string()),
             f"f{p1 - 1}": pa.int64(),
-            f"f{c2 - 1}": pa.string(),
+            f"f{c2 - 1}": pa.dictionary(pa.int32(), pa.string()),
             f"f{p2 - 1}": pa.int64(),
         },
     )
@@ -1271,6 +1279,26 @@ def _finite_position_mask(col: pd.Series) -> np.ndarray:
     return col.notna().to_numpy()
 
 
+def _contig_codes(names: pd.Series, contig_name_to_id: dict[str, int]) -> np.ndarray:
+    """Map a column of contig names to ``int32`` ids, ``-1`` where unknown.
+
+    A categorical column (what :func:`_stream_pairs` produces) is mapped through
+    its categories, a few thousand names per batch, then gathered by code;
+    anything else goes through ``Series.map``, one dict lookup per row.
+    """
+    if isinstance(names.dtype, pd.CategoricalDtype):
+        cats = names.cat.categories
+        cat_ids = np.fromiter(
+            (contig_name_to_id.get(c, -1) for c in cats),
+            dtype=np.int32,
+            count=len(cats),
+        )
+        codes = names.cat.codes.to_numpy()
+        # Code -1 is a missing name: unknown, as it was through Series.map.
+        return np.where(codes >= 0, cat_ids[np.maximum(codes, 0)], -1).astype(np.int32)
+    return names.map(contig_name_to_id).fillna(-1).astype(np.int32).to_numpy()
+
+
 def _decode_pairs_chunk(
     chunk: pd.DataFrame,
     contig_name_to_id: dict[str, int],
@@ -1302,10 +1330,10 @@ def _decode_pairs_chunk(
         ``(c1, c2, p1, p2)`` for the usable rows — contig ids, and 0-based
         positions clamped at 0 — or ``None`` if the chunk has no usable row.
     """
-    # Fast contig-name → integer-ID encoding.  Unrecognised contigs map to
-    # NaN and are coerced to -1 so they can be dropped in one vectorised pass.
-    c1_codes = chunk["chrom1"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
-    c2_codes = chunk["chrom2"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
+    # Contig name → integer id; unrecognised (or missing) names become -1 so
+    # they can be dropped in one vectorised pass.
+    c1_codes = _contig_codes(chunk["chrom1"], contig_name_to_id)
+    c2_codes = _contig_codes(chunk["chrom2"], contig_name_to_id)
 
     # Drop pairs referencing unknown contigs, and pairs whose position field was
     # empty (pyarrow null → float NaN → INT64_MIN bin id if left alone).
@@ -1489,14 +1517,10 @@ def _bin_pairs_chunk(
     swap = bin1 > bin2
     bin1[swap], bin2[swap] = bin2[swap], bin1[swap]
 
-    df = pd.DataFrame(
-        {
-            "bin1_id": bin1,
-            "bin2_id": bin2,
-            "count": np.ones(len(bin1), dtype=np.int32),
-        }
-    )
-    return df.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"].sum()
+    # One contact per pair: sort the folded keys and count the runs.  The
+    # result comes out sorted, which every later merge exploits.
+    keys = np.sort(pixel_keys(bin1, bin2))
+    return pixels_from_keys(*reduce_sorted_keys(keys, None))
 
 
 def _total_time_str(start_time: float) -> str:
@@ -1631,11 +1655,7 @@ def _sort_and_dedup_pixels(
         return
     logger.info("Sorting pixels in memory...")
     _t0 = time.time()
-    all_pixels = pd.concat(frames, ignore_index=True)
-    del frames
-    all_pixels = all_pixels.groupby(["bin1_id", "bin2_id"], sort=True, as_index=False)[
-        "count"
-    ].sum()
+    all_pixels = aggregate_pixels(frames, consume=True)
     logger.info(f"Sorting pixels in memory... DONE ({time.time() - _t0:.1f}s elapsed)")
     logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
     for lo in range(0, len(all_pixels), write_chunk):
@@ -1653,11 +1673,7 @@ def _merge_pixel_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     """
     if len(frames) == 1:
         return frames[0]
-    return (
-        pd.concat(frames, ignore_index=True)
-        .groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"]
-        .sum()
-    )
+    return aggregate_pixels(frames)
 
 
 def _buffer_pixels(
