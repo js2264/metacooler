@@ -449,6 +449,21 @@
   cooler's duplicate check can repeat a pixel, which is summed. On a
   200 k-contig cool: 25.4 s / 2.99 GB → 16.7 s / 2.25 GB (together with the
   key-based aggregation above), output identical.
+- **Per-contig overhead cut at metagenome scale.** With two million contigs,
+  `create pairs` spent ~25 s on its contig and genome tables alone, before a
+  single pair (measured with a pairs file of headers only). The table builders
+  (`_build_contig_order`, `_build_genomes_table`, `_build_contigs_table`) now
+  resolve each contig's genome once per builder and do the grouping, sorting
+  and summing in NumPy (one `lexsort`, one `np.add.at`) instead of a Python
+  sort per genome with a per-contig key function; the contig-table parser zips
+  object arrays rather than pandas' Arrow-backed columns (4× faster) and
+  normalises each distinct genome name once; `validate()` detects repeated
+  names with a sort instead of a hash-based `np.unique` (4× faster on byte
+  strings); the ASCII checks and `_str_to_hdf5` are vectorised for `str`
+  columns (falling back to the per-value path for non-ASCII text); and
+  `binnify` hands cooler contig ids rather than two million names, which
+  cooler iterated as Arrow strings several times per zoom level. Outputs are
+  unchanged.
 
 ### Packaging and CI
 

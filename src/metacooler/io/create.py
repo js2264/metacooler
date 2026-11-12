@@ -382,6 +382,19 @@ def _genome_id_order(genome_names: Iterable[str]) -> list[str]:
     return ordered
 
 
+def _genome_of(contigs: Iterable[str], contig_genome_map: dict[str, str]) -> np.ndarray:
+    """Genome name of every contig, ``"__unbinned__"`` when unassigned (object array)."""
+    get = contig_genome_map.get
+    return np.array([get(c, "__unbinned__") for c in contigs], dtype=object)
+
+
+def _genome_ranks(genome: np.ndarray) -> np.ndarray:
+    """Position of each entry's genome in :func:`_genome_id_order` (int64 array)."""
+    codes, uniques = pd.factorize(genome)
+    position = {g: i for i, g in enumerate(_genome_id_order(uniques))}
+    return np.array([position[g] for g in uniques], dtype=np.int64)[codes]
+
+
 def _build_contig_order(
     contig_lengths: dict[str, int],
     contig_genome_map: dict[str, str],
@@ -421,36 +434,26 @@ def _build_contig_order(
     if ordering == "alpha":
         return sorted(all_contigs)
 
-    if ordering == "genome-then-alpha":
-        # Group by genome, then alphabetical order within each genome.
-        # Genomes are visited in genome_id order (see _genome_id_order) so the
-        # physical contig layout matches the genomes-table ordering.
-        genome_groups: dict[str, list[str]] = {}
-        for contig in all_contigs:
-            genome = contig_genome_map.get(contig, "__unbinned__")
-            genome_groups.setdefault(genome, []).append(contig)
-
-        ordered = []
-        for genome in _genome_id_order(genome_groups.keys()):
-            contigs = genome_groups[genome]
-            contigs.sort()
-            ordered.extend(contigs)
-        return ordered
-
-    if ordering == "genome-then-length":
-        # Group by genome (in genome_id order), then longest contig first
-        # within each genome.
-        genome_groups2: dict[str, list[str]] = {}
-        for contig in all_contigs:
-            genome = contig_genome_map.get(contig, "__unbinned__")
-            genome_groups2.setdefault(genome, []).append(contig)
-
-        ordered2 = []
-        for genome in _genome_id_order(genome_groups2.keys()):
-            contigs = genome_groups2[genome]
-            contigs.sort(key=lambda c: (-contig_lengths[c], c))
-            ordered2.extend(contigs)
-        return ordered2
+    if ordering in ("genome-then-alpha", "genome-then-length"):
+        # Group by genome, visited in genome_id order (see _genome_id_order) so
+        # the physical contig layout matches the genomes-table ordering; within
+        # a genome, alphabetically or longest first (ties alphabetically).
+        # One lexsort over all contigs: a Python sort per genome with a
+        # per-contig key function took seconds on a metagenome.
+        names = np.fromiter(contig_lengths.keys(), dtype=object, count=len(all_contigs))
+        if names.size == 0:
+            return []
+        genome_rank = _genome_ranks(_genome_of(names, contig_genome_map))
+        name_rank = np.empty(names.size, dtype=np.int64)
+        name_rank[np.argsort(names.astype(str), kind="stable")] = np.arange(names.size)
+        if ordering == "genome-then-alpha":
+            order = np.lexsort((name_rank, genome_rank))
+        else:
+            lengths = np.fromiter(
+                contig_lengths.values(), dtype=np.int64, count=names.size
+            )
+            order = np.lexsort((name_rank, -lengths, genome_rank))
+        return names[order].tolist()
 
     raise ValueError(f"Unknown ordering: {ordering!r}")
 
@@ -590,31 +593,28 @@ def _build_genomes_table(
         any extra columns from *extra_genomes_df*.  Rows are ordered with
         ``"__unbinned__"`` first (when present), then alphabetically.
     """
-    # Collect genome names
-    genome_names = set()
-    for contig in contig_order:
-        genome_names.add(contig_genome_map.get(contig, "__unbinned__"))
-
-    # Only inject __unbinned__ when at least one contig actually lands in it;
-    # the loop above already adds "__unbinned__" to genome_names when any contig
-    # lacks an assignment, so no extra injection is needed here.
+    # One genome per contig ("__unbinned__" when unassigned, so it is only a
+    # row when some contig lands in it), then per-genome sums in one pass.
+    codes, uniques = pd.factorize(_genome_of(contig_order, contig_genome_map))
+    lengths = np.fromiter(
+        map(contig_lengths.__getitem__, contig_order),
+        dtype=np.int64,
+        count=len(contig_order),
+    )
+    genome_lengths = np.zeros(len(uniques), dtype=np.int64)
+    np.add.at(genome_lengths, codes, lengths)
+    genome_ncontigs = np.bincount(codes, minlength=len(uniques)).astype(np.int64)
 
     # Canonical genome_id order: __unbinned__ first (if present), then alphabetical.
-    sorted_names = _genome_id_order(genome_names)
-
-    # Compute lengths and n_contigs
-    genome_lengths = {g: 0 for g in sorted_names}
-    genome_ncontigs = {g: 0 for g in sorted_names}
-    for contig in contig_order:
-        genome = contig_genome_map.get(contig, "__unbinned__")
-        genome_lengths[genome] += contig_lengths[contig]
-        genome_ncontigs[genome] += 1
+    sorted_names = _genome_id_order(uniques)
+    position = {g: i for i, g in enumerate(uniques)}
+    rows = np.array([position[g] for g in sorted_names], dtype=np.int64)
 
     df = pd.DataFrame(
         {
             "name": sorted_names,
-            "length": [genome_lengths[g] for g in sorted_names],
-            "n_contigs": [genome_ncontigs[g] for g in sorted_names],
+            "length": genome_lengths[rows],
+            "n_contigs": genome_ncontigs[rows],
         }
     )
 
@@ -681,23 +681,29 @@ def _build_contigs_table(
         *contig_order*.
     """
     genome_name_to_id = {name: i for i, name in enumerate(genomes["name"])}
+    unbinned_id = genome_name_to_id.get("__unbinned__")
 
-    def _get_genome_id(c: str) -> int:
-        gname = contig_genome_map.get(c, "__unbinned__")
-        gid = genome_name_to_id.get(gname)
+    # Resolved once per distinct genome, then gathered for every contig.
+    codes, uniques = pd.factorize(_genome_of(contig_order, contig_genome_map))
+    unique_ids = np.empty(len(uniques), dtype=np.int64)
+    for j, gname in enumerate(uniques):
+        gid = genome_name_to_id.get(gname, unbinned_id)
         if gid is None:
-            gid = genome_name_to_id.get("__unbinned__")
-        if gid is None:
+            contig = contig_order[int(np.argmax(codes == j))]
             raise ValueError(
-                f"Contig {c!r} has no genome assignment and __unbinned__ is absent"
+                f"Contig {contig!r} has no genome assignment and __unbinned__ is absent"
             )
-        return gid
+        unique_ids[j] = gid
 
     df = pd.DataFrame(
         {
             "name": contig_order,
-            "length": [contig_lengths[c] for c in contig_order],
-            "genome_id": [_get_genome_id(c) for c in contig_order],
+            "length": np.fromiter(
+                map(contig_lengths.__getitem__, contig_order),
+                dtype=np.int64,
+                count=len(contig_order),
+            ),
+            "genome_id": unique_ids[codes],
         }
     )
 
@@ -1678,7 +1684,13 @@ def _parse_contig_map(
     else:
         cg_map = dict(contig_genome_map)
         logger.info(f"Parsed contig-genome map for {len(cg_map)} contigs from dict")
-    cg_map = {k: _normalize_genome_name(v) for k, v in cg_map.items()}
+    # Normalise each distinct genome name once (there are thousands, against
+    # millions of contigs), and rebuild the map only if a sentinel occurs.
+    renamed = {
+        v: n for v in set(cg_map.values()) if (n := _normalize_genome_name(v)) != v
+    }
+    if renamed:
+        cg_map = {k: renamed.get(v, v) for k, v in cg_map.items()}
     return cg_map, contig_df
 
 

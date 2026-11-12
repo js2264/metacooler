@@ -149,21 +149,21 @@ def _binnify(
     valid_mask = old_to_new >= 0
 
     # Build output bins with contig names
-    # Categorical, so neither this module nor cooler.create maps a column of
-    # contig names back to ids one string at a time.
-    contig_names = contigs["name"].to_numpy(dtype=object)
+    # Contig *ids*, as create writes them: cooler.create only needs a chrom
+    # value per bin, and the /chroms table it derives from them is replaced by
+    # the link to /contigs (_finalize_metacool_file).  Names would make cooler
+    # build and iterate a column of two million Arrow strings, several times,
+    # on every level of a zoomify.
     new_bins_out = pd.DataFrame(
         {
-            "chrom": pd.Categorical.from_codes(
-                new_bins["chrom"].to_numpy(dtype=np.int64), categories=contig_names
-            ),
+            "chrom": new_bins["chrom"].to_numpy(dtype=np.int32),
             "start": new_bins["start"].values.astype(np.int32),
             "end": new_bins["end"].values.astype(np.int32),
         }
     )
 
     # Recompute n_bins per genome from the new bins
-    new_bin_genome_ids = contigs["genome_id"].values[new_bins_out["chrom"].cat.codes]
+    new_bin_genome_ids = contigs["genome_id"].values[new_bins_out["chrom"].to_numpy()]
     new_genome_bin_counts = np.bincount(
         new_bin_genome_ids.astype(np.int64), minlength=len(genomes)
     ).astype(np.int64)
@@ -708,8 +708,8 @@ def _write_rebinned_metacool(
 
     Args:
         output: Destination path for the output ``.metacool`` file.
-        bins: Bins DataFrame whose ``chrom`` column is categorical over the
-            contig names of *contigs*, in order.
+        bins: Bins DataFrame whose ``chrom`` column holds contig ids (row
+            numbers of *contigs*), sorted.
         pixels: Iterable of pixel DataFrames, consumed one chunk at a time.
         genomes: Genomes DataFrame.
         contigs: Contigs DataFrame.
@@ -734,7 +734,7 @@ def _write_rebinned_metacool(
 
     # Pre-compute index offsets from the bins DataFrame
     contig_names = contigs["name"].values
-    bin_chrom_codes = bins["chrom"].cat.codes.to_numpy(dtype=np.int64)
+    bin_chrom_codes = bins["chrom"].to_numpy(dtype=np.int64)
     chrom_counts = np.bincount(bin_chrom_codes, minlength=len(contig_names))
     chrom_offset = np.concatenate([[0], np.cumsum(chrom_counts)]).astype(np.int64)
 

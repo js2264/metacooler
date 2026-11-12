@@ -47,6 +47,22 @@ def _warn_duplicate_contigs(df: pd.DataFrame) -> None:
         )
 
 
+def _name_mapping(df: pd.DataFrame) -> dict[str, str]:
+    """``{contig_name: genome_id}`` of a parsed table (last row wins).
+
+    Zipped over NumPy object arrays: iterating pandas' Arrow-backed string
+    columns costs ~1 us per value, four times as much, which on a
+    two-million-contig table is seconds spent building one dict.
+    """
+    return dict(
+        zip(
+            df["contig_name"].to_numpy(dtype=object),
+            df["genome_id"].to_numpy(dtype=object),
+            strict=True,
+        )
+    )
+
+
 def parse_contigs_table(
     path: str | Path,
     fmt: Literal["contig_genome", "metator", "contigs"] | str = "contigs",
@@ -106,7 +122,7 @@ def parse_contigs_table(
             df, {0: "contig_name", 1: "genome_id"}, kind="Contig table"
         )
         _warn_duplicate_contigs(df)
-        mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
+        mapping = _name_mapping(df)
         return mapping, df
 
     if fmt == "contig_genome":
@@ -123,7 +139,7 @@ def parse_contigs_table(
         df = df.iloc[:, :2]
         df.columns = ["contig_name", "genome_id"]
         _warn_duplicate_contigs(df)
-        mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
+        mapping = _name_mapping(df)
         return mapping, df
 
     if fmt == "metator":
@@ -140,7 +156,7 @@ def parse_contigs_table(
             kind="Contig table",
         )
         _warn_duplicate_contigs(df)
-        mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
+        mapping = _name_mapping(df)
         return mapping, df
 
     colspec_match = re.fullmatch(r"\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(noheader))?\s*", fmt)
@@ -174,7 +190,7 @@ def parse_contigs_table(
             kind="Contig table",
         )
         _warn_duplicate_contigs(df)
-        mapping = dict(zip(df["contig_name"], df["genome_id"], strict=False))
+        mapping = _name_mapping(df)
         return mapping, df
 
     raise ValueError(f"Unknown contig table format: {fmt!r}")
