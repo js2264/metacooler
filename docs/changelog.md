@@ -464,6 +464,20 @@
   `binnify` hands cooler contig ids rather than two million names, which
   cooler iterated as Arrow strings several times per zoom level. Outputs are
   unchanged.
+- **`MetaCooler()` opens cooler lazily.** Building a `cooler.Cooler` reads
+  every contig name into a dict (1.4 s at two million contigs), which the
+  open, `info`, `metadata`, `binsize`, `shape`, `root` and the genome and
+  contig lookups (`genome_extent`, `contig_extent`, `genome_bin_ranges`, ...)
+  never need: they read the attributes with cooler's own `info()` and the
+  offset indexes. It is now created on first use of anything that reads bins,
+  pixels or chroms, or resolves a region (`bins()`, `pixels()`, `matrix()`,
+  `extent()`, `chromnames`, `bins_for_*`, `pixels_for_genome_pair`, `dump`,
+  ...), all of which go through it. A contig name is found by one vectorised
+  comparison over the stored `/contigs` names (or cooler's dict, once open).
+  An open still refuses a map cooler could not decode (non-ASCII bytes in
+  `/contigs`) with the named error. At XL: opening 1.37 s → 0.055 s. Also,
+  the pairs header scans read bytes, and `create pairs` maps each batch's
+  name dictionary through an object array, halving that step.
 
 ### Packaging and CI
 

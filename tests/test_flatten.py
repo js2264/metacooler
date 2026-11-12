@@ -49,3 +49,12 @@ class TestFlatten:
 
         clr = cooler.Cooler(str(out))
         assert clr.shape[0] == original_nbins
+
+
+def test_flatten_an_entry_uri(tmp_path, tiny_mmetacool):
+    from metacooler.schema import list_metacoolers
+
+    uri = f"{tiny_mmetacool}::{list_metacoolers(tiny_mmetacool)[0]}"
+    out = tmp_path / "flat.cool"
+    flatten(uri, out)
+    assert cooler.Cooler(str(out)).pixels()[:].equals(MetaCooler(uri).pixels())

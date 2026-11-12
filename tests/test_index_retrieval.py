@@ -18,6 +18,7 @@ import metacooler.api as api
 from metacooler.api import MetaCooler, _in_ranges, _merge_ranges, _ranges_to_ids
 from metacooler.io._utils import chrom_codes
 from metacooler.io.create import from_pairs
+from metacooler.ops.range import parse_metacooler_range
 from metacooler.schema import MetaCoolerFormatError, validate
 
 
@@ -290,6 +291,104 @@ class TestDumpAndExtractRowBlocks:
             pd.DataFrame(cooler.Cooler(str(plain)).pixels()[:]),
             pd.DataFrame(cooler.Cooler(str(square)).pixels()[:]),
         )
+
+
+class TestLazyCooler:
+    """``MetaCooler`` opens cooler only when something actually needs it."""
+
+    def test_open_and_index_queries_skip_cooler(self, tiny_metacooler: Path):
+        mc = MetaCooler(tiny_metacooler)
+        mc.genome_extent("MAG_1")
+        mc.genome_bin_ranges("MAG_2")
+        mc.contig_extent("contig_A")
+        assert (mc.binsize, mc.shape, mc.root) == (100, (22, 22), "/")
+        assert mc.info["nbins"] == 22
+        assert "_clr" not in mc.__dict__
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            lambda mc: mc.bins_for_contig("contig_B"),
+            lambda mc: mc.pixels_for_genome_pair("MAG_1", "MAG_2"),
+            lambda mc: parse_metacooler_range(mc, "contig_A:101-300"),
+        ],
+    )
+    def test_reads_go_through_cooler(self, tiny_metacooler: Path, read):
+        mc = MetaCooler(tiny_metacooler)
+        read(mc)
+        assert "_clr" in mc.__dict__
+
+    @pytest.mark.parametrize("uri_kind", ["file", "entry"])
+    def test_accessors_match_cooler(self, tiny_metacooler, tiny_mmetacool, uri_kind):
+        import cooler
+
+        from metacooler.schema import list_metacoolers
+
+        uri = (
+            str(tiny_metacooler)
+            if uri_kind == "file"
+            else f"{tiny_mmetacool}::{list_metacoolers(tiny_mmetacool)[0]}"
+        )
+        mc = MetaCooler(uri)
+        clr = cooler.Cooler(uri)
+        assert mc.root == clr.root
+        assert mc.binsize == clr.binsize
+        assert mc.shape == clr.shape
+
+        for region in ["contig_A", "contig_B:1-250", "contig_C:150-151", "contig_D"]:
+            assert parse_metacooler_range(mc, region) == tuple(
+                int(x) for x in clr.extent(region)
+            )
+
+    def test_variable_bins_extent_matches_cooler(
+        self, tiny_variable_bin_metacooler: Path
+    ):
+        import cooler
+
+        mc = MetaCooler(tiny_variable_bin_metacooler)
+        clr = cooler.Cooler(str(tiny_variable_bin_metacooler))
+        assert mc.binsize is None
+        for name in clr.chromnames:
+            length = int(clr.chromsizes[name])
+            region = f"{name}:{max(length // 3, 1)}-{length}"
+            assert parse_metacooler_range(mc, region) == tuple(
+                int(x) for x in clr.extent(region)
+            )
+
+    def test_find_contig(self, tiny_metacooler: Path):
+        mc = MetaCooler(tiny_metacooler)
+        assert mc._find_contig("contig_C") == list(mc._contig_names_raw).index(
+            b"contig_C"
+        )
+        assert mc._find_contig("nope") is None
+        assert mc._find_contig("contïg") is None
+        assert "_clr" not in mc.__dict__
+        # Once cooler is open, its name table answers.
+        assert mc._find_contig("contig_B") == mc.chromnames.index("contig_B")
+        assert "_clr" in mc.__dict__
+
+    def test_bin_categories_match_cooler(self, tiny_metacooler: Path):
+        mc = MetaCooler(tiny_metacooler)
+        pd.testing.assert_frame_equal(
+            mc.bins_for_genome("MAG_1"),
+            mc.bins().iloc[_brute_bin_ids(mc, "MAG_1")],
+        )
+
+
+def test_bytes_ordering_attribute(tiny_metacooler: Path):
+    with h5py.File(tiny_metacooler, "r+") as f:
+        f.attrs["contig-ordering"] = np.bytes_(b"genome-then-alpha")
+    assert MetaCooler(tiny_metacooler)._genome_grouped
+
+
+@pytest.mark.parametrize("stored", [None, "[1, 2]"])
+def test_metadata_absent_or_not_a_mapping(tiny_metacooler: Path, stored):
+    with h5py.File(tiny_metacooler, "r+") as f:
+        if stored is None:
+            del f.attrs["metadata"]
+        else:
+            f.attrs["metadata"] = stored
+    assert MetaCooler(tiny_metacooler).metadata == {}
 
 
 def test_network_folds_many_chunks(tiny_metacooler: Path, tmp_path: Path):

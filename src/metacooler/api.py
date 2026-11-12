@@ -92,9 +92,7 @@ class MetaCooler:
                     raise KeyError(f"Group {group_path!r} not found in {self._store}")
             if validate:
                 _validate(f"{self._store}::{group_path}", full=False)
-            # Use cooler URI to open the specific group
-            cooler_uri = f"{self._store}::{group_path}"
-            self._clr = _open_cooler(cooler_uri, validate)
+            self._cooler_uri = f"{self._store}::{group_path}"
         else:
             from metacooler.schema import is_mmetacooler, list_metacoolers
 
@@ -108,7 +106,57 @@ class MetaCooler:
                 )
             if validate:
                 _validate(self._store, full=False)
-            self._clr = _open_cooler(str(self._store), validate)
+            self._cooler_uri = str(self._store)
+        self._validate_on_open = validate
+        if validate:
+            self._check_decodable()
+
+    @functools.cached_property
+    def _clr(self) -> cooler.Cooler:
+        """The ``cooler.Cooler`` this map delegates to, opened on first use.
+
+        Opening one reads every contig name into a dict (1.5 s for two million
+        contigs), which the index-based selectors, ``info``, ``binsize`` and
+        ``shape`` never need; so an open, and a genome or contig query, does not
+        pay for it.
+        """
+        return _open_cooler(self._cooler_uri, self._validate_on_open)
+
+    def _check_decodable(self) -> None:
+        """Fail now, by name, if cooler could not decode ``/contigs``.
+
+        cooler decodes every byte-string column of ``/chroms`` (= ``/contigs``)
+        as ASCII when it opens a map; the open used to fail there.  With cooler
+        opened lazily, the same condition -- a byte at or above 0x80 -- is
+        checked here, vectorised, and handed to the full validation, whose
+        error names the offending values.
+        """
+        with self.open() as grp:
+            columns = grp["contigs"]
+            for key in columns:
+                column = columns[key]
+                if (
+                    isinstance(column, h5py.Dataset)
+                    and column.dtype.kind == "S"
+                    and len(column)
+                    and int(np.max(np.ascontiguousarray(column[()]).view(np.uint8)))
+                    >= 0x80
+                ):
+                    _validate(self._cooler_uri)
+                    raise UnicodeDecodeError(  # pragma: no cover - validate raised
+                        "ascii", b"", 0, 1, f"/contigs/{key} is not ASCII"
+                    )
+
+    def _attrs(self) -> dict:
+        """The map's attributes as ``cooler.Cooler.info`` reads them, fresh."""
+        from cooler.api import info as cooler_info
+
+        with self.open() as grp:
+            return cooler_info(grp)
+
+    @functools.cached_property
+    def _attrs_at_open(self) -> dict:
+        return self._attrs()
 
     @property
     def filename(self) -> str:
@@ -125,7 +173,9 @@ class MetaCooler:
         ``/`` for a ``.metacool``; ``/entries/<name>`` for an ``.mmetacool``
         entry (it used to claim ``/`` for those too).
         """
-        return self._clr.root
+        from cooler.util import parse_cooler_uri
+
+        return parse_cooler_uri(self._cooler_uri)[1]
 
     @property
     def store(self) -> Path:
@@ -255,7 +305,7 @@ class MetaCooler:
     @property
     def binsize(self) -> int | None:
         """Uniform bin size in base pairs, or ``None`` if bins are variable-width."""
-        return self._clr.binsize
+        return self._attrs_at_open["bin-size"]
 
     @property
     def chromnames(self) -> list[str]:
@@ -270,7 +320,8 @@ class MetaCooler:
     @property
     def shape(self) -> tuple[int, int]:
         """Shape of the square contact matrix ``(n_bins, n_bins)``."""
-        return self._clr.shape
+        n_bins = self._attrs_at_open["nbins"]
+        return (n_bins, n_bins)
 
     @property
     def info(self) -> dict:
@@ -287,7 +338,7 @@ class MetaCooler:
             ``format-version``, ``bin-size``, ``nbins``, ``nnz``, ``sum``,
             ``ngenomes``, ``ncontigs``, ``ordering``, and ``assembly``.
         """
-        base = dict(self._clr.info)
+        base = dict(self._attrs())
         base["format"] = base.pop("metacooler-format", None)
         base["format-url"] = base.pop("metacooler-format-url", None)
         base["format-version"] = base.pop("metacooler-format-version", None)
@@ -332,7 +383,7 @@ class MetaCooler:
             Nested dictionary of user-defined metadata values, or ``{}``
             if the file contains no metadata.
         """
-        base = dict(self._clr.info)
+        base = dict(self._attrs())
         meta = base.pop("metadata", None)
         if meta is None:
             return {}
@@ -407,13 +458,25 @@ class MetaCooler:
             return grp["contigs"]["genome_id"][:].astype(np.int64)
 
     @functools.cached_property
-    def _contig_ids(self) -> dict[str, int]:
-        # cooler builds exactly this map when it opens the file; reuse it
-        # rather than read two million names a second time.
-        ids = getattr(self._clr, "_chromids", None)
-        if isinstance(ids, dict):
-            return ids
-        return {name: i for i, name in enumerate(self.chromnames)}  # pragma: no cover
+    def _contig_names_raw(self) -> np.ndarray:
+        """``/contigs/name`` as stored: fixed-width bytes, never decoded."""
+        with self.open() as grp:
+            return grp["contigs"]["name"][()]
+
+    def _find_contig(self, contig: str) -> int | None:
+        """Row of *contig* in ``/contigs``, or ``None``.
+
+        One vectorised comparison over the stored bytes: a few milliseconds for
+        two million names, where a name -> id dict costs half a second to build.
+        """
+        if "_clr" in self.__dict__:  # cooler already holds that dict
+            return self._clr._chromids.get(contig)
+        try:
+            key = contig.encode("ascii")  # names are ASCII (check_ascii_names)
+        except UnicodeEncodeError:
+            return None
+        hits = np.flatnonzero(self._contig_names_raw == key)
+        return int(hits[0]) if hits.size else None
 
     @functools.cached_property
     def _genome_ids(self) -> dict[str, int]:
@@ -438,7 +501,7 @@ class MetaCooler:
         return gid
 
     def _contig_id(self, contig: str) -> int:
-        cid = self._contig_ids.get(contig)
+        cid = self._find_contig(contig)
         if cid is None:
             raise KeyError(f"Contig {contig!r} not found. Available: {self.chromnames}")
         return cid

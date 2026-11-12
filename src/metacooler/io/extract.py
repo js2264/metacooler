@@ -136,9 +136,9 @@ def _extract_contig_ids(
     # Preserve the width of the source ``count`` column: a binnified source
     # writes int64 and would silently wrap if narrowed back to int32 here.
     count_dtype = resolve_count_dtype(
-        mc._clr.pixels()[:0]["count"].dtype, context="extract"
+        mc._empty_pixels()["count"].dtype, context="extract"
     )
-    square = mc._clr.info.get("storage-mode") == "square"
+    square = mc.info.get("storage-mode") == "square"
 
     def _pixel_stream():
         rows = mc._iter_pixel_rows(ranges, lambda b1, b2: _in_ranges(b2, ranges))

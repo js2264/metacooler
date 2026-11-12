@@ -175,6 +175,28 @@ def test_sort_kind_follows_run_length():
     assert _sort_kind(scrambled, runs_known_sorted=True) == "stable"
 
 
+def test_raw_pairs_lines_and_header_parse(tmp_path):
+    from metacooler.io.create import (
+        _iter_pairs_raw_lines,
+        _parse_pairs_header,
+        _scan_pairs_header,
+    )
+
+    f = tmp_path / "h.pairs"
+    f.write_bytes(
+        b"## pairs format v1.0\n#chromsize: c1 100\n#chromsize:  c2\t250 \n"
+        b"#columns: readID chrom1 pos1 chrom2 pos2\n\nr\tc1\t1\tc2\t2"
+    )
+    assert list(_iter_pairs_raw_lines(f, block_size=5))[-1] == b"r\tc1\t1\tc2\t2"
+    assert _parse_pairs_header(f) == {"c1": 100, "c2": 250}
+    assert _scan_pairs_header(f) == (4, True)
+
+    bad = tmp_path / "bad.pairs"
+    bad.write_bytes(b"#chromsize: c1 1e5\n")
+    with pytest.raises(ValueError, match="'1e5' is not an integer"):
+        _parse_pairs_header(bad)
+
+
 class TestRemapBins:
     def test_remap_bins_by_names_or_categories(self):
         from metacooler.io.create import _remap_bins

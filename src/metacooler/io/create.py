@@ -328,6 +328,26 @@ def _iter_pairs_lines(path: Path, block_size: int = 1 << 20) -> Iterator[str]:
             yield carry.decode("utf-8")
 
 
+def _iter_pairs_raw_lines(path: Path, block_size: int = 1 << 20) -> Iterator[bytes]:
+    """Yield the raw lines of a (possibly compressed) pairs file, without newlines.
+
+    The header scans work on these bytes: a metagenome's pairs header carries
+    one ``#chromsize:`` line per contig -- two million lines -- and decoding
+    each one to ``str`` before looking at it doubled the cost of reading it.
+    """
+    with contextlib.closing(_pairs_input_stream(path)) as src:
+        carry = b""
+        while True:
+            block = src.read(block_size)
+            if not block:
+                break
+            lines = (carry + block).split(b"\n")
+            carry = lines.pop()
+            yield from lines
+        if carry:
+            yield carry
+
+
 def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     """Parse ``#chromsize:`` lines from the header of a pairs file.
 
@@ -344,18 +364,20 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     """
     path = Path(pairs_path)
     lengths = {}
-    for line in _iter_pairs_lines(path):
-        if not line.startswith("#"):
+    for raw in _iter_pairs_raw_lines(path):
+        if not raw.startswith(b"#"):
             break
-        if line.startswith("#chromsize:"):
-            parts = line.strip().split()
+        if raw.startswith(b"#chromsize:"):
+            parts = raw.split()
             if len(parts) >= 3:
                 try:
-                    lengths[parts[1]] = int(parts[2])
+                    lengths[parts[1].decode("utf-8")] = int(parts[2])
                 except ValueError as exc:
+                    line = raw.decode("utf-8", "replace").strip()
+                    length = parts[2].decode("utf-8", "replace")
                     raise ValueError(
-                        f"Malformed #chromsize line in {path}: {line.strip()!r} "
-                        f"(length {parts[2]!r} is not an integer)"
+                        f"Malformed #chromsize line in {path}: {line!r} "
+                        f"(length {length!r} is not an integer)"
                     ) from exc
     return lengths if lengths else None
 
@@ -1105,11 +1127,11 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
     """
     n = 0
     has_data = False
-    for line in _iter_pairs_lines(path):
-        if line.startswith("#"):
+    for raw in _iter_pairs_raw_lines(path):
+        if raw.startswith(b"#"):
             n += 1
             continue
-        if not line.strip():
+        if not raw.strip():
             # Tolerate stray blank lines between the header and the body.
             continue
         has_data = True
@@ -1312,9 +1334,13 @@ def _contig_codes(names: pd.Series, contig_name_to_id: dict[str, int]) -> np.nda
     anything else goes through ``Series.map``, one dict lookup per row.
     """
     if isinstance(names.dtype, pd.CategoricalDtype):
-        cats = names.cat.categories
+        # Over an object array: iterating the Arrow-backed categories pandas
+        # builds costs as much again as the lookups, and on a metagenome each
+        # batch's dictionary holds hundreds of thousands of names.
+        cats = names.cat.categories.to_numpy(dtype=object)
+        get = contig_name_to_id.get
         cat_ids = np.fromiter(
-            (contig_name_to_id.get(c, -1) for c in cats),
+            (get(c, -1) for c in cats),
             dtype=np.int32,
             count=len(cats),
         )

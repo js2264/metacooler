@@ -402,6 +402,19 @@ class TestNonAsciiNamesOnDisk:
         with pytest.raises(MetaCoolerFormatError):
             MetaCooler(broken)
 
+    def test_lazy_cooler_still_names_it(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch
+    ):
+        """cooler now opens on first use: its decode error is still named there."""
+        broken = self._break(tiny_metacooler, tmp_path / "broken.metacool")
+        unchecked = MetaCooler(broken, validate=False)
+        with pytest.raises(UnicodeDecodeError):
+            unchecked.chromnames  # noqa: B018 - opens cooler
+        monkeypatch.setattr(MetaCooler, "_check_decodable", lambda self: None)
+        checked_late = MetaCooler(broken)
+        with pytest.raises(MetaCoolerFormatError, match=r"/contigs\.name"):
+            checked_late.chromnames  # noqa: B018 - opens cooler
+
     def test_check_reports_it(self, tiny_metacooler: Path, tmp_path: Path):
         broken = self._break(tiny_metacooler, tmp_path / "broken.metacool")
         results = {r.name: r for r in check(broken)}

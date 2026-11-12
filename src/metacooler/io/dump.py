@@ -230,7 +230,7 @@ def dump_table(
             range_bounds = (i0, i1, j0, j1)
 
         if pixels_format == "wide":
-            pixel_columns = list(mc._clr.pixels()[:0].columns)
+            pixel_columns = list(mc._empty_pixels().columns)
             if weight not in pixel_columns:
                 raise ValueError(
                     f"Weight column {weight!r} not found. Available: {pixel_columns}"
@@ -303,7 +303,7 @@ def dump_table(
                 ann["chrom"] = _decode_chrom(ann["chrom"])
                 pixel_cols = [
                     c
-                    for c in mc._clr.pixels()[:0].columns
+                    for c in mc._empty_pixels().columns
                     if c not in ("bin1_id", "bin2_id")
                 ]
                 joined_empty_cols = [
