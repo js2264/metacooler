@@ -114,6 +114,18 @@
 
 ### Added
 
+- **`--nproc` on `create pairs` and `zoomify`** (default 1, which keeps the
+  serial behaviour). `create pairs --nproc N` bins pairs batches on N threads
+  while the file is read and decompressed; per-batch drop tallies, QC and P(s)
+  are folded in file order, so every output is identical to `--nproc 1`
+  (`_PairsDropStats.unknown_names` keeps insertion order for that). On a
+  200 k-contig, 30 M-pair library: 23.9 s → 20.3 s with 2 threads, ~20 s with 4
+  — one gzip stream is then the critical path. `zoomify --nproc N` builds
+  independent levels in N processes, each as soon as the level it is coarsened
+  from exists, and appends them in ladder order: `-r 1000,2000,5000,10000` on the
+  same map goes from 24.9 s to 15.6 s with 2 processes (peak memory per
+  process unchanged, so the total roughly doubles).
+
 - **`collect`**: zip single-genome cool files — one per species, strain, or
   MAG — into one `.metacool` file, **one genome per input**, with no
   contig-to-genome table to write. Inputs are `.cool` files or one resolution
@@ -368,6 +380,126 @@
 - `ops/aggregate.py` centralises the accumulation logic in module-level
   helpers (`_aggregate_sparse` / `_aggregate_pixel_stream`) instead of
   duplicating it across call sites.
+
+### Performance
+
+- **Genome and contig retrieval goes through the offset indexes.** A genome
+  resolves to its contigs through `indexes/genome_offset` (or, under a
+  `fasta`/`alpha`/`cool`/`custom` ordering, `/contigs/genome_id`), a contig to
+  its bins through `indexes/chrom_offset`, and a bin range to its pixel rows
+  through `indexes/bin1_offset`; those rows are then read with cooler's own bin
+  and pixel selectors, and nothing scans the bin table or the pixels outside
+  them. `pixels_for_genome_pair`, `genome_bin_ids`, `genome_extent`,
+  `contig_extent`, `bins_for_genome`, `bins_for_contig`, `dump -r/-r2` (long
+  and wide), `dump -t pixels --genomes/--contigs/--filter` and `extract` all use
+  it. On a 200 k-contig map, `dump -t pixels -r <contig>` went from 3.0 s to
+  0.8 s (cooler: 1.0 s) and `pixels_for_genome_pair(g, g)` from 119 ms to
+  3.5 ms. `genome_extent` still raises for a genome that is not contiguous.
+  `extract` of a `symmetric-upper` map now writes in order, without cooler's
+  merge. New public `MetaCooler.genome_contig_ids()` and
+  `MetaCooler.genome_bin_ranges()`.
+- **Opening a file runs only the structural checks.** `MetaCooler()` used to run
+  the whole of `schema.validate()`, O(n_bins), on every open (2.8 s on a
+  2 M-contig map). It now checks format attributes, required groups and
+  columns, column lengths, the `/chroms` link, the count attributes and the
+  length and endpoints of every offset index — O(n_columns) reads.
+  `schema.validate(uri, full=False)` runs that subset; `metacooler validate`,
+  `schema.validate()` and every writer still run the full check. A file
+  cooler cannot decode (non-ASCII names) still fails the open with the named
+  `MetaCoolerFormatError`. `pixels_for_genome_pair` now returns every pixel
+  column, typed, when nothing matches (it returned an untyped three-column
+  frame).
+- **Pixels are aggregated on one `int64` key.** Every pixel metacooler builds
+  itself is summed through `io/_utils.aggregate_pixels`: `(bin1, bin2)` folds
+  into `bin1 << 32 | bin2`, which is sorted (a stable, run-detecting sort when
+  the inputs are already sorted frames) and reduced with `np.add.reduceat`,
+  instead of a pandas `groupby` over two columns. `create pairs` bins each chunk
+  by sorting its keys and counting runs, and its in-memory sort frees each
+  frame as soon as it is keyed. Count dtypes are kept exactly as before.
+  `aggregate` and `network` aggregate their chunks the same way, and every
+  caller lets `aggregate_pixels` choose the sort: a stable sort (which merges
+  existing runs) when the keys come mostly in order, as a genome-grouped remap
+  does, quicksort when they are scrambled.
+- **Pair contig names are dictionary-encoded.** `create pairs` and `ps --pairs`
+  ask pyarrow for the two chrom columns as `dictionary<int32, string>`, so the
+  names are never materialised per pair and are mapped to contig ids once per
+  distinct name per batch rather than once per row. The drop report (unknown
+  contigs with examples, missing positions, out-of-bounds pairs) is unchanged.
+  Together with the key-based aggregation, on a 200 k-contig, 30 M-pair
+  library: `create pairs` 76.0 s / 3.54 GB → 28.1 s / 2.56 GB, `--sort-strategy
+  external` 78.8 s / 3.67 GB → 39.9 s / 3.50 GB; outputs identical.
+- **metacooler's own tables are compressed** like cooler's (gzip level 6,
+  shuffle, chunked): `/genomes`, `/contigs`, `/bins/chrom`,
+  `indexes/chrom_offset`, `indexes/genome_offset` and the QC columns, through
+  one `io/_utils.write_column`, in `create`, `binnify`, `merge`, `reassign` and
+  QC storage. They were written uncompressed: on a 200 k-contig map they took
+  11.8 of 47.5 MB (`bins/chrom` alone 3.4 MB, against 0.15 MB now), and the
+  file shrinks from 48.1 to 38.9 MB. A storage change only: filters are
+  transparent to readers, and existing files read as before (see
+  [Storage filters](format.md#storage-filters)).
+- **`binnify` and `zoomify` stream re-binned pixels in order.** At `--level
+  contig` the source-to-target bin map is monotonic, so a source pixel's new
+  row is the new row of its `bin1` and the upper triangle is preserved: the
+  source is cut at output-row boundaries of its `bin1_offset` into blocks of
+  about `--chunksize` pixels, each block is read with cooler's pixel selector,
+  mapped, sorted on its pixel key and reduced, and the blocks are written in
+  order (`ordered=True`) — no temporary
+  coolers, no merge passes, memory proportional to one block. `--level genome`,
+  which reorders contigs, and `square` sources keep the unordered path (now
+  also key-aggregated). `zoomify` coarsens each level from the coarsest level
+  already written whose bin size divides it, as cooler's does (10 kb from 5 kb;
+  2 kb and 5 kb from 1 kb); each level's counts are those of re-binning the
+  base, and its provenance still names the base. On a 200 k-contig map,
+  `zoomify -r 1000,2000,5000,10000`: 82.7 s / 4.23 GB → 27.5 s / 2.62 GB, every
+  level identical to before.
+- **`create cool` remaps in NumPy and sorts on the pixel key.** The remap of
+  each source chunk (`_stream_remapped_pixels`, shared with `reassign`'s
+  regroup path) no longer copies the chunk and swaps through `.loc`; and since
+  contigs are only reordered, the in-memory sort is one argsort on the pixel
+  key whose reduction is a no-op — kept because a cooler written without
+  cooler's duplicate check can repeat a pixel, which is summed. On a
+  200 k-contig cool: 25.4 s / 2.99 GB → 16.7 s / 2.25 GB (together with the
+  key-based aggregation above), output identical.
+- **Per-contig overhead cut at metagenome scale.** With two million contigs,
+  `create pairs` spent ~25 s on its contig and genome tables alone, before a
+  single pair (measured with a pairs file of headers only). The table builders
+  (`_build_contig_order`, `_build_genomes_table`, `_build_contigs_table`) now
+  resolve each contig's genome once per builder and do the grouping, sorting
+  and summing in NumPy (one `lexsort`, one `np.add.at`) instead of a Python
+  sort per genome with a per-contig key function; the contig-table parser zips
+  object arrays rather than pandas' Arrow-backed columns (4× faster) and
+  normalises each distinct genome name once; `validate()` detects repeated
+  names with a sort instead of a hash-based `np.unique` (4× faster on byte
+  strings); the ASCII checks and `_str_to_hdf5` are vectorised for `str`
+  columns (falling back to the per-value path for non-ASCII text); and
+  `binnify` hands cooler contig ids rather than two million names, which
+  cooler iterated as Arrow strings several times per zoom level. Outputs are
+  unchanged.
+- **`MetaCooler()` opens cooler lazily.** Building a `cooler.Cooler` reads
+  every contig name into a dict (1.4 s at two million contigs), which the
+  open, `info`, `metadata`, `binsize`, `shape`, `root` and the genome and
+  contig lookups (`genome_extent`, `contig_extent`, `genome_bin_ranges`, ...)
+  never need: they read the attributes with cooler's own `info()` and the
+  offset indexes. It is now created on first use of anything that reads bins,
+  pixels or chroms, or resolves a region (`bins()`, `pixels()`, `matrix()`,
+  `extent()`, `chromnames`, `bins_for_*`, `pixels_for_genome_pair`, `dump`,
+  ...), all of which go through it. A contig name is found by one vectorised
+  comparison over the stored `/contigs` names (or cooler's dict, once open).
+  An open still refuses a map cooler could not decode (non-ASCII bytes in
+  `/contigs`) with the named error. At XL: opening 1.37 s → 0.055 s. Also,
+  the pairs header scans read bytes, and `create pairs` maps each batch's
+  name dictionary through an object array, halving that step.
+- **The contact-QC tally sums each block with one `bincount`.** Every
+  contact gets the index of its category, and one `bincount` keyed on
+  `(genome, category)` sums every category of every genome at once, where five
+  masked passes used to select each category's contacts first. A chunk is
+  classified in blocks of 2¹⁸ contacts, whose temporaries stay in cache,
+  rather than 50 M at a time (a float-weighted tally, whose sums do not
+  associate, still takes each chunk in one pass, so its bits are unchanged).
+  Tallying the 73 M pixels of a 2 M-contig map: 6.4 s → 2.2 s, with a few MB
+  of scratch memory instead of ~3 GB per 50 M-pixel chunk (the peak of
+  `create cool`); `metacooler qc` on that map: 25.8 s / 5.5 GB → 16.6 s /
+  3.6 GB; outputs identical.
 
 ### Packaging and CI
 

@@ -124,6 +124,16 @@ per-genome blocks under a genome-grouped `contig-ordering` (`genome-then-length`
 genome's contigs may be scattered, so readers must fall back to filtering
 `/contigs/genome_id` rather than slicing with `genome_offset`.
 
+### Storage filters
+
+Every dataset is chunked and compressed with gzip (level 6) behind the shuffle
+filter: cooler's defaults, which it applies to `/bins` and `/pixels`, and which
+metacooler applies to the datasets it writes itself (`/genomes`, `/contigs`,
+`/bins/chrom`, `indexes/chrom_offset`, `indexes/genome_offset`). HDF5 filters
+are transparent to readers, so this is not part of the format's contract: a
+file whose metacooler tables are stored uncompressed (as every file written
+before this change is) reads and validates exactly the same.
+
 ### Identity check
 
 A file is a valid `.metacool` if and only if:

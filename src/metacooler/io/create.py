@@ -12,7 +12,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import cooler
 import h5py
@@ -22,11 +22,16 @@ from pyfaidx import Fasta
 
 from metacooler.io._utils import (
     _finalize_metacool_file,
+    aggregate_pixels,
     check_ascii_names,
     check_output_path,
     infer_binsize,
+    pixel_keys,
+    pixels_from_keys,
+    reduce_sorted_keys,
     resolve_count_dtype,
     store_qc,
+    to_upper_triangle,
     write_cooler,
 )
 from metacooler.io.contigs import parse_contigs_table
@@ -57,7 +62,14 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        Callable,
+        Generator,
+        Iterable,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
     from typing import Literal
 
 
@@ -316,6 +328,26 @@ def _iter_pairs_lines(path: Path, block_size: int = 1 << 20) -> Iterator[str]:
             yield carry.decode("utf-8")
 
 
+def _iter_pairs_raw_lines(path: Path, block_size: int = 1 << 20) -> Iterator[bytes]:
+    """Yield the raw lines of a (possibly compressed) pairs file, without newlines.
+
+    The header scans work on these bytes: a metagenome's pairs header carries
+    one ``#chromsize:`` line per contig -- two million lines -- and decoding
+    each one to ``str`` before looking at it doubled the cost of reading it.
+    """
+    with contextlib.closing(_pairs_input_stream(path)) as src:
+        carry = b""
+        while True:
+            block = src.read(block_size)
+            if not block:
+                break
+            lines = (carry + block).split(b"\n")
+            carry = lines.pop()
+            yield from lines
+        if carry:
+            yield carry
+
+
 def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     """Parse ``#chromsize:`` lines from the header of a pairs file.
 
@@ -332,18 +364,20 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     """
     path = Path(pairs_path)
     lengths = {}
-    for line in _iter_pairs_lines(path):
-        if not line.startswith("#"):
+    for raw in _iter_pairs_raw_lines(path):
+        if not raw.startswith(b"#"):
             break
-        if line.startswith("#chromsize:"):
-            parts = line.strip().split()
+        if raw.startswith(b"#chromsize:"):
+            parts = raw.split()
             if len(parts) >= 3:
                 try:
-                    lengths[parts[1]] = int(parts[2])
+                    lengths[parts[1].decode("utf-8")] = int(parts[2])
                 except ValueError as exc:
+                    line = raw.decode("utf-8", "replace").strip()
+                    length = parts[2].decode("utf-8", "replace")
                     raise ValueError(
-                        f"Malformed #chromsize line in {path}: {line.strip()!r} "
-                        f"(length {parts[2]!r} is not an integer)"
+                        f"Malformed #chromsize line in {path}: {line!r} "
+                        f"(length {length!r} is not an integer)"
                     ) from exc
     return lengths if lengths else None
 
@@ -368,6 +402,19 @@ def _genome_id_order(genome_names: Iterable[str]) -> list[str]:
     if "__unbinned__" in names:
         ordered = ["__unbinned__"] + ordered
     return ordered
+
+
+def _genome_of(contigs: Iterable[str], contig_genome_map: dict[str, str]) -> np.ndarray:
+    """Genome name of every contig, ``"__unbinned__"`` when unassigned (object array)."""
+    get = contig_genome_map.get
+    return np.array([get(c, "__unbinned__") for c in contigs], dtype=object)
+
+
+def _genome_ranks(genome: np.ndarray) -> np.ndarray:
+    """Position of each entry's genome in :func:`_genome_id_order` (int64 array)."""
+    codes, uniques = pd.factorize(genome)
+    position = {g: i for i, g in enumerate(_genome_id_order(uniques))}
+    return np.array([position[g] for g in uniques], dtype=np.int64)[codes]
 
 
 def _build_contig_order(
@@ -409,36 +456,26 @@ def _build_contig_order(
     if ordering == "alpha":
         return sorted(all_contigs)
 
-    if ordering == "genome-then-alpha":
-        # Group by genome, then alphabetical order within each genome.
-        # Genomes are visited in genome_id order (see _genome_id_order) so the
-        # physical contig layout matches the genomes-table ordering.
-        genome_groups: dict[str, list[str]] = {}
-        for contig in all_contigs:
-            genome = contig_genome_map.get(contig, "__unbinned__")
-            genome_groups.setdefault(genome, []).append(contig)
-
-        ordered = []
-        for genome in _genome_id_order(genome_groups.keys()):
-            contigs = genome_groups[genome]
-            contigs.sort()
-            ordered.extend(contigs)
-        return ordered
-
-    if ordering == "genome-then-length":
-        # Group by genome (in genome_id order), then longest contig first
-        # within each genome.
-        genome_groups2: dict[str, list[str]] = {}
-        for contig in all_contigs:
-            genome = contig_genome_map.get(contig, "__unbinned__")
-            genome_groups2.setdefault(genome, []).append(contig)
-
-        ordered2 = []
-        for genome in _genome_id_order(genome_groups2.keys()):
-            contigs = genome_groups2[genome]
-            contigs.sort(key=lambda c: (-contig_lengths[c], c))
-            ordered2.extend(contigs)
-        return ordered2
+    if ordering in ("genome-then-alpha", "genome-then-length"):
+        # Group by genome, visited in genome_id order (see _genome_id_order) so
+        # the physical contig layout matches the genomes-table ordering; within
+        # a genome, alphabetically or longest first (ties alphabetically).
+        # One lexsort over all contigs: a Python sort per genome with a
+        # per-contig key function took seconds on a metagenome.
+        names = np.fromiter(contig_lengths.keys(), dtype=object, count=len(all_contigs))
+        if names.size == 0:
+            return []
+        genome_rank = _genome_ranks(_genome_of(names, contig_genome_map))
+        name_rank = np.empty(names.size, dtype=np.int64)
+        name_rank[np.argsort(names.astype(str), kind="stable")] = np.arange(names.size)
+        if ordering == "genome-then-alpha":
+            order = np.lexsort((name_rank, genome_rank))
+        else:
+            lengths = np.fromiter(
+                contig_lengths.values(), dtype=np.int64, count=names.size
+            )
+            order = np.lexsort((name_rank, -lengths, genome_rank))
+        return names[order].tolist()
 
     raise ValueError(f"Unknown ordering: {ordering!r}")
 
@@ -578,31 +615,28 @@ def _build_genomes_table(
         any extra columns from *extra_genomes_df*.  Rows are ordered with
         ``"__unbinned__"`` first (when present), then alphabetically.
     """
-    # Collect genome names
-    genome_names = set()
-    for contig in contig_order:
-        genome_names.add(contig_genome_map.get(contig, "__unbinned__"))
-
-    # Only inject __unbinned__ when at least one contig actually lands in it;
-    # the loop above already adds "__unbinned__" to genome_names when any contig
-    # lacks an assignment, so no extra injection is needed here.
+    # One genome per contig ("__unbinned__" when unassigned, so it is only a
+    # row when some contig lands in it), then per-genome sums in one pass.
+    codes, uniques = pd.factorize(_genome_of(contig_order, contig_genome_map))
+    lengths = np.fromiter(
+        map(contig_lengths.__getitem__, contig_order),
+        dtype=np.int64,
+        count=len(contig_order),
+    )
+    genome_lengths = np.zeros(len(uniques), dtype=np.int64)
+    np.add.at(genome_lengths, codes, lengths)
+    genome_ncontigs = np.bincount(codes, minlength=len(uniques)).astype(np.int64)
 
     # Canonical genome_id order: __unbinned__ first (if present), then alphabetical.
-    sorted_names = _genome_id_order(genome_names)
-
-    # Compute lengths and n_contigs
-    genome_lengths = {g: 0 for g in sorted_names}
-    genome_ncontigs = {g: 0 for g in sorted_names}
-    for contig in contig_order:
-        genome = contig_genome_map.get(contig, "__unbinned__")
-        genome_lengths[genome] += contig_lengths[contig]
-        genome_ncontigs[genome] += 1
+    sorted_names = _genome_id_order(uniques)
+    position = {g: i for i, g in enumerate(uniques)}
+    rows = np.array([position[g] for g in sorted_names], dtype=np.int64)
 
     df = pd.DataFrame(
         {
             "name": sorted_names,
-            "length": [genome_lengths[g] for g in sorted_names],
-            "n_contigs": [genome_ncontigs[g] for g in sorted_names],
+            "length": genome_lengths[rows],
+            "n_contigs": genome_ncontigs[rows],
         }
     )
 
@@ -669,23 +703,29 @@ def _build_contigs_table(
         *contig_order*.
     """
     genome_name_to_id = {name: i for i, name in enumerate(genomes["name"])}
+    unbinned_id = genome_name_to_id.get("__unbinned__")
 
-    def _get_genome_id(c: str) -> int:
-        gname = contig_genome_map.get(c, "__unbinned__")
-        gid = genome_name_to_id.get(gname)
+    # Resolved once per distinct genome, then gathered for every contig.
+    codes, uniques = pd.factorize(_genome_of(contig_order, contig_genome_map))
+    unique_ids = np.empty(len(uniques), dtype=np.int64)
+    for j, gname in enumerate(uniques):
+        gid = genome_name_to_id.get(gname, unbinned_id)
         if gid is None:
-            gid = genome_name_to_id.get("__unbinned__")
-        if gid is None:
+            contig = contig_order[int(np.argmax(codes == j))]
             raise ValueError(
-                f"Contig {c!r} has no genome assignment and __unbinned__ is absent"
+                f"Contig {contig!r} has no genome assignment and __unbinned__ is absent"
             )
-        return gid
+        unique_ids[j] = gid
 
     df = pd.DataFrame(
         {
             "name": contig_order,
-            "length": [contig_lengths[c] for c in contig_order],
-            "genome_id": [_get_genome_id(c) for c in contig_order],
+            "length": np.fromiter(
+                map(contig_lengths.__getitem__, contig_order),
+                dtype=np.int64,
+                count=len(contig_order),
+            ),
+            "genome_id": unique_ids[codes],
         }
     )
 
@@ -1087,11 +1127,11 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
     """
     n = 0
     has_data = False
-    for line in _iter_pairs_lines(path):
-        if line.startswith("#"):
+    for raw in _iter_pairs_raw_lines(path):
+        if raw.startswith(b"#"):
             n += 1
             continue
-        if not line.strip():
+        if not raw.strip():
             # Tolerate stray blank lines between the header and the body.
             continue
         has_data = True
@@ -1150,10 +1190,14 @@ def _stream_pairs(
     parse_opts = pa_csv.ParseOptions(delimiter="\t")
     convert_opts = pa_csv.ConvertOptions(
         include_columns=pa_col_names,
+        # Contig names arrive dictionary-encoded: each batch holds every
+        # distinct name once plus an int32 code per row, so the strings are
+        # never materialised per pair and _decode_pairs_chunk maps only the
+        # dictionary (a Python dict lookup per *distinct* name, not per row).
         column_types={
-            f"f{c1 - 1}": pa.string(),
+            f"f{c1 - 1}": pa.dictionary(pa.int32(), pa.string()),
             f"f{p1 - 1}": pa.int64(),
-            f"f{c2 - 1}": pa.string(),
+            f"f{c2 - 1}": pa.dictionary(pa.int32(), pa.string()),
             f"f{p2 - 1}": pa.int64(),
         },
     )
@@ -1185,14 +1229,25 @@ class _PairsDropStats:
     unknown_contig: int = 0
     null_position: int = 0
     out_of_bounds: int = 0
-    unknown_names: set[str] = dataclasses.field(default_factory=set)
+    # An insertion-ordered set (a dict's keys): "the first names seen" must not
+    # depend on string hashing, so that per-batch tallies merged in batch order
+    # (create pairs --nproc) keep exactly the names a serial run keeps.
+    unknown_names: dict[str, None] = dataclasses.field(default_factory=dict)
 
     def note_unknown_names(self, names: Iterable[str]) -> None:
         """Remember up to a handful of example unrecognised contig names."""
         for name in names:
             if len(self.unknown_names) >= _MAX_REPORTED_UNKNOWN_CONTIGS:
                 return
-            self.unknown_names.add(str(name))
+            self.unknown_names[str(name)] = None
+
+    def merge(self, other: _PairsDropStats) -> None:
+        """Add a later batch's tally to this one, as if it had been seen here."""
+        self.total += other.total
+        self.unknown_contig += other.unknown_contig
+        self.null_position += other.null_position
+        self.out_of_bounds += other.out_of_bounds
+        self.note_unknown_names(other.unknown_names)
 
     @property
     def dropped(self) -> int:
@@ -1271,6 +1326,30 @@ def _finite_position_mask(col: pd.Series) -> np.ndarray:
     return col.notna().to_numpy()
 
 
+def _contig_codes(names: pd.Series, contig_name_to_id: dict[str, int]) -> np.ndarray:
+    """Map a column of contig names to ``int32`` ids, ``-1`` where unknown.
+
+    A categorical column (what :func:`_stream_pairs` produces) is mapped through
+    its categories, a few thousand names per batch, then gathered by code;
+    anything else goes through ``Series.map``, one dict lookup per row.
+    """
+    if isinstance(names.dtype, pd.CategoricalDtype):
+        # Over an object array: iterating the Arrow-backed categories pandas
+        # builds costs as much again as the lookups, and on a metagenome each
+        # batch's dictionary holds hundreds of thousands of names.
+        cats = names.cat.categories.to_numpy(dtype=object)
+        get = contig_name_to_id.get
+        cat_ids = np.fromiter(
+            (get(c, -1) for c in cats),
+            dtype=np.int32,
+            count=len(cats),
+        )
+        codes = names.cat.codes.to_numpy()
+        # Code -1 is a missing name: unknown, as it was through Series.map.
+        return np.where(codes >= 0, cat_ids[np.maximum(codes, 0)], -1).astype(np.int32)
+    return names.map(contig_name_to_id).fillna(-1).astype(np.int32).to_numpy()
+
+
 def _decode_pairs_chunk(
     chunk: pd.DataFrame,
     contig_name_to_id: dict[str, int],
@@ -1302,10 +1381,10 @@ def _decode_pairs_chunk(
         ``(c1, c2, p1, p2)`` for the usable rows — contig ids, and 0-based
         positions clamped at 0 — or ``None`` if the chunk has no usable row.
     """
-    # Fast contig-name → integer-ID encoding.  Unrecognised contigs map to
-    # NaN and are coerced to -1 so they can be dropped in one vectorised pass.
-    c1_codes = chunk["chrom1"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
-    c2_codes = chunk["chrom2"].map(contig_name_to_id).fillna(-1).astype(np.int32).values
+    # Contig name → integer id; unrecognised (or missing) names become -1 so
+    # they can be dropped in one vectorised pass.
+    c1_codes = _contig_codes(chunk["chrom1"], contig_name_to_id)
+    c2_codes = _contig_codes(chunk["chrom2"], contig_name_to_id)
 
     # Drop pairs referencing unknown contigs, and pairs whose position field was
     # empty (pyarrow null → float NaN → INT64_MIN bin id if left alone).
@@ -1454,18 +1533,41 @@ def _bin_pairs_chunk(
     decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats, contig_length)
     if decoded is None:
         return None
+    _tally_decoded(decoded, qc, ps, contig_genome_id)
+    return _bin_decoded(decoded, chrom_offset, binsize, bin_keys)
+
+
+_Decoded = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+
+
+def _tally_decoded(
+    decoded: _Decoded,
+    qc: ContactQC | None,
+    ps: PSCounts | None,
+    contig_genome_id: np.ndarray | None,
+) -> None:
+    """Feed one decoded chunk's raw positions to the QC and P(s) tallies."""
+    if qc is None and ps is None:
+        return
+    assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
     c1, c2, p1, p2 = decoded
+    # One subtraction serves both tallies; neither reads it where the two
+    # ends sit on different contigs.
+    distance = np.abs(p2 - p1)
+    if qc is not None:
+        qc.tally(c1, c2, contig_genome_id[c1], contig_genome_id[c2], distance)
+    if ps is not None:
+        tally_intra_contig(ps, contig_genome_id, c1, c2, distance)
 
-    if qc is not None or ps is not None:
-        assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
-        # One subtraction serves both tallies; neither reads it where the two
-        # ends sit on different contigs.
-        distance = np.abs(p2 - p1)
-        if qc is not None:
-            qc.tally(c1, c2, contig_genome_id[c1], contig_genome_id[c2], distance)
-        if ps is not None:
-            tally_intra_contig(ps, contig_genome_id, c1, c2, distance)
 
+def _bin_decoded(
+    decoded: _Decoded,
+    chrom_offset: np.ndarray,
+    binsize: int | None,
+    bin_keys: np.ndarray | None,
+) -> pd.DataFrame:
+    """Bin one decoded chunk into sorted, aggregated pixels (one contact per pair)."""
+    c1, c2, p1, p2 = decoded
     if binsize is not None:
         # Fixed-size bins: clamp so an out-of-range position never overflows
         # into the next contig's bins.
@@ -1485,18 +1587,80 @@ def _bin_pairs_chunk(
         bin1 = _fragment_bin_ids(bin_keys, chrom_offset, c1, p1)
         bin2 = _fragment_bin_ids(bin_keys, chrom_offset, c2, p2)
 
-    # Enforce upper triangle
-    swap = bin1 > bin2
-    bin1[swap], bin2[swap] = bin2[swap], bin1[swap]
+    # One contact per pair, in the upper triangle: sort the folded keys and
+    # count the runs.  The result comes out sorted, which every later merge
+    # exploits.
+    bin1, bin2 = to_upper_triangle(bin1, bin2)
+    keys = np.sort(pixel_keys(bin1, bin2))
+    return pixels_from_keys(*reduce_sorted_keys(keys, None))
 
-    df = pd.DataFrame(
-        {
-            "bin1_id": bin1,
-            "bin2_id": bin2,
-            "count": np.ones(len(bin1), dtype=np.int32),
-        }
-    )
-    return df.groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"].sum()
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+
+@dataclasses.dataclass
+class _BinnedBatch:
+    """What binning one pairs batch produced, before it is folded into the run."""
+
+    pairs: int
+    pixels: pd.DataFrame | None
+    decoded: _Decoded | None
+    stats: _PairsDropStats
+
+
+def _decode_and_bin(
+    chunk: pd.DataFrame,
+    contig_name_to_id: dict[str, int],
+    chrom_offset: np.ndarray,
+    binsize: int | None,
+    bin_keys: np.ndarray | None,
+    contig_length: np.ndarray | None,
+    keep_decoded: bool,
+) -> _BinnedBatch:
+    """The part of :func:`_bin_pairs_chunk` that touches no shared state.
+
+    Safe to run on a worker thread: it reads the shared lookup tables and
+    returns everything that must be accumulated -- the drop tally, and the
+    decoded arrays the QC and P(s) tallies need -- for the caller to fold in,
+    in batch order.
+    """
+    stats = _PairsDropStats()
+    decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats, contig_length)
+    if decoded is None:
+        return _BinnedBatch(len(chunk), None, None, stats)
+    pixels = _bin_decoded(decoded, chrom_offset, binsize, bin_keys)
+    return _BinnedBatch(len(chunk), pixels, decoded if keep_decoded else None, stats)
+
+
+def _map_in_order(
+    function: Callable[[_T], _R],
+    batches: Iterable[_T],
+    nproc: int,
+) -> Iterator[_R]:
+    """``map(function, batches)``, on *nproc* worker threads when ``nproc > 1``.
+
+    The thread that pulls *batches* (pyarrow's reader: gunzip and parse, which
+    release the GIL) keeps reading while the workers bin (NumPy, which releases
+    it too).  Results are yielded in batch order, with at most *nproc* batches
+    in flight, so memory stays at *nproc* batches.
+    """
+    if nproc <= 1:
+        for batch in batches:
+            yield function(batch)
+        return
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=nproc) as pool:
+        in_flight: deque = deque()
+        for batch in batches:
+            in_flight.append(pool.submit(function, batch))
+            del batch
+            if len(in_flight) >= nproc:
+                yield in_flight.popleft().result()
+        while in_flight:
+            yield in_flight.popleft().result()
 
 
 def _total_time_str(start_time: float) -> str:
@@ -1546,7 +1710,13 @@ def _parse_contig_map(
     else:
         cg_map = dict(contig_genome_map)
         logger.info(f"Parsed contig-genome map for {len(cg_map)} contigs from dict")
-    cg_map = {k: _normalize_genome_name(v) for k, v in cg_map.items()}
+    # Normalise each distinct genome name once (there are thousands, against
+    # millions of contigs), and rebuild the map only if a sentinel occurs.
+    renamed = {
+        v: n for v in set(cg_map.values()) if (n := _normalize_genome_name(v)) != v
+    }
+    if renamed:
+        cg_map = {k: renamed.get(v, v) for k, v in cg_map.items()}
     return cg_map, contig_df
 
 
@@ -1631,11 +1801,7 @@ def _sort_and_dedup_pixels(
         return
     logger.info("Sorting pixels in memory...")
     _t0 = time.time()
-    all_pixels = pd.concat(frames, ignore_index=True)
-    del frames
-    all_pixels = all_pixels.groupby(["bin1_id", "bin2_id"], sort=True, as_index=False)[
-        "count"
-    ].sum()
+    all_pixels = aggregate_pixels(frames, consume=True)
     logger.info(f"Sorting pixels in memory... DONE ({time.time() - _t0:.1f}s elapsed)")
     logger.info(f"Total pixels after global dedup: {len(all_pixels):,}")
     for lo in range(0, len(all_pixels), write_chunk):
@@ -1653,11 +1819,7 @@ def _merge_pixel_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     """
     if len(frames) == 1:
         return frames[0]
-    return (
-        pd.concat(frames, ignore_index=True)
-        .groupby(["bin1_id", "bin2_id"], sort=False, as_index=False)["count"]
-        .sum()
-    )
+    return aggregate_pixels(frames)
 
 
 def _buffer_pixels(
@@ -1794,6 +1956,7 @@ def _stream_binned_pairs(
     ps: PSCounts | None = None,
     contig_genome_id: np.ndarray | None = None,
     contig_length: np.ndarray | None = None,
+    nproc: int = 1,
 ) -> Iterable[pd.DataFrame]:
     """Stream a pairs file and yield binned pixel DataFrames with progress.
 
@@ -1814,6 +1977,8 @@ def _stream_binned_pairs(
         ps: Optional P(s) tally, forwarded likewise.
         contig_genome_id: Genome id of every contig, required when *qc* or *ps*
             is given.
+        nproc: Worker threads binning batches while the pairs file is read
+            (see :func:`_map_in_order`); 1 bins on the reading thread.
 
     Yields:
         Aggregated pixel DataFrames (``bin1_id``, ``bin2_id``, ``count``).
@@ -1835,23 +2000,30 @@ def _stream_binned_pairs(
         pending: list[pd.DataFrame] = []
         pending_pairs = 0
         stats = stats if stats is not None else _PairsDropStats()
-        for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
-            progress.update(task, advance=len(chunk))
-            result = _bin_pairs_chunk(
+        if qc is not None or ps is not None:
+            assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
+
+        def bin_batch(chunk: pd.DataFrame) -> _BinnedBatch:
+            return _decode_and_bin(
                 chunk,
                 contig_name_to_id,
                 chrom_offset,
                 binsize,
                 bin_keys,
-                stats,
-                qc,
-                ps,
-                contig_genome_id,
                 contig_length,
+                keep_decoded=qc is not None or ps is not None,
             )
-            if result is not None and not result.empty:
-                pending.append(result)
-            pending_pairs += len(chunk)
+
+        batches = _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs)
+        for batch in _map_in_order(bin_batch, batches, nproc):
+            progress.update(task, advance=batch.pairs)
+            # Folded in batch order, so every tally is the serial one.
+            stats.merge(batch.stats)
+            if batch.decoded is not None:
+                _tally_decoded(batch.decoded, qc, ps, contig_genome_id)
+            if batch.pixels is not None and not batch.pixels.empty:
+                pending.append(batch.pixels)
+            pending_pairs += batch.pairs
             # The reader may hand back smaller batches than requested (its block
             # size is capped); coalesce them so a consumer that pays a fixed cost
             # per chunk sees the chunk count the caller asked for.
@@ -1943,17 +2115,16 @@ def _stream_remapped_pixels(
     clr = cooler.Cooler(cool_path_str)
 
     def _remap_chunk(lo: int, hi: int) -> pd.DataFrame:
-        chunk = clr.pixels()[lo:hi].copy()
-        chunk["bin1_id"] = old_to_new_bin[chunk["bin1_id"].values.astype(np.int64)]
-        chunk["bin2_id"] = old_to_new_bin[chunk["bin2_id"].values.astype(np.int64)]
+        chunk = clr.pixels()[["bin1_id", "bin2_id", "count"]][lo:hi]
+        b1 = old_to_new_bin[chunk["bin1_id"].to_numpy(dtype=np.int64)]
+        b2 = old_to_new_bin[chunk["bin2_id"].to_numpy(dtype=np.int64)]
+        counts = chunk["count"].to_numpy().astype(count_dtype)
         # Drop pixels that touch a dropped contig (sentinel -1).
-        chunk = chunk[(chunk["bin1_id"] >= 0) & (chunk["bin2_id"] >= 0)].copy()
-        chunk["count"] = chunk["count"].astype(count_dtype)
-        swap = chunk["bin1_id"] > chunk["bin2_id"]
-        chunk.loc[swap, ["bin1_id", "bin2_id"]] = chunk.loc[
-            swap, ["bin2_id", "bin1_id"]
-        ].values
-        return chunk[["bin1_id", "bin2_id", "count"]]
+        keep = (b1 >= 0) & (b2 >= 0)
+        if not keep.all():
+            b1, b2, counts = b1[keep], b2[keep], counts[keep]
+        b1, b2 = to_upper_triangle(b1, b2)
+        return pd.DataFrame({"bin1_id": b1, "bin2_id": b2, "count": counts}, copy=False)
 
     ranges = [(i, min(i + chunksize, n_pixels)) for i in range(0, n_pixels, chunksize)]
     con = Console(stderr=True)
@@ -2087,6 +2258,7 @@ def from_pairs(
     ps: bool = True,
     ps_bins_per_decade: int = DEFAULT_BINS_PER_DECADE,
     force: bool = False,
+    nproc: int = 1,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
@@ -2152,7 +2324,16 @@ def from_pairs(
         force: Overwrite an existing ``<name>.ps.tsv``.  The ``.metacool``
             itself is guarded by the caller (the CLI checks it before any work
             starts).
+        nproc: Threads binning pairs batches while the file is being read and
+            decompressed (which stays on one thread, being one gzip stream).
+            Results are folded in file order, so the output and every tally
+            are those of ``nproc=1``; memory grows by one batch per thread.
+
+    Raises:
+        ValueError: If *nproc* is below 1.
     """
+    if nproc < 1:
+        raise ValueError(f"nproc must be at least 1, got {nproc}")
     uri = Path(uri)
     if pairs_kwargs is None:
         pairs_kwargs = {}
@@ -2311,6 +2492,7 @@ def from_pairs(
         ps_tally,
         contig_genome_id if (qc or ps) else None,
         contig_length,
+        nproc=nproc,
     )
     pixel_source: Iterable[pd.DataFrame]
     if sort_in_memory is None:
@@ -2619,6 +2801,11 @@ def from_cool(
             raw_pixels, qc_tally, bin_maps(bins_remapped, contigs)
         )
     if sort_in_memory:
+        # Contigs are only reordered -- bins map one-to-one -- so the remapped
+        # pixels stay unique and this is one argsort on the pixel key: the
+        # reduction after it finds no repeated key and returns the counts as
+        # they are.  It is kept because a cooler written without cooler's
+        # duplicate check can repeat a pixel, which is then summed.
         pixel_source: Iterable[pd.DataFrame] = _sort_and_dedup_pixels(
             pixel_iter=raw_pixels
         )

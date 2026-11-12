@@ -11,7 +11,7 @@ import os
 import re
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import h5py
 import numpy as np
@@ -31,6 +31,8 @@ from metacooler.schema import (
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
+
+    import numpy.typing as npt
 
     from metacooler.api import MetaCooler
 
@@ -300,7 +302,12 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
         A NumPy array with dtype ``S<n>`` where *n* is the length of the
         longest encoded string.  Non-string inputs are returned as-is.
     """
-    if arr.dtype.kind in ("O", "U", "S") or str(arr.dtype) == "string":
+    if arr.dtype.kind == "S":
+        return arr
+    if arr.dtype.kind in ("O", "U") or str(arr.dtype) == "string":
+        fast = _ascii_to_hdf5(arr)
+        if fast is not None:
+            return fast
         str_arr = ["" if pd.isna(v) else str(v) for v in arr]
         encoded = [s.encode("utf-8") for s in str_arr]
         # Size the fixed-length dtype by ENCODED BYTE length, not character
@@ -310,6 +317,28 @@ def _str_to_hdf5(arr: np.ndarray) -> np.ndarray:
         max_len = max((len(b) for b in encoded), default=1)
         return np.array(encoded, dtype=f"S{max_len}")
     return np.asarray(arr)
+
+
+def _ascii_to_hdf5(arr: np.ndarray) -> np.ndarray | None:
+    """:func:`_str_to_hdf5` of an all-ASCII column, vectorised; ``None`` otherwise.
+
+    NumPy's object-to-bytes cast does what the per-value loop does -- ``str()``
+    of each value, ASCII-encoded -- in C, three times faster on two million
+    contig names; it raises on the first non-ASCII value, which is left to the
+    UTF-8 loop.  The width is then trimmed to the longest value, as the loop
+    sizes it (NumPy widens to 32 bytes for some scalar types).
+    """
+    values = np.asarray(arr, dtype=object)
+    missing = pd.isna(values)
+    if missing.any():
+        values = values.copy()
+        values[missing] = ""
+    try:
+        out = values.astype("S")
+    except UnicodeEncodeError:
+        return None
+    width = max(int(np.char.str_len(out).max(initial=0)), 1)
+    return out if out.dtype.itemsize == width else out.astype(f"S{width}")
 
 
 def to_upper_triangle(
@@ -336,6 +365,186 @@ def to_upper_triangle(
         not modified.
     """
     return np.minimum(bin1, bin2), np.maximum(bin1, bin2)
+
+
+#: Storage filters for every dataset metacooler writes itself (``/genomes``,
+#: ``/contigs``, ``bins/chrom``, ``chrom_offset``, ``genome_offset``, the QC
+#: columns): cooler's own defaults -- gzip level 6 behind the shuffle filter,
+#: chunked by h5py -- so these tables compress like the ``/bins`` and
+#: ``/pixels`` cooler writes beside them.  Filters are transparent to readers.
+H5_STORAGE: dict[str, object] = {
+    "compression": "gzip",
+    "compression_opts": 6,
+    "shuffle": True,
+}
+
+
+def write_column(
+    group: h5py.Group, name: str, data: object, dtype: npt.DTypeLike | None = None
+) -> h5py.Dataset:
+    """Create the dataset *name* in *group* from *data*, compressed.
+
+    The single way metacooler writes a table column of its own: with
+    :data:`H5_STORAGE`, and with text converted to fixed-length bytes (h5py
+    cannot write ``object`` or ``StringDtype`` arrays).
+
+    Args:
+        group: Table group to write into.
+        name: Column name.
+        data: Column values.
+        dtype: Optional dtype to cast to.
+
+    Returns:
+        The new dataset.
+    """
+    arr = _str_to_hdf5(np.asarray(data))
+    if dtype is not None:
+        arr = arr.astype(dtype)
+    return group.create_dataset(name, data=arr, **H5_STORAGE)
+
+
+#: A pixel's sort key is ``bin1 << 32 | bin2``: one int64 whose integer order is
+#: ``(bin1, bin2)`` order, as long as every bin id is below ``2**31``.
+_PIXEL_KEY_SHIFT = 32
+_PIXEL_KEY_MASK = (1 << _PIXEL_KEY_SHIFT) - 1
+_MAX_KEYED_BIN = 1 << 31
+
+
+def pixel_keys(bin1: np.ndarray, bin2: np.ndarray) -> np.ndarray:
+    """Fold ``(bin1, bin2)`` into one ``int64`` that sorts as the pair does.
+
+    Sorting, deduplicating and merging on this one key is three to four times
+    faster, and needs half the memory, of a pandas ``groupby`` over two columns.
+
+    Args:
+        bin1: Row bin ids.
+        bin2: Column bin ids, same length.
+
+    Returns:
+        ``int64`` keys.
+
+    Raises:
+        OverflowError: If a bin id is negative or does not fit in 31 bits, where
+            the key would no longer order (or decode) the pair.
+    """
+    b1 = np.asarray(bin1).astype(np.int64, copy=False)
+    b2 = np.asarray(bin2).astype(np.int64, copy=False)
+    if len(b1):
+        lo = min(int(np.min(b1)), int(np.min(b2)))
+        hi = max(int(np.max(b1)), int(np.max(b2)))
+        if lo < 0 or hi >= _MAX_KEYED_BIN:
+            raise OverflowError(
+                f"bin ids must lie in [0, 2**31) to be keyed; got [{lo}, {hi}]"
+            )
+    return (b1 << _PIXEL_KEY_SHIFT) | b2
+
+
+def pixels_from_keys(keys: np.ndarray, counts: np.ndarray) -> pd.DataFrame:
+    """Unfold :func:`pixel_keys` back into a ``bin1_id, bin2_id, count`` frame.
+
+    ``copy=False`` keeps the three columns as separate blocks: by default pandas
+    consolidates same-dtype columns into one 2-D block, a copy of every pixel.
+    """
+    return pd.DataFrame(
+        {
+            "bin1_id": keys >> _PIXEL_KEY_SHIFT,
+            "bin2_id": keys & _PIXEL_KEY_MASK,
+            "count": counts,
+        },
+        copy=False,
+    )
+
+
+def _is_sorted(values: np.ndarray) -> bool:
+    return bool(len(values) < 2 or (values[1:] >= values[:-1]).all())
+
+
+#: Mean length of the already-sorted runs in a key array above which a stable
+#: sort (timsort, which merges existing runs) beats quicksort.  Measured on a
+#: 200 k-contig map: a genome-grouped remap has runs of ~40-60 keys and sorts
+#: 1.5-4x faster stably; scrambled keys have runs of ~2 and sort 2x faster
+#: with quicksort.
+_STABLE_SORT_MIN_RUN = 8
+
+
+def _sort_kind(
+    keys: np.ndarray, runs_known_sorted: bool = False
+) -> Literal["stable", "quicksort"]:
+    """Pick the faster ``np.argsort`` kind for *keys* (see above)."""
+    if runs_known_sorted:
+        return "stable"
+    descents = int(np.count_nonzero(keys[1:] < keys[:-1]))
+    return (
+        "stable" if len(keys) >= _STABLE_SORT_MIN_RUN * (descents + 1) else "quicksort"
+    )
+
+
+def reduce_sorted_keys(
+    keys: np.ndarray, counts: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sum the counts of equal, adjacent keys (*keys* must be sorted).
+
+    Args:
+        keys: Sorted pixel keys.
+        counts: Count of each key, or ``None`` for one each (raw contacts),
+            in which case the sums are run lengths, as ``int32``.
+
+    Returns:
+        ``(unique_keys, sums)``.  *sums* keeps the dtype of *counts*: never
+        narrowed, as a pandas ``groupby().sum()`` did not narrow it either.
+    """
+    if not len(keys):
+        dtype = np.int32 if counts is None else counts.dtype
+        return keys, np.empty(0, dtype=dtype)
+    starts = np.flatnonzero(np.concatenate(([True], keys[1:] != keys[:-1])))
+    if counts is None:
+        sums = np.diff(np.append(starts, len(keys))).astype(np.int32)
+    elif len(starts) == len(keys):
+        sums = counts
+    else:
+        sums = np.add.reduceat(counts, starts, dtype=counts.dtype)
+    return keys[starts], sums
+
+
+def aggregate_pixels(
+    frames: Sequence[pd.DataFrame], *, consume: bool = False
+) -> pd.DataFrame:
+    """Merge pixel frames into one, summing repeated ``(bin1, bin2)``, sorted.
+
+    The single place metacooler aggregates pixels it built itself: the frames
+    are folded onto :func:`pixel_keys`, sorted (a stable sort, which runs in
+    linear time over the already-sorted frames this produces, when every input
+    is one), and reduced with ``np.add.reduceat``.
+
+    Args:
+        frames: Non-empty sequence of frames with ``bin1_id``, ``bin2_id`` and
+            ``count`` columns (other columns are dropped).
+        consume: Empty *frames* (a list) as it goes, so each frame is freed as
+            soon as it has been keyed; for the large in-memory sorts.
+
+    Returns:
+        ``bin1_id``, ``bin2_id`` (``int64``) and ``count`` (the input dtype),
+        sorted by ``(bin1_id, bin2_id)`` with no repeated pair.
+    """
+    n_frames = len(frames)
+    keys_list: list[np.ndarray] = []
+    counts_list: list[np.ndarray] = []
+    queue = frames if consume else list(frames)
+    while queue:
+        f = cast("list[pd.DataFrame]", queue).pop(0)
+        keys_list.append(pixel_keys(f["bin1_id"].to_numpy(), f["bin2_id"].to_numpy()))
+        counts_list.append(f["count"].to_numpy())
+        del f
+    all_sorted = all(_is_sorted(k) for k in keys_list)
+    keys = np.concatenate(keys_list) if n_frames > 1 else keys_list[0]
+    counts = np.concatenate(counts_list) if n_frames > 1 else counts_list[0]
+    del keys_list, counts_list
+    if not (all_sorted and n_frames == 1):
+        order = np.argsort(keys, kind=_sort_kind(keys, all_sorted))
+        keys = keys[order]
+        counts = counts[order]
+        del order
+    return pixels_from_keys(*reduce_sorted_keys(keys, counts))
 
 
 def enforce_upper_triangle(
@@ -667,7 +876,10 @@ def cooler_writer_shims(binsize: int | None) -> Generator[None, None, None]:
         h5opts: dict,
         chrom_as_enum: bool = True,
     ) -> None:
-        original_write_bins(grp, bins, chromnames, h5opts, chrom_as_enum=False)
+        # cooler zips the names into a dict: over an object array, not the
+        # Arrow-backed column pandas 3 builds, which iterates 4x slower.
+        names = np.asarray(chromnames, dtype=object)
+        original_write_bins(grp, bins, names, h5opts, chrom_as_enum=False)
 
     def get_binsize_precomputed(bins: pd.DataFrame) -> int | None:
         return binsize
@@ -878,19 +1090,19 @@ def _finalize_metacool_file(
             del f["genomes"]
         g = f.create_group("genomes", track_order=True)
         for col in genomes.columns:
-            g.create_dataset(col, data=_str_to_hdf5(genomes[col].values))
+            write_column(g, col, genomes[col].values)
 
         # Write /contigs
         if "contigs" in f:
             del f["contigs"]
         c = f.create_group("contigs", track_order=True)
         for col in contigs.columns:
-            c.create_dataset(col, data=_str_to_hdf5(contigs[col].values))
+            write_column(c, col, contigs[col].values)
 
         # Strip cooler's enum dtype from bins/chrom so it stores plain int32
         chrom_data = f["bins"]["chrom"][:]
         del f["bins"]["chrom"]
-        f["bins"].create_dataset("chrom", data=chrom_data, dtype=np.int32)
+        write_column(f["bins"], "chrom", chrom_data, dtype=np.int32)
 
         # Compute chrom_offset from bins if not provided
         if chrom_offset is None:
@@ -909,7 +1121,7 @@ def _finalize_metacool_file(
         ):
             if key in idx:
                 del idx[key]
-            idx.create_dataset(key, data=data.astype(np.int64))
+            write_column(idx, key, data, dtype=np.int64)
 
         # Format attributes
         f.attrs["format"] = COOLER_FORMAT
@@ -996,7 +1208,7 @@ def store_qc(
         for column in QC_GENOME_COLUMNS:
             if column in genomes:
                 del genomes[column]
-            genomes.create_dataset(column, data=per_genome[column].to_numpy())
+            write_column(genomes, column, per_genome[column].to_numpy())
 
 
 def _filter_by_genomes_and_contigs(
