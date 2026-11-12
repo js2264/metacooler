@@ -114,6 +114,18 @@
 
 ### Added
 
+- **`--nproc` on `create pairs` and `zoomify`** (default 1, which keeps the
+  serial behaviour). `create pairs --nproc N` bins pairs batches on N threads
+  while the file is read and decompressed; per-batch drop tallies, QC and P(s)
+  are folded in file order, so every output is identical to `--nproc 1`
+  (`_PairsDropStats.unknown_names` keeps insertion order for that). On a
+  200 k-contig, 30 M-pair library: 23.9 s → 20.3 s with 2 threads, ~20 s with 4
+  — one gzip stream is then the critical path. `zoomify --nproc N` builds
+  independent levels in N processes, each as soon as the level it is coarsened
+  from exists, and appends them in ladder order: `-r 1000,2000,5000,10000` on the
+  same map goes from 24.9 s to 15.6 s with 2 processes (peak memory per
+  process unchanged, so the total roughly doubles).
+
 - **`collect`**: zip single-genome cool files — one per species, strain, or
   MAG — into one `.metacool` file, **one genome per input**, with no
   contig-to-genome table to write. Inputs are `.cool` files or one resolution

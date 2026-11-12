@@ -128,7 +128,7 @@ class TestDictionaryEncodedNames:
         assert stats.total == 5
         assert stats.unknown_contig == 2
         assert stats.out_of_bounds == 1
-        assert stats.unknown_names == {"zz", "yy"}
+        assert list(stats.unknown_names) == ["zz", "yy"]
         np.testing.assert_array_equal(out[0], [0, 0])
 
 

@@ -12,7 +12,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import cooler
 import h5py
@@ -62,7 +62,14 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        Callable,
+        Generator,
+        Iterable,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
     from typing import Literal
 
 
@@ -1194,14 +1201,25 @@ class _PairsDropStats:
     unknown_contig: int = 0
     null_position: int = 0
     out_of_bounds: int = 0
-    unknown_names: set[str] = dataclasses.field(default_factory=set)
+    # An insertion-ordered set (a dict's keys): "the first names seen" must not
+    # depend on string hashing, so that per-batch tallies merged in batch order
+    # (create pairs --nproc) keep exactly the names a serial run keeps.
+    unknown_names: dict[str, None] = dataclasses.field(default_factory=dict)
 
     def note_unknown_names(self, names: Iterable[str]) -> None:
         """Remember up to a handful of example unrecognised contig names."""
         for name in names:
             if len(self.unknown_names) >= _MAX_REPORTED_UNKNOWN_CONTIGS:
                 return
-            self.unknown_names.add(str(name))
+            self.unknown_names[str(name)] = None
+
+    def merge(self, other: _PairsDropStats) -> None:
+        """Add a later batch's tally to this one, as if it had been seen here."""
+        self.total += other.total
+        self.unknown_contig += other.unknown_contig
+        self.null_position += other.null_position
+        self.out_of_bounds += other.out_of_bounds
+        self.note_unknown_names(other.unknown_names)
 
     @property
     def dropped(self) -> int:
@@ -1483,18 +1501,41 @@ def _bin_pairs_chunk(
     decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats, contig_length)
     if decoded is None:
         return None
+    _tally_decoded(decoded, qc, ps, contig_genome_id)
+    return _bin_decoded(decoded, chrom_offset, binsize, bin_keys)
+
+
+_Decoded = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+
+
+def _tally_decoded(
+    decoded: _Decoded,
+    qc: ContactQC | None,
+    ps: PSCounts | None,
+    contig_genome_id: np.ndarray | None,
+) -> None:
+    """Feed one decoded chunk's raw positions to the QC and P(s) tallies."""
+    if qc is None and ps is None:
+        return
+    assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
     c1, c2, p1, p2 = decoded
+    # One subtraction serves both tallies; neither reads it where the two
+    # ends sit on different contigs.
+    distance = np.abs(p2 - p1)
+    if qc is not None:
+        qc.tally(c1, c2, contig_genome_id[c1], contig_genome_id[c2], distance)
+    if ps is not None:
+        tally_intra_contig(ps, contig_genome_id, c1, c2, distance)
 
-    if qc is not None or ps is not None:
-        assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
-        # One subtraction serves both tallies; neither reads it where the two
-        # ends sit on different contigs.
-        distance = np.abs(p2 - p1)
-        if qc is not None:
-            qc.tally(c1, c2, contig_genome_id[c1], contig_genome_id[c2], distance)
-        if ps is not None:
-            tally_intra_contig(ps, contig_genome_id, c1, c2, distance)
 
+def _bin_decoded(
+    decoded: _Decoded,
+    chrom_offset: np.ndarray,
+    binsize: int | None,
+    bin_keys: np.ndarray | None,
+) -> pd.DataFrame:
+    """Bin one decoded chunk into sorted, aggregated pixels (one contact per pair)."""
+    c1, c2, p1, p2 = decoded
     if binsize is not None:
         # Fixed-size bins: clamp so an out-of-range position never overflows
         # into the next contig's bins.
@@ -1514,14 +1555,80 @@ def _bin_pairs_chunk(
         bin1 = _fragment_bin_ids(bin_keys, chrom_offset, c1, p1)
         bin2 = _fragment_bin_ids(bin_keys, chrom_offset, c2, p2)
 
-    # Enforce upper triangle
-    swap = bin1 > bin2
-    bin1[swap], bin2[swap] = bin2[swap], bin1[swap]
-
-    # One contact per pair: sort the folded keys and count the runs.  The
-    # result comes out sorted, which every later merge exploits.
+    # One contact per pair, in the upper triangle: sort the folded keys and
+    # count the runs.  The result comes out sorted, which every later merge
+    # exploits.
+    bin1, bin2 = to_upper_triangle(bin1, bin2)
     keys = np.sort(pixel_keys(bin1, bin2))
     return pixels_from_keys(*reduce_sorted_keys(keys, None))
+
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+
+@dataclasses.dataclass
+class _BinnedBatch:
+    """What binning one pairs batch produced, before it is folded into the run."""
+
+    pairs: int
+    pixels: pd.DataFrame | None
+    decoded: _Decoded | None
+    stats: _PairsDropStats
+
+
+def _decode_and_bin(
+    chunk: pd.DataFrame,
+    contig_name_to_id: dict[str, int],
+    chrom_offset: np.ndarray,
+    binsize: int | None,
+    bin_keys: np.ndarray | None,
+    contig_length: np.ndarray | None,
+    keep_decoded: bool,
+) -> _BinnedBatch:
+    """The part of :func:`_bin_pairs_chunk` that touches no shared state.
+
+    Safe to run on a worker thread: it reads the shared lookup tables and
+    returns everything that must be accumulated -- the drop tally, and the
+    decoded arrays the QC and P(s) tallies need -- for the caller to fold in,
+    in batch order.
+    """
+    stats = _PairsDropStats()
+    decoded = _decode_pairs_chunk(chunk, contig_name_to_id, stats, contig_length)
+    if decoded is None:
+        return _BinnedBatch(len(chunk), None, None, stats)
+    pixels = _bin_decoded(decoded, chrom_offset, binsize, bin_keys)
+    return _BinnedBatch(len(chunk), pixels, decoded if keep_decoded else None, stats)
+
+
+def _map_in_order(
+    function: Callable[[_T], _R],
+    batches: Iterable[_T],
+    nproc: int,
+) -> Iterator[_R]:
+    """``map(function, batches)``, on *nproc* worker threads when ``nproc > 1``.
+
+    The thread that pulls *batches* (pyarrow's reader: gunzip and parse, which
+    release the GIL) keeps reading while the workers bin (NumPy, which releases
+    it too).  Results are yielded in batch order, with at most *nproc* batches
+    in flight, so memory stays at *nproc* batches.
+    """
+    if nproc <= 1:
+        for batch in batches:
+            yield function(batch)
+        return
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=nproc) as pool:
+        in_flight: deque = deque()
+        for batch in batches:
+            in_flight.append(pool.submit(function, batch))
+            del batch
+            if len(in_flight) >= nproc:
+                yield in_flight.popleft().result()
+        while in_flight:
+            yield in_flight.popleft().result()
 
 
 def _total_time_str(start_time: float) -> str:
@@ -1811,6 +1918,7 @@ def _stream_binned_pairs(
     ps: PSCounts | None = None,
     contig_genome_id: np.ndarray | None = None,
     contig_length: np.ndarray | None = None,
+    nproc: int = 1,
 ) -> Iterable[pd.DataFrame]:
     """Stream a pairs file and yield binned pixel DataFrames with progress.
 
@@ -1831,6 +1939,8 @@ def _stream_binned_pairs(
         ps: Optional P(s) tally, forwarded likewise.
         contig_genome_id: Genome id of every contig, required when *qc* or *ps*
             is given.
+        nproc: Worker threads binning batches while the pairs file is read
+            (see :func:`_map_in_order`); 1 bins on the reading thread.
 
     Yields:
         Aggregated pixel DataFrames (``bin1_id``, ``bin2_id``, ``count``).
@@ -1852,23 +1962,30 @@ def _stream_binned_pairs(
         pending: list[pd.DataFrame] = []
         pending_pairs = 0
         stats = stats if stats is not None else _PairsDropStats()
-        for chunk in _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs):
-            progress.update(task, advance=len(chunk))
-            result = _bin_pairs_chunk(
+        if qc is not None or ps is not None:
+            assert contig_genome_id is not None, "contig_genome_id required with qc/ps"
+
+        def bin_batch(chunk: pd.DataFrame) -> _BinnedBatch:
+            return _decode_and_bin(
                 chunk,
                 contig_name_to_id,
                 chrom_offset,
                 binsize,
                 bin_keys,
-                stats,
-                qc,
-                ps,
-                contig_genome_id,
                 contig_length,
+                keep_decoded=qc is not None or ps is not None,
             )
-            if result is not None and not result.empty:
-                pending.append(result)
-            pending_pairs += len(chunk)
+
+        batches = _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs)
+        for batch in _map_in_order(bin_batch, batches, nproc):
+            progress.update(task, advance=batch.pairs)
+            # Folded in batch order, so every tally is the serial one.
+            stats.merge(batch.stats)
+            if batch.decoded is not None:
+                _tally_decoded(batch.decoded, qc, ps, contig_genome_id)
+            if batch.pixels is not None and not batch.pixels.empty:
+                pending.append(batch.pixels)
+            pending_pairs += batch.pairs
             # The reader may hand back smaller batches than requested (its block
             # size is capped); coalesce them so a consumer that pays a fixed cost
             # per chunk sees the chunk count the caller asked for.
@@ -2103,6 +2220,7 @@ def from_pairs(
     ps: bool = True,
     ps_bins_per_decade: int = DEFAULT_BINS_PER_DECADE,
     force: bool = False,
+    nproc: int = 1,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
@@ -2168,7 +2286,16 @@ def from_pairs(
         force: Overwrite an existing ``<name>.ps.tsv``.  The ``.metacool``
             itself is guarded by the caller (the CLI checks it before any work
             starts).
+        nproc: Threads binning pairs batches while the file is being read and
+            decompressed (which stays on one thread, being one gzip stream).
+            Results are folded in file order, so the output and every tally
+            are those of ``nproc=1``; memory grows by one batch per thread.
+
+    Raises:
+        ValueError: If *nproc* is below 1.
     """
+    if nproc < 1:
+        raise ValueError(f"nproc must be at least 1, got {nproc}")
     uri = Path(uri)
     if pairs_kwargs is None:
         pairs_kwargs = {}
@@ -2327,6 +2454,7 @@ def from_pairs(
         ps_tally,
         contig_genome_id if (qc or ps) else None,
         contig_length,
+        nproc=nproc,
     )
     pixel_source: Iterable[pd.DataFrame]
     if sort_in_memory is None:
