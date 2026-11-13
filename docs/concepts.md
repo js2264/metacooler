@@ -54,6 +54,24 @@ input tables.
     window. **In this documentation, "bin" always means the cooler sense** (a
     window on a contig) and "genome" or "MAG" means the reconstructed organism.
 
+### On disk
+
+Each table is an HDF5 group, next to the indexes that make genome and contig
+lookups fast and the link that keeps the file a cooler:
+
+```
+.metacool file (HDF5)
+├── /genomes     ← genome/MAG table  [name, length, n_contigs, n_bins, …metadata]
+├── /contigs     ← contig table      [name, length, genome_id, …metadata]
+├── /bins        ← genomic bins      [chrom (=contig_id), start, end]
+├── /pixels      ← contacts          [bin1_id, bin2_id, count]
+├── /indexes     ← fast lookup       [chrom_offset, bin1_offset, genome_offset]
+└── /chroms      → soft link to /contigs   (cooler compatibility)
+```
+
+The full byte-level specification lives in the
+[format reference](format.md).
+
 ## Levels: bin, contig, genome
 
 Because the hierarchy has three tiers, most analysis commands accept a

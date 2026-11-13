@@ -135,6 +135,12 @@ search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
 
 [[tool.bumpversion.files]]
+# The version the docs header shows.
+filename = "zensical.toml"
+search = 'release = "{current_version}"'
+replace = 'release = "{new_version}"'
+
+[[tool.bumpversion.files]]
 # Promotes the accumulated "Unreleased" entries to a dated version section and
 # opens a fresh, empty "Unreleased" above them for the next round of changes.
 filename = "docs/changelog.md"
