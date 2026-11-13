@@ -1,0 +1,60 @@
+{#-
+  metacooler: a chromosomix-style header (doc.chromosomix.app). The mark, the
+  site name, a "docs" kicker and the release on the left; the search button in
+  the middle; GitHub and the theme toggle on the right. It keeps the
+  data-md-component hooks zensical's script mounts (header, logo, search,
+  palette); the scrolling page-title swap is dropped on purpose, so the name
+  stays put as it does on chromosomix.
+-#}
+<header class="md-header mc-header" data-md-component="header">
+  <nav class="md-header__inner mc-header__inner" aria-label="{{ lang.t('header') }}">
+    <label class="md-header__button md-icon mc-header__menu" for="__drawer">
+      {% set icon = config.theme.icon.menu or "material/menu" %}
+      {% include ".icons/" ~ icon ~ ".svg" %}
+      <span class="md-visually-hidden">{{ lang.t('nav') }}</span>
+    </label>
+    <div class="mc-header__brand">
+      <a href="{{ config.extra.homepage | d(nav.homepage.url, true) | url }}" title="{{ config.site_name | e }}" class="mc-header__title" aria-label="{{ config.site_name }}" data-md-component="logo">
+        <img src="{{ config.theme.logo | url }}" alt="" width="26" height="26">
+        <span translate="no">{{ config.site_name }}</span>
+      </a>
+      <span class="mc-header__kicker" aria-hidden="true">docs</span>
+      {% if config.extra.release %}
+        <span class="mc-header__version" title="Latest release">v{{ config.extra.release }}</span>
+      {% endif %}
+    </div>
+    <div class="mc-header__search">
+      {% if "search" in config.plugins %}
+        {% set search = config.plugins["search"] | attr("config") %}
+        {% if search.enabled %}
+          {% include "partials/search.html" %}
+        {% endif %}
+      {% endif %}
+    </div>
+    <div class="mc-header__actions">
+      {% if "search" in config.plugins %}
+        {% set search = config.plugins["search"] | attr("config") %}
+        {% if search.enabled %}
+          <label class="md-header__button md-icon mc-header__search-toggle" for="__search">
+            {% set icon = config.theme.icon.search or "material/magnify" %}
+            {% include ".icons/" ~ icon ~ ".svg" %}
+            <span class="md-visually-hidden">{{ lang.t('search') }}</span>
+          </label>
+        {% endif %}
+      {% endif %}
+      {% if config.repo_url %}
+        <a class="mc-header__icon-button" href="{{ config.repo_url }}" title="{{ config.site_name }} on GitHub" aria-label="{{ config.site_name }} on GitHub">
+          {% include ".icons/fontawesome/brands/github.svg" %}
+        </a>
+      {% endif %}
+      {% if config.theme.palette %}
+        {% if not config.theme.palette is mapping %}
+          {% include "partials/palette.html" %}
+        {% endif %}
+      {% endif %}
+      {% if not config.theme.palette is mapping %}
+        {% include "partials/javascripts/palette.html" %}
+      {% endif %}
+    </div>
+  </nav>
+</header>

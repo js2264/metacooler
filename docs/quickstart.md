@@ -77,6 +77,24 @@ metacooler info gut_T0.metacool --table
 metacooler tree gut_T0.metacool
 ```
 
+Two more commands judge the library itself: `qc` reports where its contacts
+land, and `ps` plots contact probability against genomic distance. (`create
+pairs` already recorded both at read resolution while it binned the pairs: the
+QC block in the file's metadata, the P(s) table beside it as `gut_T0.ps.tsv`.)
+
+```bash
+# Contact quality: the 3D ratio and its breakdown
+metacooler qc gut_T0.metacool --table
+
+# P(s), one curve per MAG — create pairs already wrote gut_T0.ps.tsv at
+# base-pair resolution; this re-reads it from the binned map, or from the
+# original pairs with --pairs
+metacooler ps gut_T0.metacool --by genome --plot ps.png
+```
+
+See [`qc`](cli.md#qc) for what each contact category means, and
+[`ps`](cli.md#ps) for the curve options.
+
 ## Step 3 — Browse tables
 
 ```bash
