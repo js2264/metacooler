@@ -371,9 +371,10 @@
 
 - **The documentation site is restyled after doc.chromosomix.app.** The
   zensical theme keeps its layout but takes a new header, an in-column page
-  footer with previous/next cards, a light/dark palette, framed code blocks and
-  Starlight-style asides and tables (`overrides/`,
-  `docs/stylesheets/metacooler.css`). The home page is now the introduction and
+  footer with previous/next cards (also reached with the ← / → keys), a
+  light/dark palette, framed code blocks and Starlight-style asides and tables
+  (`overrides/`, `docs/stylesheets/metacooler.css`,
+  `docs/javascripts/metacooler.js`). The home page is now the introduction and
   four entry tiles; its motivation, quick look, compatibility table and
   documentation map moved to a new [Why metacooler?](why.md) page, the on-disk
   layout to [Concepts](concepts.md#on-disk), and the `qc`/`ps` commands to the

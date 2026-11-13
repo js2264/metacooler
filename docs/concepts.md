@@ -151,14 +151,3 @@ in the `contig-ordering` attribute. It determines the layout of `bins` and
 Grouping by genome keeps each MAG's contigs contiguous, so a genome appears as a
 solid block on the diagonal of a contact map. Because the ordering is baked in,
 [`merge`](cli.md#merge) requires all inputs to share the same one.
-
-## Where to go next
-
-<div class="grid cards" markdown>
-
-- :material-rocket-launch: **[Quickstart](quickstart.md)** — raw data to a heatmap in five commands
-- :material-book-open-variant: **[Guides](guides/from-pairs.md)** — task-by-task walkthroughs
-- :material-console: **[CLI reference](cli.md)** — every command and option
-- :material-file-tree: **[Format specification](format.md)** — the on-disk layout
-
-</div>

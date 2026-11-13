@@ -12,7 +12,7 @@ hide:
 
 <p class="mc-tagline">Hi-C contact maps for metagenomes.</p>
 
-metacooler extends the [cooler](https://github.com/open2c/cooler) HDF5 format to
+[metacooler](https://github.com/js2264/metacooler) extends the [cooler](https://github.com/open2c/cooler) HDF5 format to
 handle multi-genome (metagenomic) Hi-C data. It adds a `genomes/` hierarchy on
 top of cooler's `chroms/bins/pixels` model while preserving **full backward
 compatibility**: any `.metacool` file opens with `cooler.Cooler()` out of the

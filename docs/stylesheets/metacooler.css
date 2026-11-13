@@ -1221,6 +1221,10 @@ html .md-typeset :is(.admonition, details) > :last-child {
   gap: 12px;
 }
 
+.mc-pagination[hidden] {
+  display: none;
+}
+
 .md-typeset .mc-pagination__link {
   display: flex;
   align-items: center;

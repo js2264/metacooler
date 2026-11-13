@@ -5,6 +5,7 @@ site_description = "Hi-C contact maps for metagenomes — an extension of the co
 site_author = "Jacques Serizay"
 copyright = "&copy; 2026 Jacques Serizay"
 extra_css = ["stylesheets/metacooler.css"]
+extra_javascript = ["javascripts/metacooler.js"]
 docs_dir = "docs"
 site_dir = "site"
 repo_url = "https://github.com/js2264/metacooler"
