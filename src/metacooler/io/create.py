@@ -412,15 +412,19 @@ def _pairs_paths(
         paths = [Path(p) for p in pairs]
     if not paths:
         raise ValueError("pairs file path required: got an empty list")
+    # Keyed on the resolved path, so an alias (``./x``, ``sub/../x``, a symlink)
+    # of a file already listed is caught too.
     seen: dict[Path, Path] = {}
     for path in paths:
-        first = seen.setdefault(path.resolve(), path)
-        if first is not path:
+        key = path.resolve()
+        first = seen.get(key)
+        if first is not None:
             also = "" if first == path else f" (also as {str(first)!r})"
             raise ValueError(
                 f"Pairs file {str(path)!r} is given twice{also}; every one of "
                 "its contacts would be counted twice."
             )
+        seen[key] = path
     return paths
 
 

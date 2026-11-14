@@ -352,6 +352,17 @@ class TestPairsPaths:
         with pytest.raises(ValueError, match="given twice \\(also as"):
             _pairs_paths([p, tmp_path / "y.pairs", alias])
 
+    def test_same_path_object_and_symlink_are_refused(self, tmp_path):
+        p = tmp_path / "x.pairs"
+        p.write_text(COLUMNS)
+        # One object listed twice: detected by resolved path, not by identity.
+        with pytest.raises(ValueError, match="is given twice; every one"):
+            _pairs_paths([p, p])
+        link = tmp_path / "link.pairs"
+        link.symlink_to(p)
+        with pytest.raises(ValueError, match="'.*link.pairs' is given twice"):
+            _pairs_paths([p, link])
+
     def test_from_pairs_refuses_the_same_file_twice(
         self, tmp_path, libraries, tiny_contigs_table
     ):
