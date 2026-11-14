@@ -127,6 +127,13 @@ metacooler stack --output assembly_1kb.mmetacool assembly_1_rep1_1kb.metacool as
 metacooler merge --output assembly_2_1kb.metacool assembly_2_rep1_1kb.metacool assembly_2_rep2_1kb.metacool
 metacooler merge --output assembly_2_DpnII.metacool assembly_2_rep1_DpnII.metacool assembly_2_rep2_DpnII.metacool
 
+## Both replicates' pairs files in one create pairs pass: the contacts merge sums,
+## plus the QC block and P(s) table merge cannot carry.
+metacooler create pairs -q --contigs ../contigs_table_2.tsv --genomes ../mag_table_2.tsv --pairs ../contacts_2_rep1.pairs.gz --pairs ../contacts_2_rep2.pairs.gz --bins 1000 --output assembly_2_1kb_one-pass.metacool
+metacooler dump -t pixels assembly_2_1kb.metacool > dump_pixels_merged_reps
+metacooler dump -t pixels assembly_2_1kb_one-pass.metacool > dump_pixels_one_pass_reps
+assert_identical "create pairs --pairs rep1 --pairs rep2 == merge rep1 rep2" dump_pixels_merged_reps dump_pixels_one_pass_reps
+
 # ================================================================================
 ## reassign
 # ================================================================================

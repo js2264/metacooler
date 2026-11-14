@@ -17,8 +17,11 @@ import h5py
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat
+from click.testing import CliRunner
 
 import metacooler.io.create as create_mod
+from metacooler.cli.main import cli
 from metacooler.io.create import (
     _merge_pairs_headers,
     _pairs_paths,
@@ -395,3 +398,71 @@ def test_nproc_is_invisible_across_files(
     assert tables[1] == tables[2]
     assert ps[1] == ps[2]
     assert reported[1] == reported[2] != []
+
+
+# ----------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------
+class TestCLI:
+    def _args(self, out: Path, files: list[Path], contigs: Path) -> list[str]:
+        args = ["create", "pairs", "-o", str(out), "--bins", "100"]
+        for f in files:
+            args += ["--pairs", str(f)]
+        return [*args, "--contigs", str(contigs), "--qc-threshold", "100"]
+
+    def test_repeated_pairs(self, tmp_path, libraries, tiny_contigs_table):
+        files, cat = libraries
+        out = tmp_path / "cli.metacool"
+        result = CliRunner().invoke(cli, self._args(out, files, tiny_contigs_table))
+        assert result.exit_code == 0, result.output
+        one = _create(tmp_path / "one.metacool", cat, tiny_contigs_table)
+        assert _tables(out) == _tables(one)
+        assert _ps_bytes(out) == _ps_bytes(one)
+        with h5py.File(out, "r") as f:
+            (command,) = json.loads(f.attrs["metadata"])["commands"]
+        assert f"--pairs {files[0]} --pairs {files[1]}" in command
+
+    def test_repeated_pairs_with_nproc(self, tmp_path, libraries, tiny_contigs_table):
+        files, _ = libraries
+        outs = []
+        for nproc in ("1", "2"):
+            out = tmp_path / f"n{nproc}.metacool"
+            args = [*self._args(out, files, tiny_contigs_table), "--nproc", nproc]
+            result = CliRunner().invoke(cli, args)
+            assert result.exit_code == 0, result.output
+            outs.append(out)
+        assert _tables(outs[0]) == _tables(outs[1])
+        assert _ps_bytes(outs[0]) == _ps_bytes(outs[1])
+
+    def test_same_file_twice_is_a_clean_error(
+        self, tmp_path, libraries, tiny_contigs_table
+    ):
+        files, _ = libraries
+        out = tmp_path / "x.metacool"
+        args = self._args(out, [files[0], files[0]], tiny_contigs_table)
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code != 0
+        assert "is given twice; every one" in flat(result.output)
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    def test_output_cannot_be_one_of_the_pairs_files(
+        self, tmp_path, libraries, tiny_contigs_table
+    ):
+        files, _ = libraries
+        before = files[1].read_bytes()
+        args = [*self._args(files[1], files, tiny_contigs_table), "--force"]
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code != 0
+        assert "same file as the input" in flat(result.output)
+        assert files[1].read_bytes() == before
+
+    def test_conflicting_headers_are_a_clean_error(self, tmp_path, tiny_contigs_table):
+        a = _write(tmp_path / "a.pairs", _header(LENGTHS) + _body(1, 20, "a"))
+        b = _write(
+            tmp_path / "b.pairs",
+            _header({**LENGTHS, "contig_A": 999}) + _body(2, 20, "b"),
+        )
+        out = tmp_path / "x.metacool"
+        result = CliRunner().invoke(cli, self._args(out, [a, b], tiny_contigs_table))
+        assert result.exit_code != 0
+        assert "aligned to the same assembly" in flat(result.output)

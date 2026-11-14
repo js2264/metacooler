@@ -1,4 +1,4 @@
-"""metacooler create pairs command — create a metacool file from a pairs file."""
+"""metacooler create pairs command — create a metacool file from pairs files."""
 
 from __future__ import annotations
 
@@ -21,7 +21,14 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     "--pairs",
     type=click.Path(exists=True, path_type=Path),
     required=True,
-    help="Pairs file (plain text or gzipped).",
+    multiple=True,
+    help=(
+        "Pairs file (plain text or gzipped). Repeat the option to read several "
+        "files — one per Hi-C library of the same assembly — in one pass, as if "
+        "concatenated: their contacts are summed, and the QC block, the P(s) "
+        "table and the dropped-pairs report cover them all. Not comma-split: a "
+        "path may contain a comma."
+    ),
 )
 @click.option(
     "--bins",
@@ -113,7 +120,7 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
 def cmd_create_pairs(
     output: Path,
     bins: str,
-    pairs: Path,
+    pairs: tuple[Path, ...],
     contigs: Path,
     contigs_format: str,
     genomes_table: Path | None,
@@ -135,7 +142,7 @@ def cmd_create_pairs(
     nproc: int,
 ) -> None:
     """
-    Create a metacool file from a pairs file, bins, and contig assignments.
+    Create a metacool file from pairs file(s), bins, and contig assignments.
     """
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.filters import parse_distance
@@ -146,7 +153,7 @@ def cmd_create_pairs(
     check_output(
         output,
         force,
-        inputs=[pairs, bins, contigs, genomes_table, fasta, metadata],
+        inputs=[*pairs, bins, contigs, genomes_table, fasta, metadata],
         defer_removal=True,
     )
     try:
@@ -177,7 +184,7 @@ def cmd_create_pairs(
     from_pairs(
         uri=output,
         bins=bins_path,
-        pairs=pairs,
+        pairs=list(pairs),
         contig_genome_map=contigs,
         contig_table_format=contigs_format,
         fasta=fasta,
