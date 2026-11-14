@@ -114,6 +114,22 @@
 
 ### Added
 
+- **`create pairs` reads several pairs files in one pass** — one per Hi-C
+  library of the same assembly: repeat `--pairs` (not comma-split, since a path
+  may contain a comma), or pass a list as `from_pairs(pairs=[...])`; a single
+  path works as before. The files are streamed back to back in the given order,
+  so the map, the QC block and `/genomes` `qc_*` columns, the `.ps.tsv` P(s)
+  table and the dropped-pairs report (`n_pairs_read`, `n_pairs_discarded`) are
+  exactly those of the files' concatenation — which per-library maps joined by
+  `merge` cannot give, since `merge` drops the QC block. Chunk folding, the sort
+  strategy, `--nproc` (output identical to `--nproc 1`) and memory behaviour are
+  unchanged; a chunk may span two files. The files' `#chromsize:` headers are
+  united in file order; a file without one still works with `--fasta` or
+  another file's header, and one contig given two different lengths is an error
+  naming both files. The same file given twice, and a missing file, are refused
+  before any pairs file is read. The `commands` provenance lists every
+  `--pairs`.
+
 - **`--nproc` on `create pairs` and `zoomify`** (default 1, which keeps the
   serial behaviour). `create pairs --nproc N` bins pairs batches on N threads
   while the file is read and decompressed; per-batch drop tallies, QC and P(s)

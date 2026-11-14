@@ -154,25 +154,25 @@ metacooler create pairs --pairs contacts.pairs.gz --bins 2000 --fasta assembly.f
 
 ### `create pairs` { #create-pairs }
 
-Create a `.metacool` file from a 4DN pairs file, a set of bins, and a
-contig-to-genome assignment table. **API:** `metacooler.from_pairs`
+Create a `.metacool` file from one or more 4DN pairs files, a set of bins, and
+a contig-to-genome assignment table. **API:** `metacooler.from_pairs`
 (`metacooler.io.create.from_pairs`).
 
 ```console
-metacooler create pairs --pairs P --bins B --contigs C -o OUT.metacool [OPTIONS]
+metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.metacool [OPTIONS]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
-| `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header or `--fasta`. |
+| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
+| `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
 | `--contigs-format` | `contigs` | `contigs`, `contig_genome`, `metator`, or a column-index spec `I,J[,noheader]`. See [Creating from pairs](guides/from-pairs.md#contig-to-genome-table). |
 | `--genomes` | — | Optional genome metadata TSV (first column `genome_name`); extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
 | `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a `commands` or `qc` key — those names are reserved for the provenance record and the contact-quality block metacooler writes itself. |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `fasta`, or `alpha`. See [Contig ordering](concepts.md#contig-ordering). |
-| `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs header has no `#chromsize:` lines. |
+| `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs headers have no `#chromsize:` lines. |
 | `--assembly-name` | — | Name for this assembly / metagenome. Stored in the standard cooler `genome-assembly` attribute (reported as `assembly` by `info`). |
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* anything is binned — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. See [Filtering with `--filter`](#filter). `genomes.n_bins` is not available here. |
@@ -211,6 +211,47 @@ metacooler create pairs \
     --contigs contigs2mag.tsv --contigs-format contig_genome \
     -o gut_T0_2kb.metacool
 ```
+
+#### Several libraries { #create-pairs-libraries }
+
+Repeat `--pairs` to build one map from several libraries of the same assembly
+(replicates, sequencing runs, restriction enzymes). The files are streamed back
+to back, in the given order, as if they were one concatenated file, so
+everything a single pass measures covers all of them, **exactly**: the summed
+contacts, the QC block and the `/genomes` `qc_*` columns, the `<output>.ps.tsv`
+P(s) table, and the dropped-pairs report with `n_pairs_read` /
+`n_pairs_discarded`. One map per library joined with [`merge`](#merge) holds the
+same contacts but not the rest: `merge` drops the QC block, and no P(s) table
+comes out of it.
+
+```bash
+# Three libraries of one assembly, in one pass: one map, one QC block, one P(s)
+metacooler create pairs \
+    --pairs gut_T0_DpnII.pairs.gz \
+    --pairs gut_T0_HinfI.pairs.gz \
+    --pairs gut_T0_rep2.pairs.gz \
+    --bins  2000 \
+    --contigs contig_data_final.txt --contigs-format metator \
+    -o gut_T0.metacool
+```
+
+- **Headers.** The files' `#chromsize:` lines are united, in file order (the
+  first file's contigs, then each contig new to a later file). A file without a
+  header, or with only some of the contigs, is fine; one contig given two
+  different lengths is an error naming both files, since the libraries were
+  then aligned to different assemblies. The headers are read only where they
+  are needed: for the contig lengths (integer `--bins` without `--fasta`) or
+  for the order (`--contig-order fasta` without `--fasta`).
+- **Refused up front:** the same file given twice (its contacts would count
+  twice), and a missing file — before any file is read, rather than after the
+  others have been binned.
+- **Streaming.** `--chunksize`, `--sort-strategy` and `--nproc` behave as for
+  one file; a chunk may span two files, and the output is the same for every
+  `--nproc`.
+- **Provenance.** The `commands` record lists every `--pairs`, in order.
+- **Recomputing P(s).** `ps --pairs` reads one file: to recompute the table of
+  a map made from several, give it their concatenation (one header, then every
+  file's pairs).
 
 ### `create cool` { #create-cool }
 
@@ -530,6 +571,12 @@ metacooler merge A.metacool B.metacool [...] -o merged.metacool [OPTIONS]
 ```bash
 metacooler merge rep1.metacool rep2.metacool -o merged.metacool
 ```
+
+!!! tip "Libraries you still have as pairs files"
+    `merge` drops the inputs' QC blocks and has no P(s) table to sum. When the
+    libraries' pairs files are at hand, pass them all to
+    [`create pairs`](#create-pairs-libraries) instead — one `--pairs` each — for
+    the same contacts with an exact QC block and P(s) table.
 
 ### `binnify` { #binnify }
 
