@@ -962,8 +962,10 @@ contact has already been collapsed onto the diagonal. Since the short-range
 head of P(s) is exactly where a metaHi-C library shows undigested fragments and
 self-religation, `create pairs` measures the curve while it still has the read
 positions, and writes it as `<output>.ps.tsv` — the same table `--pairs`
-recomputes, byte for byte. Reach for `--pairs` when you need that resolution on
-a file created earlier, or with a different distance grid or selection.
+recomputes, byte for byte (for a map read from several pairs files, from their
+concatenation: see [Several libraries](#create-pairs-libraries)). Reach for
+`--pairs` when you need that resolution on a file created earlier, or with a
+different distance grid or selection.
 
 ```bash
 # The fine-grained curve create pairs already wrote, per MAG
