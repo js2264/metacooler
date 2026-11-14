@@ -15,7 +15,9 @@ metacooler create pairs \
 
 `--bins 1000` generates 1 kb fixed-size bins automatically. Contig lengths
 are read from the `#chromsize:` header lines in the pairs file. If they are
-absent, provide `--fasta assembly.fa` instead.
+absent, provide `--fasta assembly.fa` instead. Several libraries of the same
+assembly go in one map by repeating `--pairs` — see
+[Several pairs files](#several-pairs-files).
 
 ## Input file formats
 
@@ -34,6 +36,32 @@ Plain text or gzipped. Required columns: `chrom1`, `pos1`, `chrom2`, `pos2`
 #columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2
 read_0  contig_0_0  5211  contig_0_0  238  +  +
 ```
+
+### Several pairs files
+
+A metagenome is often sequenced as several Hi-C libraries — replicates, runs,
+or one library per restriction enzyme — each aligned to the same assembly.
+Repeat `--pairs`, once per file:
+
+```bash
+metacooler create pairs \
+    --pairs   lib_DpnII.pairs.gz \
+    --pairs   lib_HinfI.pairs.gz \
+    --bins    1000 \
+    --contigs contigs2mag.tsv \
+    --output  sample.metacool
+```
+
+The files are read back to back in one pass, as if concatenated, so the map,
+the contact-quality block, the P(s) table and the dropped-pairs report all
+cover every library exactly. That is what sets this apart from creating one map
+per library and [merging](../cli.md#merge) them, which sums the same contacts
+but drops the QC block and yields no P(s) table.
+
+Their `#chromsize:` headers are united; a file may lack one, but a contig given
+two different lengths by two files is an error, as is the same file given
+twice. See [Several libraries](../cli.md#create-pairs-libraries) in the CLI
+reference for the details.
 
 ### Bins
 
@@ -267,7 +295,7 @@ import metacooler
 
 metacooler.from_pairs(
     uri="sample.metacool",
-    pairs="contacts.pairs.gz",
+    pairs="contacts.pairs.gz",      # or a list: one pairs file per library
     bins="fragments.bed",           # or an integer: binsize=1000
     contig_genome_map="contigs.tsv",
     contig_table_format="contigs",

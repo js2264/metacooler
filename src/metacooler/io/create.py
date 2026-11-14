@@ -116,7 +116,7 @@ logger = logging.getLogger("metacooler")
 def _read_contig_lengths(
     bins: pd.DataFrame | None = None,
     fasta: str | Path | None = None,
-    pairs: str | Path | None = None,
+    pairs: str | Path | Sequence[str | Path] | None = None,
 ) -> dict[str, int]:
     """Extract contig name → length mapping from one of three sources.
 
@@ -131,14 +131,16 @@ def _read_contig_lengths(
             ``end``.  Lengths are inferred as ``max(end)`` per contig.
         fasta: Path to a FASTA (or gzip-compressed ``.fa.gz``) file.  The
             file is indexed with pyfaidx to retrieve exact sequence lengths.
-        pairs: Path to a ``.pairs`` (or ``.pairs.gz``) file whose header
-            contains ``#chromsize: <name> <length>`` lines.
+        pairs: One or several ``.pairs`` (or ``.pairs.gz``) files whose
+            headers contain ``#chromsize: <name> <length>`` lines; several
+            headers are united by :func:`_merge_pairs_headers`.
 
     Returns:
         Mapping of contig name to sequence length in base pairs.
 
     Raises:
-        ValueError: If none of the three sources can provide contig lengths.
+        ValueError: If none of the three sources can provide contig lengths,
+            or two pairs files give one contig different lengths.
     """
     if fasta is not None:
         logging.info("Extracting contig lengths from FASTA index")
@@ -173,8 +175,8 @@ def _read_contig_lengths(
         # Infer from max end per chrom
         return bins.groupby("chrom")["end"].max().to_dict()
     if pairs is not None:
-        # Try to parse chromsizes from pairs header
-        lengths = _parse_pairs_header(pairs)
+        # Try to parse chromsizes from the pairs header(s)
+        lengths = _merge_pairs_headers(_pairs_paths(pairs))
         if lengths:
             return lengths
     raise ValueError(
@@ -186,7 +188,7 @@ def _read_contig_lengths(
 def _apply_reference_order(
     contig_lengths: dict[str, int],
     fasta: str | Path | None = None,
-    pairs: str | Path | None = None,
+    pairs: str | Path | Sequence[str | Path] | None = None,
 ) -> dict[str, int]:
     """Reorder *contig_lengths* to follow the FASTA / pairs-header contig order.
 
@@ -200,27 +202,29 @@ def _apply_reference_order(
     Args:
         contig_lengths: Mapping of contig name to length, in arbitrary order.
         fasta: Assembly FASTA whose record order defines the reference order.
-        pairs: Pairs file whose ``#chromsize:`` header defines the reference
-            order when no *fasta* is available.
+        pairs: Pairs file(s) whose ``#chromsize:`` headers define the
+            reference order when no *fasta* is available: several are united
+            by :func:`_merge_pairs_headers`, in file order.
 
     Returns:
         The same mapping, reordered to follow the reference order.  Contigs
         absent from the reference are appended (with a warning).
 
     Raises:
-        ValueError: If neither a FASTA nor a pairs header can supply an order.
+        ValueError: If neither a FASTA nor a pairs header can supply an order,
+            or two pairs files give one contig different lengths.
     """
     reference: list[str] | None = None
     if fasta is not None:
         reference = list(_read_contig_lengths(fasta=fasta))
     elif pairs is not None:
-        header = _parse_pairs_header(pairs)
+        header = _merge_pairs_headers(_pairs_paths(pairs))
         if header:
             reference = list(header)
     if reference is None:
         raise ValueError(
             "contig_ordering='fasta' needs a reference contig order, but no FASTA "
-            "was given and the pairs file has no '#chromsize:' header lines. "
+            "was given and no pairs file has '#chromsize:' header lines. "
             "Contig lengths came from the bins table, whose order is alphabetical "
             "— writing it as 'fasta' would mislabel the file. Provide a FASTA, add "
             "'#chromsize:' lines to the pairs header, or choose another ordering "
@@ -380,6 +384,98 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
                         f"(length {length!r} is not an integer)"
                     ) from exc
     return lengths if lengths else None
+
+
+def _pairs_paths(
+    pairs: str | os.PathLike[str] | Iterable[str | os.PathLike[str]] | None,
+) -> list[Path]:
+    """Normalise *pairs* -- one path, or several -- to a non-empty list of paths.
+
+    Several files are read back to back as one stream (see :func:`from_pairs`),
+    so the same file given twice would count every one of its contacts twice;
+    that is refused rather than summed.
+
+    Args:
+        pairs: A pairs file path, or an iterable of them, in reading order.
+
+    Returns:
+        The paths, in the given order.
+
+    Raises:
+        ValueError: If no path is given, or the same file is given twice.
+    """
+    if pairs is None:
+        raise ValueError("pairs file path required")
+    if isinstance(pairs, str | os.PathLike):
+        paths = [Path(pairs)]
+    else:
+        paths = [Path(p) for p in pairs]
+    if not paths:
+        raise ValueError("pairs file path required: got an empty list")
+    # Keyed on the resolved path, so an alias (``./x``, ``sub/../x``, a symlink)
+    # of a file already listed is caught too.
+    seen: dict[Path, Path] = {}
+    for path in paths:
+        key = path.resolve()
+        first = seen.get(key)
+        if first is not None:
+            also = "" if first == path else f" (also as {str(first)!r})"
+            raise ValueError(
+                f"Pairs file {str(path)!r} is given twice{also}; every one of "
+                "its contacts would be counted twice."
+            )
+        seen[key] = path
+    return paths
+
+
+def _merge_pairs_headers(paths: Sequence[Path]) -> dict[str, int] | None:
+    """Unite the ``#chromsize:`` headers of several pairs files.
+
+    Each file is one library aligned to the same assembly, so their headers
+    normally agree line for line.  A file without a header, or with a subset of
+    the contigs, adds nothing and is fine.  One contig given two different
+    lengths, though, means the files were aligned to different assemblies: a
+    pair would land in a different bin, or past the end of its contig,
+    depending on which file it came from.  That is refused, naming both files.
+
+    Args:
+        paths: Pairs files, in reading order.
+
+    Returns:
+        Contig name → length in first-seen order (the first file's header
+        order, then each contig new to a later file in that file's order), or
+        ``None`` if no file has a ``#chromsize:`` line.
+
+    Raises:
+        ValueError: If two files give one contig different lengths.
+    """
+    merged: dict[str, int] = {}
+    for i, path in enumerate(paths):
+        header = _parse_pairs_header(path)
+        if not header:
+            continue
+        if not merged:
+            merged = header
+            continue
+        if header == merged:
+            # The usual case -- every library carries the assembly's header --
+            # decided by one C-level comparison instead of a loop per contig.
+            continue
+        conflicts = [c for c, n in header.items() if merged.get(c, n) != n]
+        if conflicts:
+            name = conflicts[0]
+            source = next(
+                p for p in paths[:i] if name in (_parse_pairs_header(p) or {})
+            )
+            raise ValueError(
+                f"{len(conflicts)} contig(s) have different '#chromsize:' lengths "
+                f"in different pairs files, e.g. {name!r}: {merged[name]} in "
+                f"{str(source)!r} but {header[name]} in {str(path)!r}. Every "
+                "pairs file must be aligned to the same assembly."
+            )
+        for name, length in header.items():
+            merged.setdefault(name, length)
+    return merged or None
 
 
 def _genome_id_order(genome_names: Iterable[str]) -> list[str]:
@@ -1167,7 +1263,7 @@ def _stream_pairs(
         # sample with no surviving contacts. Detect it structurally here rather
         # than by pattern-matching pyarrow's error message, which would also
         # swallow a genuine parse failure and write a silently empty map.
-        logger.warning("Pairs file %s has no data rows; writing empty map.", path)
+        logger.warning("Pairs file %s has no data rows.", path)
         return
 
     # Column indices are 1-based; convert to 0-based.
@@ -1943,8 +2039,34 @@ def _ensure_nonempty_pixel_stream(
     return itertools.chain([first], it), False
 
 
+def _stream_pairs_files(
+    paths: Sequence[Path],
+    chunksize: int,
+    pairs_kwargs: dict,
+) -> Iterator[pd.DataFrame]:
+    """Stream several pairs files back to back, as one sequence of raw batches.
+
+    No batch spans two files, but nothing downstream cares where one file ends:
+    :func:`_stream_binned_pairs` coalesces batches across the boundary, and the
+    QC, P(s) and drop tallies are sums.  So several libraries of one assembly
+    give exactly the map, tallies and P(s) table of their concatenation.
+
+    Args:
+        paths: Pairs files, in reading order.
+        chunksize: Rows per batch, forwarded to :func:`_stream_pairs`.
+        pairs_kwargs: Column indices, forwarded to :func:`_stream_pairs`.
+
+    Yields:
+        Raw pairs DataFrames (``chrom1``, ``pos1``, ``chrom2``, ``pos2``).
+    """
+    for i, path in enumerate(paths, start=1):
+        if len(paths) > 1:
+            logger.info("Reading pairs file %d of %d: %s", i, len(paths), path)
+        yield from _stream_pairs(path, chunksize=chunksize, **pairs_kwargs)
+
+
 def _stream_binned_pairs(
-    pairs: str | Path,
+    pairs: str | Path | Sequence[str | Path],
     contig_name_to_id: dict[str, int],
     chrom_offset: np.ndarray,
     binsize: int | None,
@@ -1958,10 +2080,12 @@ def _stream_binned_pairs(
     contig_length: np.ndarray | None = None,
     nproc: int = 1,
 ) -> Iterable[pd.DataFrame]:
-    """Stream a pairs file and yield binned pixel DataFrames with progress.
+    """Stream pairs files and yield binned pixel DataFrames with progress.
 
     Args:
-        pairs: Path to the pairs file (plain text, gzipped, or bgzipped).
+        pairs: Path to a pairs file (plain text, gzipped, or bgzipped), or a
+            sequence of them, read back to back in the given order (see
+            :func:`_stream_pairs_files`).
         contig_name_to_id: Mapping from contig name to integer ID.
         chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
         binsize: Fixed bin size, or ``None`` for fragment-level bins.
@@ -2014,7 +2138,7 @@ def _stream_binned_pairs(
                 keep_decoded=qc is not None or ps is not None,
             )
 
-        batches = _stream_pairs(pairs, chunksize=chunksize, **pairs_kwargs)
+        batches = _stream_pairs_files(_pairs_paths(pairs), chunksize, pairs_kwargs)
         for batch in _map_in_order(bin_batch, batches, nproc):
             progress.update(task, advance=batch.pairs)
             # Folded in batch order, so every tally is the serial one.
@@ -2237,7 +2361,7 @@ def _remap_bins(
 def from_pairs(
     uri: str | Path,
     bins: str | Path | pd.DataFrame | None = None,
-    pairs: str | Path | None = None,
+    pairs: str | Path | Sequence[str | Path] | None = None,
     contig_genome_map: dict[str, str] | str | Path | None = None,
     contig_table_format: str = "contigs",
     fasta: str | Path | None = None,
@@ -2267,7 +2391,15 @@ def from_pairs(
         bins: Path to a BED file of bins (without header), or a pre-built DataFrame
             with columns ``chrom, start, end``.  If ``None``, *binsize* must be given
             and bins will be tiled from the fasta.
-        pairs: Path to a pairs file (plain text, gzipped, or bgzipped).
+        pairs: Path to a pairs file (plain text, gzipped, or bgzipped), or a
+            sequence of them -- typically one per Hi-C library of the same
+            assembly.  Several files are read back to back in the given order,
+            in one pass, as if they were one concatenated file: their contacts
+            are summed, and the QC block, the P(s) table and the drop report
+            cover them all, exactly -- where per-library maps joined by
+            ``merge`` lose the QC block and have no P(s) table.  Their
+            ``#chromsize:`` headers are united, and one contig given two
+            different lengths is refused, as is the same file given twice.
         contig_genome_map: Either a ``dict[contig_name → genome_name]`` or a path
             to a contig table file (see *contig_table_format*).  Format-specific
             colspec strings are also accepted (see ``io/contigs.py`` for details).
@@ -2289,7 +2421,7 @@ def from_pairs(
             row**. The first column must be named ``genome_name``; any additional
             columns are stored in the ``/genomes`` table.
         pairs_kwargs: Extra kwargs passed to the pairs reader (column
-            indices, etc.).
+            indices, etc.), the same for every pairs file.
         metadata: Additional metadata dict stored in file attrs.
         chunksize: Number of *pairs* to process per chunk.  This is chunk
             granularity, not read memory: pyarrow's read block is capped
@@ -2330,15 +2462,27 @@ def from_pairs(
             are those of ``nproc=1``; memory grows by one batch per thread.
 
     Raises:
-        ValueError: If *nproc* is below 1.
+        ValueError: If *nproc* is below 1, no pairs file is given, or the
+            pairs files are not compatible (see *pairs*).
+        FileNotFoundError: If a pairs file does not exist -- checked before
+            any is read, so a typo in the last of several libraries does not
+            cost a binning pass over the others.
     """
     if nproc < 1:
         raise ValueError(f"nproc must be at least 1, got {nproc}")
     uri = Path(uri)
     if pairs_kwargs is None:
         pairs_kwargs = {}
-    if pairs is None:
-        raise ValueError("pairs file path required")
+    pairs_paths = _pairs_paths(pairs)
+    missing = [str(p) for p in pairs_paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"Pairs file(s) not found: {', '.join(missing)}")
+    if len(pairs_paths) > 1:
+        logger.info(
+            "Reading %d pairs files in one pass: %s",
+            len(pairs_paths),
+            ", ".join(map(str, pairs_paths)),
+        )
     if not isinstance(contig_genome_map, dict | str | Path):
         raise TypeError("contig_genome_map must be a dict or a path")
     if bins is not None and binsize is not None:
@@ -2369,7 +2513,7 @@ def from_pairs(
         contig_lengths = _read_contig_lengths(bins=bins_df)
     elif bins is None:
         # Integer binsize mode: need contig lengths from fasta or pairs header
-        contig_lengths = _read_contig_lengths(fasta=fasta, pairs=pairs)
+        contig_lengths = _read_contig_lengths(fasta=fasta, pairs=pairs_paths)
         bins_df = None
     else:
         raise TypeError("bins must be a path, DataFrame, or None")
@@ -2379,7 +2523,7 @@ def from_pairs(
     # groupby("chrom") produced (alphabetical), not the FASTA order.
     if contig_ordering == "fasta" and bins_df is not None:
         contig_lengths = _apply_reference_order(
-            contig_lengths, fasta=fasta, pairs=pairs
+            contig_lengths, fasta=fasta, pairs=pairs_paths
         )
 
     contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
@@ -2480,7 +2624,7 @@ def from_pairs(
     ps_edges = pairs_distance_grid(contig_length, ps_bins_per_decade) if ps else None
     ps_tally = PSCounts(len(genomes_df), ps_edges) if ps_edges is not None else None
     raw_pixels: Iterable[pd.DataFrame] = _stream_binned_pairs(
-        pairs,
+        pairs_paths,
         contig_name_to_id,
         chrom_offset,
         binsize,

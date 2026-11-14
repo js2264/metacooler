@@ -247,7 +247,7 @@ alongside the `commands` provenance list:
 | `trans_contig_ratio` | The "3D ratio": `inter_contig / n_contacts`. |
 | `*_fraction` | Each category's share of `n_contacts`. `null` on an empty file. |
 | `binsize` | Bin size at measurement time (pixel source). |
-| `n_pairs_read`, `n_pairs_discarded` | Pairs seen and dropped while binning (pairs source), so the denominator the ratio does *not* use stays visible. |
+| `n_pairs_read`, `n_pairs_discarded` | Pairs seen and dropped while binning (pairs source), so the denominator the ratio does *not* use stays visible. Summed over every pairs file when `create pairs` reads several. |
 
 **`/genomes` columns**, one row per genome:
 `qc_intra_contig_short`, `qc_intra_contig_long`,
