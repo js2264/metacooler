@@ -546,7 +546,16 @@
   attaches the page and its TSV tables to the release, publishes them on the
   documentation site at `/benchmarks/` (the docs build fetches them from the
   `benchmark-page` release), and keeps the datasets in a `benchmark-data-v<N>`
-  release.
+  release. The page says outright that every dataset is simulated (no
+  accessions), and reports, beside wall clock: peak memory (for cooler's
+  `dump | awk` pipelines, both stages added up), in the summary figure too,
+  against the machine's RAM; the size on disk of the `.metacool` against the
+  `.cool` with its binning tables and against one `.cool` per MAG (with what
+  those hold); and 3 to 5 runs per command, with their spread drawn and
+  tabulated. A run stopped at the time limit is drawn where it was stopped, as
+  a lower bound, and no longer joined to the line. `cooler cload pairs` is not
+  run on XL, where it has never finished within the time limit
+  (`BENCH_SKIP_COOLER_CREATE`).
 
 ---
 

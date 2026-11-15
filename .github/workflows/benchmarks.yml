@@ -1,7 +1,7 @@
 name: Benchmarks
 
 # Renders benchmarks/benchmarks.qmd, which times metacooler against cooler from
-# the command line on four synthetic metagenomes (10^3 to 2 x 10^6 contigs).
+# the command line on four simulated metagenomes (10^3 to 2 x 10^6 contigs).
 # Runs for every release tag, and on demand. The page, its tables and figures
 # are kept as a workflow artifact and, for a release, attached to it.
 #
@@ -16,9 +16,11 @@ name: Benchmarks
 # them, and otherwise generated here, then published there (on a release run,
 # or when `publish-data` is set), so later runs time the very same bytes.
 #
-# XL needs ~13 GB of RAM (metacooler create pairs; cooler cload pairs reaches
-# the time limit there) and the whole ladder takes ~4 h: it assumes a standard
-# 4-core, 16 GB runner (public repositories). Pick fewer datasets elsewhere.
+# On the standard 2-core, 8 GB runner the whole ladder takes ~2.5 h: 3 to 5
+# runs per command (one for a run over 10 min). Most of it is cooler's three
+# pixel scans on XL, ~22 min a run; cooler cload pairs is not run on XL, where
+# it has never finished within the 30-min limit. The largest peak was ~6.6 GB
+# (metacooler zoomify on XL). Pick fewer datasets for a quicker run.
 on:
   push:
     tags: ["v*"]
