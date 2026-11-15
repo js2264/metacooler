@@ -551,11 +551,11 @@
   `dump | awk` pipelines, both stages added up), in the summary figure too,
   against the machine's RAM; the size on disk of the `.metacool` against the
   `.cool` with its binning tables and against one `.cool` per MAG (with what
-  those hold); warm and cold runs of every query and of the genome network (a
-  cold run evicts its inputs from the page cache first, `pagecache.py`); and 3
-  to 5 runs per command, with their spread drawn and tabulated. A run stopped
-  at the time limit is drawn where it was stopped, as a lower bound, and no
-  longer joined to the line.
+  those hold); and 3 to 5 runs per command, with their spread drawn and
+  tabulated. A run stopped at the time limit is drawn where it was stopped, as
+  a lower bound, and no longer joined to the line. `cooler cload pairs` is not
+  run on XL, where it has never finished within the time limit
+  (`BENCH_SKIP_COOLER_CREATE`).
 
 ---
 

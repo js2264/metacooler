@@ -2,22 +2,16 @@
 # Sourced by every bash cell of benchmarks.qmd: settings, then `bench`.
 #
 #   bench SECTION DATASET TOOL TASK OUTPUT -- COMMAND [ARG...]
-#   EVICT="FILE..." bench SECTION DATASET TOOL TASK OUTPUT -- COMMAND [ARG...]
-#   both "FILE..." SECTION DATASET TOOL TASK OUTPUT -- COMMAND [ARG...]
 #
-# `bench` runs COMMAND as a fresh process, each run under GNU time and
-# `timeout`, after deleting OUTPUT (the file it writes, '-' for none) and its
-# sidecars; and appends one row per run to $RESULTS/timings.tsv, with its
-# status: ok, timeout (stopped at $TIMEOUT s), oom (killed by the kernel for
-# want of memory), error, or skipped.
+# runs COMMAND as a fresh process, each run under GNU time and `timeout`,
+# after deleting OUTPUT (the file it writes, '-' for none) and its sidecars;
+# and appends one row per run to $RESULTS/timings.tsv, with its status: ok,
+# timeout (stopped at $TIMEOUT s), oom (killed by the kernel for want of
+# memory) or error. A run that was already timed, and whose output is still
+# there, is not run again (BENCH_REDO=1 forces it), so a page can be
+# re-rendered without re-timing.
 #
-# Cache. A run is warm by default: what the command reads may be in the page
-# cache, as it is right after it was written or read. With EVICT, it is cold:
-# the FILEs (what the command reads) are evicted from the page cache before
-# every run (pagecache.py), so their bytes come from the disk. `both` times a
-# command warm (its FILEs read just before), then cold.
-#
-# Runs. At least $MIN_REPS, then more, up to $MAX_REPS, while the runs so far
+# Runs: at least $MIN_REPS, then more, up to $MAX_REPS, while the runs so far
 # add up to under $BUDGET s. A command whose run takes longer than $LONG s
 # runs once. BENCH_REPS=N runs every command N times instead. A timeout, an
 # OOM or a failure is not repeated.
@@ -27,10 +21,6 @@
 # sum of the stages' own peaks, since they run side by side. A pipeline that
 # does not finish has no peak (left empty): its shell is killed before it
 # reaps the stages, so their memory never reaches GNU time.
-#
-# A command already in the table, with as many runs as it would get and its
-# output still there, is not run again (BENCH_REDO=1 forces it), so a page can
-# be re-rendered without re-timing.
 
 set -uo pipefail
 
@@ -51,6 +41,9 @@ MIN_REPS=${BENCH_MIN_REPS:-3}          # runs per command, at least
 MAX_REPS=${BENCH_MAX_REPS:-5}          # ... and at most
 BUDGET=${BENCH_BUDGET:-120}            # seconds of runs past which no more than MIN_REPS
 LONG=${BENCH_LONG:-600}                # seconds: a command whose run takes longer runs once
+# Datasets on which `cooler cload pairs` is not run: it has never finished on
+# XL within the time limit, and would only spend it again. Empty runs it on all.
+SKIP_COOLER_CREATE=${BENCH_SKIP_COOLER_CREATE-XL}
 COOLER_VERSION=0.12.1                  # the cooler every timing is against: uv.lock's
 ZOOMS=${BENCH_RESOLUTIONS:-$BINSIZE,$((2 * BINSIZE)),$((5 * BINSIZE)),$((10 * BINSIZE))}
 
@@ -60,13 +53,7 @@ STAGE='/usr/bin/time -f %M -a -o "$BENCH_STAGES"'
 
 mkdir -p "$DATA" "$MAPS" "$QUERIES" "$SCRATCH" "$LOGS" "$RESULTS"
 
-COLUMNS_TSV="section	dataset	tool	task	cache	rep	status	wall_s	cpu_s	user_s	sys_s	peak_mb	output_mb	started	metacooler	cooler	cpu	cores	memory_gb	command"
-# A table an older bench.sh wrote has other columns: keep it aside, start anew.
-if [[ -s $TIMINGS && $(head -n 1 "$TIMINGS") != "$COLUMNS_TSV" ]]; then
-    aside=$WORK/timings.$(date -u +%Y%m%dT%H%M%S).tsv
-    mv "$TIMINGS" "$aside"
-    echo "timings.tsv has the columns of an older bench.sh: moved to $aside; timing anew" >&2
-fi
+COLUMNS_TSV="section	dataset	tool	task	rep	status	wall_s	cpu_s	user_s	sys_s	peak_mb	output_mb	started	metacooler	cooler	cpu	cores	memory_gb	command"
 [[ -s $TIMINGS ]] || echo "$COLUMNS_TSV" >"$TIMINGS"
 
 # Versions and machine, once per work directory: every row carries them.
@@ -84,7 +71,7 @@ CONTEXT=$(cat "$WORK/.context")
 # A command's rows so far: how many, the seconds its finished runs took in
 # all, the seconds its last run took, and that run's status ("none" yet).
 _done() {
-    awk -F'\t' -v k="$1" '$1"/"$2"/"$3"/"$4"/"$5 == k { n++; s = $7; l = $8; if ($7 == "ok") t += $8 }
+    awk -F'\t' -v k="$1" '$1"/"$2"/"$3"/"$4 == k { n++; s = $6; l = $7; if ($6 == "ok") t += $7 }
         END { print n + 0, t + 0, l + 0, (n ? s : "none") }' "$TIMINGS"
 }
 
@@ -98,39 +85,23 @@ _more() {
         'BEGIN { exit !(n == 0 || (n < hi && l <= long && (n < lo || t < b))) }'
 }
 
-# Record, without running it, a command that is not attempted, and why.
-_skip() {
-    local section=$1 dataset=$2 tool=$3 task=$4 cache=$5 reason=$6 n
-    read -r n _ <<<"$(_done "$section/$dataset/$tool/$task/$cache")"
-    ((n > 0)) && return 0
-    printf '%s\t%s\t%s\t%s\t%s\t1\tskipped\t\t\t\t\t\t\t%s\t%s\t%s\n' "$section" "$dataset" "$tool" \
-        "$task" "$cache" "$(date -u +%Y-%m-%dT%H:%M:%S)" "$CONTEXT" "$reason" >>"$TIMINGS"
-    printf '%-52s skipped: %s\n' "$section/$dataset/$tool/$task/$cache" "$reason"
-}
-skip() { _skip "$1" "$2" "$3" "$4" warm "$5"; }
-
 bench() {
     local section=$1 dataset=$2 tool=$3 task=$4 output=$5
     shift 5
     [[ ${1-} == -- ]] && shift
-    local cache=warm evict=()
-    if [[ -n ${EVICT:-} ]]; then
-        cache=cold
-        read -ra evict <<<"$EVICT"
-    fi
-    local key="$section/$dataset/$tool/$task/$cache" n total last_wall last remake=0
+    local key="$section/$dataset/$tool/$task" n total last_wall last remake=0
     if [[ ${BENCH_REDO:-0} == 1 ]]; then
-        awk -F'\t' -v k="$key" '$1"/"$2"/"$3"/"$4"/"$5 != k' "$TIMINGS" >"$TIMINGS.tmp"
+        awk -F'\t' -v k="$key" '$1"/"$2"/"$3"/"$4 != k' "$TIMINGS" >"$TIMINGS.tmp"
         mv "$TIMINGS.tmp" "$TIMINGS"
     fi
     read -r n total last_wall last <<<"$(_done "$key")"
-    if [[ $last =~ ^(timeout|oom|skipped)$ ]]; then # final: it would only fail again
-        printf '%-52s did not finish before (%s): not run again\n' "$key" "$last"
+    if [[ $last == timeout || $last == oom ]]; then # final: it would only fail again
+        printf '%-44s did not finish before (%s): not run again\n' "$key" "$last"
         return 0
     fi
     if ! _more "$n" "$total" "$last_wall"; then
         if [[ $output == - || $output == "$SCRATCH"/* || -e $output || $last != ok ]]; then
-            printf '%-52s already timed (%d runs, last %s)\n' "$key" "$n" "$last"
+            printf '%-44s already timed (%d runs, last %s)\n' "$key" "$n" "$last"
             return 0
         fi
         remake=1 # its output is gone: one more run to make it again
@@ -144,11 +115,6 @@ bench() {
     while ((remake)) || _more "$n" "$total" "$last_wall"; do
         remake=0
         rep=$((n + 1))
-        if ((${#evict[@]})) && ! python "$HERE/pagecache.py" evict "${evict[@]}" 2>"$log.evict"; then
-            _skip "$section" "$dataset" "$tool" "$task" "$cache" \
-                "cannot evict its inputs from the page cache: $(head -n 1 "$log.evict")"
-            return 0
-        fi
         # The output, and the P(s) table `create pairs` writes beside it.
         [[ $output != - ]] && rm -rf "$output" "$output".* "${output%.*}.ps.tsv"
         : >"$log.stages"
@@ -179,12 +145,12 @@ bench() {
         [[ $output != - ]] && rm -f "$(dirname "$output")"/tmp*.multi.cool
         bytes=0
         [[ $output != - && -e $output ]] && bytes=$(du -sb "$output" | cut -f1)
-        printf '%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$section" "$dataset" "$tool" "$task" "$cache" "$rep" "$status" "$wall" \
+        printf '%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$section" "$dataset" "$tool" "$task" "$rep" "$status" "$wall" \
             "$(awk -v u="$user" -v s="$sys" 'BEGIN { print u + s }')" "$user" "$sys" "$peak" \
             "$(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1e6 }')" \
             "$started" "$CONTEXT" "$command" >>"$TIMINGS"
-        printf '%-52s run %d  %-7s %8.2f s  %6s MB\n' "$key" "$rep" "$status" "$wall" "${peak:-?}"
+        printf '%-44s run %d  %-7s %8.2f s  %6s MB\n' "$key" "$rep" "$status" "$wall" "${peak:-?}"
         [[ $status == error ]] && sed 's/^/    | /' "$log.err" | tail -n 15
         [[ $status == ok ]] || break # a timeout, an OOM or a failure is not repeated
         n=$rep
@@ -196,20 +162,19 @@ bench() {
     return 0
 }
 
-# Time a command warm, its FILEs read just before, then cold, its FILEs
-# evicted from the page cache before every run.
-both() {
-    local files=$1
-    shift
-    # shellcheck disable=SC2086 # FILEs are a list
-    warm $files
-    bench "$@"
-    EVICT=$files bench "$@"
+# Record, without running it, a command that is not attempted, and why.
+skip() {
+    local section=$1 dataset=$2 tool=$3 task=$4 reason=$5 n
+    read -r n _ <<<"$(_done "$section/$dataset/$tool/$task")"
+    ((n > 0)) && return 0
+    printf '%s\t%s\t%s\t%s\t1\tskipped\t\t\t\t\t\t\t%s\t%s\t%s\n' "$section" "$dataset" \
+        "$tool" "$task" "$(date -u +%Y-%m-%dT%H:%M:%S)" "$CONTEXT" "$reason" >>"$TIMINGS"
+    printf '%-44s skipped: %s\n' "$section/$dataset/$tool/$task" "$reason"
 }
 
-# Whether a command's last (warm) run in the table did not finish: it reached
-# the time limit (timeout) or ran out of memory (oom).
-unfinished() { [[ $(_done "$1/$2/$3/$4/warm" | cut -d' ' -f4) =~ ^(timeout|oom)$ ]]; }
+# Whether a command did not give its output: its last run reached the time
+# limit (timeout) or ran out of memory (oom), or it was not run (skipped).
+unfinished() { [[ $(_done "$1/$2/$3/$4" | cut -d' ' -f4) =~ ^(timeout|oom|skipped)$ ]]; }
 
 # Read files once, untimed, so that no run is the one paying the disk.
 warm() { cat "$@" >/dev/null; }

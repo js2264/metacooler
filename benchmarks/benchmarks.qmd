@@ -81,12 +81,10 @@ settings cell refuses to time any other.
 * **Measures.** Wall clock; CPU (user + system, children included); peak memory, the largest
   resident set among the command's processes — for cooler's `dump | awk` pipelines, both
   stages' added up, since they run side by side.
-* **Cache.** Commands that read a map are timed **warm** (their inputs in the page cache, read
-  just before) and **cold** (their inputs evicted from it before every run, so they come from
-  the disk). Commands that write a map are timed warm.
 * **Time limit.** A run still going after the time limit (30 min) is stopped by `timeout`. Its
   time and memory are where it was stopped: measured lower bounds, never extrapolations. A run
-  the kernel kills for want of memory is reported as out of memory.
+  the kernel kills for want of memory is reported as out of memory. `cooler cload pairs` is not
+  run on XL, where it has never finished within the limit (see §1).
 
 ```bash
 # Render (runs the benchmarks: hours for the full ladder; minutes for S and M)
@@ -96,8 +94,7 @@ BENCH_DATASETS="S M" quarto render benchmarks.qmd   # a quick look
 ```
 
 `bench.sh` holds the settings and the one timing function, `bench`; `simulate.py` makes the
-datasets; `targets.py` picks what the queries ask for; `pagecache.py` evicts the inputs of a cold
-run. A second render re-uses runs already in `timings.tsv` (`BENCH_REDO=1` times them again). The
+datasets; `targets.py` picks what the queries ask for. A second render re-uses runs already in `timings.tsv` (`BENCH_REDO=1` times them again). The
 [Benchmarks workflow](https://github.com/js2264/metacooler/blob/devel/.github/workflows/benchmarks.yml)
 renders this page for every release, and on demand, and publishes it with the
 [metacooler documentation](https://js2264.github.io/metacooler/).
@@ -131,7 +128,6 @@ LONG = float(os.environ.get("BENCH_LONG", 600))
 HUE = {"metacooler": "#2a78d6", "cooler": "#eb6834"}
 SIZE = dict(zip(["S", "M", "L", "XL"], ["#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]))
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e7e6e2", "#fcfcfb"
-COLD = (0, (4, 2))  # cold runs: dashed lines, open markers
 plt.rcParams.update({
     "figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE,
     "axes.edgecolor": INK2, "axes.labelcolor": INK, "xtick.color": INK2, "ytick.color": INK2,
@@ -172,7 +168,7 @@ def runs(t, **match):
 
 
 def finished(section, dataset, tool, task):
-    """Whether a command's last run, warm or cold, finished: its output is there to check."""
+    """Whether a command's last run finished: its output is there to check."""
     r = runs(timings(), section=section, dataset=dataset, tool=tool, task=task)
     r = r[r["status"] != "skipped"]
     return len(r) > 0 and r["status"].iloc[-1] == "ok"
@@ -223,9 +219,9 @@ def cell(rows, value="wall_s", digits=None, spread=True):
     return {"skipped": "not run", "error": "FAILED"}.get(last["status"], last["status"])
 
 
-def wide(section, value="wall_s", digits=None, spread=True, cache="warm"):
+def wide(section, value="wall_s", digits=None, spread=True):
     """One row per command, one column per dataset."""
-    t = runs(timings(), section=section, cache=cache)
+    t = runs(timings(), section=section)
     keys = ["tool", "task", "dataset"]
     cells = pd.DataFrame(
         [(*k, cell(g, value, digits, spread)) for k, g in t.groupby(keys, sort=False)],
@@ -288,20 +284,18 @@ def stopped(ax, x, y, colour, status):
 
 
 def scaling(ax, rows, value="wall_s"):
-    """One line per command and cache state through the means of its runs;
-    every run a dot, and a bar from its fastest to its slowest. Cold: dashed,
-    open markers. A run that did not finish is drawn where it ended (see
-    `stopped`), and no line joins it: nothing is extrapolated."""
-    for (tool, _task, cache), r in rows.groupby(["tool", "task", "cache"], sort=False):
-        colour, cold = HUE[tool], cache == "cold"
+    """One line per command through the means of its runs; every run a dot,
+    and a bar from its fastest to its slowest. A run that did not finish is
+    drawn where it ended (see `stopped`), and no line joins it: nothing is
+    extrapolated. A command not run is marked so."""
+    for (tool, _task), r in rows.groupby(["tool", "task"], sort=False):
+        colour = HUE[tool]
         ok = r[r["status"] == "ok"]
         stats = ok.groupby("contigs")[value].agg(["mean", "min", "max"])
         if len(stats):
             ax.errorbar(stats.index, stats["mean"],
                         yerr=[stats["mean"] - stats["min"], stats["max"] - stats["mean"]],
-                        color=colour, ls=COLD if cold else "-", lw=1.6 if cold else 2,
-                        marker="o", ms=5, mfc=SURFACE if cold else colour, mec=colour,
-                        capsize=2.5, elinewidth=1, zorder=3)
+                        color=colour, marker="o", ms=5, capsize=2.5, elinewidth=1, zorder=3)
             ax.scatter(ok["contigs"], ok[value], s=9, color=colour, alpha=0.35, lw=0, zorder=4)
         for _, run in r[r["status"].isin(["timeout", "oom"]) & r[value].notna()].iterrows():
             stopped(ax, run["contigs"], run[value], colour, run["status"])
@@ -358,10 +352,6 @@ def command(section, tool, task):
 
 
 TOOLS_LEGEND = [Line2D([], [], color=HUE[t], marker="o", ms=5, label=t) for t in ("cooler", "metacooler")]
-CACHE_LEGEND = [
-    Line2D([], [], color=INK2, marker="o", ms=5, label="warm"),
-    Line2D([], [], color=INK2, ls=COLD, lw=1.6, marker="o", ms=5, mfc=SURFACE, label="cold (inputs evicted)"),
-]
 ```
 
 ## Settings
@@ -387,15 +377,7 @@ if [[ $installed != "$COOLER_VERSION" ]]; then
     echo "Run uv sync (uv.lock pins it), or bump COOLER_VERSION in bench.sh with the lock." >&2
     exit 1
 fi
-# Cold runs evict their inputs from the page cache: check this file system lets them.
-probe=$WORK/.evict-probe
-head -c 8388608 /dev/urandom >"$probe" && warm "$probe"
-if python pagecache.py evict "$probe"; then
-    echo "cold runs: inputs evicted from the page cache before every run ($(python pagecache.py resident "$probe" | cut -f1) left cached in a test)"
-else
-    echo "cold runs: this file system keeps its files in memory; cold runs will be skipped" >&2
-fi
-rm -f "$probe"
+[[ -n $SKIP_COOLER_CREATE ]] && echo "cooler cload pairs not run on: $SKIP_COOLER_CREATE"
 ```
 
 ## Datasets
@@ -509,6 +491,10 @@ type outgrows HDF5's object header anyway and is dropped for plain integers. `co
 sorts externally: it writes the bin table once per chunk of pairs and once per merge, so it pays
 that cost several times per file. metacooler writes the integers directly.
 
+`cooler cload pairs` is not run on XL: there it has never finished within the 30-min time limit
+(every earlier render stopped it at the limit), so a run would only spend another half hour to say
+so again. `BENCH_SKIP_COOLER_CREATE=` (empty) runs it on every dataset.
+
 ```{python}
 #| label: create
 %%bash
@@ -516,9 +502,14 @@ source bench.sh
 for ds in $DATASETS; do
     d=$DATA/$ds
     warm "$d/contacts.pairs.gz"
-    bench create "$ds" cooler "cload pairs" "$MAPS/$ds.cool" -- \
-        cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 \
-            "$d/contigs.sizes:$BINSIZE" "$d/contacts.pairs.gz" "$MAPS/$ds.cool"
+    if [[ " $SKIP_COOLER_CREATE " == *" $ds "* ]]; then
+        skip create "$ds" cooler "cload pairs" \
+            "it has never finished on $ds within the time limit (BENCH_SKIP_COOLER_CREATE)"
+    else
+        bench create "$ds" cooler "cload pairs" "$MAPS/$ds.cool" -- \
+            cooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 \
+                "$d/contigs.sizes:$BINSIZE" "$d/contacts.pairs.gz" "$MAPS/$ds.cool"
+    fi
     bench create "$ds" metacooler "create pairs" "$MAPS/$ds.metacool" -- \
         metacooler create pairs --pairs "$d/contacts.pairs.gz" --bins "$BINSIZE" \
             --contigs "$d/contigs.tsv" --genomes "$d/genomes.tsv" -o "$MAPS/$ds.metacool"
@@ -541,7 +532,7 @@ show(wide("create", "peak_mb", digits=0))
 
 ```{python}
 #| label: fig-create
-#| fig-cap: "Creating a map from pairs: wall clock (left) and peak memory (right) against the number of contigs. A line joins the means of a command's runs, each run is a dot, and the bar spans its runs. A run stopped by timeout at the time limit (dotted) is a bar with an arrow up, where it was stopped: a measured lower bound, which no line joins and nothing extrapolates. Right, dashed: the RAM of the machine."
+#| fig-cap: "Creating a map from pairs: wall clock (left) and peak memory (right) against the number of contigs. A line joins the means of a command's runs, each run is a dot, and the bar spans its runs. A run stopped by timeout at the time limit (dotted) is a bar with an arrow up, where it was stopped: a measured lower bound, which no line joins and nothing extrapolates. A command not run is marked so. Right, dashed: the RAM of the machine."
 #| code-fold: true
 t = timings()
 rows = runs(t, section="create")
@@ -574,7 +565,7 @@ for ds in DATASETS:
             row[f"{tool} nnz"], row[f"{tool} sum"] = held[tool]
     missing = [tool for tool in MADE_BY if tool not in held]
     row["identical"] = (
-        f"{' and '.join(missing)} did not finish" if missing
+        f"{' and '.join(missing)} did not finish or was not run" if missing
         else "yes" if held["cooler"] == held["metacooler"] else "NO"
     )
     same.append(row)
@@ -583,7 +574,7 @@ assert not (same["identical"] == "NO").any(), "cooler and metacooler disagree on
 show(same, **{c: "{:,.0f}" for c in same.columns if c.endswith(("nnz", "sum"))})
 ```
 
-Where cooler did not finish, the rest of the page still needs the genome-agnostic `.cool`. It
+Where cooler did not finish or was not run, the rest of the page still needs the genome-agnostic `.cool`. It
 is built here, untimed, by metacooler in the assembly's own contig order (`--contig-order fasta`,
 which reproduces `cooler cload pairs` pixel for pixel), then flattened to a plain cooler.
 
@@ -697,7 +688,6 @@ dropping it again (`flatten`).
 source bench.sh
 for ds in $DATASETS; do
     d=$DATA/$ds
-    warm "$MAPS/$ds.cool" "$MAPS/$ds.metacool"
     bench convert "$ds" metacooler "create cool" "$SCRATCH/$ds.from-cool.metacool" -- \
         metacooler create cool --cool "$MAPS/$ds.cool" --contigs "$d/contigs.tsv" \
             --genomes "$d/genomes.tsv" -o "$SCRATCH/$ds.from-cool.metacool"
@@ -724,11 +714,10 @@ the base map, its pyramid is not attempted.
 %%bash
 source bench.sh
 for ds in $DATASETS; do
-    warm "$MAPS/$ds.cool" "$MAPS/$ds.metacool"
     bench zoomify "$ds" metacooler zoomify "$SCRATCH/$ds.mmetacool" -- \
         metacooler zoomify "$MAPS/$ds.metacool" -r "$ZOOMS" -o "$SCRATCH/$ds.mmetacool"
     if unfinished create "$ds" cooler "cload pairs"; then
-        skip zoomify "$ds" cooler zoomify "cooler cload pairs did not finish on $ds"
+        skip zoomify "$ds" cooler zoomify "no base map from cooler cload pairs on $ds"
         continue
     fi
     bench zoomify "$ds" cooler zoomify "$SCRATCH/$ds.mcool" -- \
@@ -751,15 +740,6 @@ contacts). cooler serves a contig through its own index (`dump -r`). It has no n
 pixels are the joined pixels whose two contigs the binning table puts in that MAG, in one pass of
 `awk` over the whole map. metacooler resolves the genome by name (`dump -r`/`-r2`).
 
-Each query is timed twice. **Warm**: its inputs (the map, and for cooler's scans the binning
-table) are read just before, so they are in the page cache, as on a machine that has just written
-or read the map. **Cold**: they are evicted from the page cache before every run, so their bytes
-come from the disk (`pagecache.py`: `posix_fadvise`, then a check with `mincore` that they are
-gone). In both, Python and the libraries are already cached, as on any machine that ran them
-recently: a first run after a boot also pays for loading those, the same for both tools. On a
-cloud machine the disk may be cached by its host too: cold, here, means not in this machine's
-memory.
-
 ```{python}
 #| label: query-cli
 %%bash
@@ -772,25 +752,24 @@ for ds in $DATASETS; do
     read -r contig mag a b <<<"$(python targets.py --contigs "$d/contigs.tsv" \
         --sizes "$d/contigs.sizes" --genomes "$d/genomes.tsv")"
     echo "$ds: contig $contig · genome $mag · genome pair $a × $b"
-    # Each twice: warm, then cold (the files named first evicted before every run).
-    both "$m.cool" query "$ds" cooler contig "$q.cooler.contig.tsv" -- \
+    bench query "$ds" cooler contig "$q.cooler.contig.tsv" -- \
         cooler dump -t pixels -r "$contig" -o "$q.cooler.contig.tsv" "$m.cool"
-    both "$m.metacool" query "$ds" metacooler contig "$q.metacooler.contig.tsv" -- \
+    bench query "$ds" metacooler contig "$q.metacooler.contig.tsv" -- \
         metacooler dump "$m.metacool" -t pixels -r "$contig" -o "$q.metacooler.contig.tsv"
-    both "$m.cool $d/contigs.tsv" query "$ds" cooler genome "$q.cooler.genome.tsv" -- bash -o pipefail -c \
+    bench query "$ds" cooler genome "$q.cooler.genome.tsv" -- bash -o pipefail -c \
         "$STAGE cooler dump -t pixels --join $m.cool | $STAGE awk -F'\t' -v g=$mag '$in_genome' $d/contigs.tsv - > $q.cooler.genome.tsv"
-    both "$m.metacool" query "$ds" metacooler genome "$q.metacooler.genome.tsv" -- \
+    bench query "$ds" metacooler genome "$q.metacooler.genome.tsv" -- \
         metacooler dump "$m.metacool" -t pixels -r "$mag" -o "$q.metacooler.genome.tsv"
-    both "$m.cool $d/contigs.tsv" query "$ds" cooler "genome pair" "$q.cooler.pair.tsv" -- bash -o pipefail -c \
+    bench query "$ds" cooler "genome pair" "$q.cooler.pair.tsv" -- bash -o pipefail -c \
         "$STAGE cooler dump -t pixels --join $m.cool | $STAGE awk -F'\t' -v a=$a -v b=$b '$in_pair' $d/contigs.tsv - > $q.cooler.pair.tsv"
-    both "$m.metacool" query "$ds" metacooler "genome pair" "$q.metacooler.pair.tsv" -- \
+    bench query "$ds" metacooler "genome pair" "$q.metacooler.pair.tsv" -- \
         metacooler dump "$m.metacool" -t pixels -r "$a" -r2 "$b" -o "$q.metacooler.pair.tsv"
 done
 ```
 
 ```{python}
 #| label: tbl-query-cli
-#| tbl-cap: "Queries from the command line, warm: wall-clock seconds, mean ± sd (n runs)."
+#| tbl-cap: "Queries from the command line: wall-clock seconds, mean ± sd (n runs)."
 #| code-fold: true
 def pixels(path):
     """Rows and contact total of a dump: the count is the last column."""
@@ -826,13 +805,6 @@ show(wide("query"))
 ```
 
 ```{python}
-#| label: tbl-query-cold
-#| tbl-cap: "Queries from the command line, cold (inputs evicted from the page cache before every run): wall-clock seconds, mean ± sd (n runs)."
-#| code-fold: true
-show(wide("query", cache="cold"))
-```
-
-```{python}
 #| label: tbl-query-pixels
 #| tbl-cap: "What each query returned (the two tools must agree), and the share of the map's pixels that is: cooler's scans read every pixel of the map, metacooler's reads only these."
 #| code-fold: true
@@ -841,7 +813,7 @@ show(agree)
 
 ```{python}
 #| label: tbl-query-memory
-#| tbl-cap: "Queries: peak memory (MB), warm, mean ± sd (n runs); for cooler's dump | awk pipelines, both stages added up."
+#| tbl-cap: "Queries: peak memory (MB), mean ± sd (n runs); for cooler's dump | awk pipelines, both stages added up."
 #| code-fold: true
 show(wide("query", "peak_mb", digits=0))
 ```
@@ -849,9 +821,9 @@ show(wide("query", "peak_mb", digits=0))
 ## 6 · Genome-level aggregation
 
 The genome × genome contact network: `metacooler network --level genome`, against the same
-edge list from cooler (`dump --join`, then an `awk` sum over the binning table), both warm and
-cold, as the queries above. And the aggregated genome-level `.cool` (`metacooler aggregate --level
-genome`), which cooler has no command for.
+edge list from cooler (`dump --join`, then an `awk` sum over the binning table). And the
+aggregated genome-level `.cool` (`metacooler aggregate --level genome`), which cooler has no
+command for.
 
 ```{python}
 #| label: aggregate
@@ -862,11 +834,10 @@ by_genome+=' { a = g[$1]; b = g[$4]; if (a > b) { t = a; a = b; b = t }; n[a "\t
 by_genome+=' END { for (k in n) print k "\t" n[k] }'
 for ds in $DATASETS; do
     d=$DATA/$ds m=$MAPS/$ds q=$QUERIES/$ds
-    both "$m.cool $d/contigs.tsv" aggregate "$ds" cooler "genome network" "$q.cooler.network.tsv" -- bash -o pipefail -c \
+    bench aggregate "$ds" cooler "genome network" "$q.cooler.network.tsv" -- bash -o pipefail -c \
         "$STAGE cooler dump -t pixels --join $m.cool | $STAGE awk -F'\t' '$by_genome' $d/contigs.tsv - > $q.cooler.network.tsv"
-    both "$m.metacool" aggregate "$ds" metacooler "genome network" "$q.metacooler.network.tsv" -- \
+    bench aggregate "$ds" metacooler "genome network" "$q.metacooler.network.tsv" -- \
         metacooler network "$m.metacool" --level genome -o "$q.metacooler.network.tsv"
-    warm "$m.metacool"
     bench aggregate "$ds" metacooler "genome-level .cool" "$SCRATCH/$ds.genomes.cool" -- \
         metacooler aggregate "$m.metacool" --level genome -o "$SCRATCH/$ds.genomes.cool"
 done
@@ -874,7 +845,7 @@ done
 
 ```{python}
 #| label: tbl-aggregate
-#| tbl-cap: "Genome-level aggregation: wall-clock seconds, mean ± sd (n runs), warm and cold, and the edges each network has (they must agree)."
+#| tbl-cap: "Genome-level aggregation: wall-clock seconds, mean ± sd (n runs), peak memory, and the edges each network has (they must agree)."
 #| code-fold: true
 def edges(path):
     e = pd.read_csv(path, sep="\t", header=None, names=["a", "b", "n"], keep_default_na=False)
@@ -896,8 +867,7 @@ for ds in DATASETS:
     })
 check = pd.DataFrame(check)
 assert not (check["same as cooler"] == "NO").any(), "the two networks differ"
-both_caches = pd.concat([wide("aggregate").assign(cache="warm"), wide("aggregate", cache="cold").assign(cache="cold")])
-display(show(both_caches[["tool", "task", "cache", *[d for d in DATASETS if d in both_caches.columns]]]))
+display(show(wide("aggregate")))
 display(show(wide("aggregate", "peak_mb", digits=0).rename(columns={"task": "task (peak MB)"})))
 show(check)
 ```
@@ -906,7 +876,7 @@ show(check)
 
 ```{python}
 #| label: fig-commands
-#| fig-cap: "Every command on the four simulated datasets (simulate.py; no real data), cooler in orange, metacooler in blue. A–F, wall clock against the number of contigs: a line joins the means of a command's runs, each run is a dot and the bar spans them. In C–F, solid lines are warm runs (inputs in the page cache) and dashed lines with open markers cold ones (inputs evicted before every run). A run stopped by timeout at the time limit (dotted line) is a bar with an arrow up, drawn where it was killed: a measured lower bound, which no line joins and nothing extrapolates; the runs that did not finish are named below the figure. G, peak memory of map creation against the number of contigs; H, peak memory of every command on the largest dataset (warm runs; an arrow marks the memory a stopped run held when stopped). Dashed in G and H, the RAM of the machine the runs were on. I, size on disk of the map with its genomes: one .metacool, the .cool with its binning tables or alone, or one .cool per MAG (section 2, which also gives what each holds)."
+#| fig-cap: "Every command on the four simulated datasets (simulate.py; no real data), cooler in orange, metacooler in blue. A–F, wall clock against the number of contigs: a line joins the means of a command's runs, each run is a dot and the bar spans them. A run stopped by timeout at the time limit (dotted line) is a bar with an arrow up, drawn where it was killed: a measured lower bound, which no line joins and nothing extrapolates; a command not run is marked so. Both are named below the figure. G, peak memory of map creation against the number of contigs; H, peak memory of every command on the largest dataset (an arrow marks the memory a stopped run held when stopped). Dashed in G and H, the RAM of the machine the runs were on. I, size on disk of the map with its genomes: one .metacool, the .cool with its binning tables or alone, or one .cool per MAG (section 2, which also gives what each holds)."
 #| code-fold: true
 t = timings()
 RAM = ram(t)
@@ -928,7 +898,7 @@ STORE_STYLE = {
 
 def memory_at(ax, ds):
     """Peak memory of every command on one dataset, cooler and metacooler on one row."""
-    rows = runs(t, dataset=ds, cache="warm")
+    rows = runs(t, dataset=ds)
     top = 0.0
     for i, (section, tasks, title) in enumerate(PANELS):
         y = len(PANELS) - 1 - i
@@ -974,8 +944,7 @@ for ax, letter, (section, tasks, title) in zip(axes, "ABCDEF", PANELS):
         ax.set_ylabel("")
     if ax in axes[:3]:
         ax.set_xlabel("")
-axes[0].legend(handles=TOOLS_LEGEND, loc="lower right")
-axes[2].legend(handles=CACHE_LEGEND, loc="upper left")
+axes[0].legend(handles=TOOLS_LEGEND, loc="upper left")
 
 g = axes[6]
 create = runs(t, section="create")
@@ -1002,12 +971,13 @@ save(fig, "commands")
 #| echo: false
 #| output: asis
 ENDED = t[t["status"].isin(["timeout", "oom"])]
+SKIPPED = t[t["status"] == "skipped"]
 said = []
 for r in ENDED.itertuples():
     what = (f"was **stopped by `timeout` at the {human(TIMEOUT)} time limit**, after {human(r.wall_s)}"
             if r.status == "timeout" else f"was **killed by the kernel for want of memory** after {human(r.wall_s)}")
     held = f", holding {r.peak_gb:.1f} GB" if r.peak_gb == r.peak_gb else ""
-    said.append(f"`{command(r.section, r.tool, r.task)}` on {r.dataset} ({CONTIGS[r.dataset]:,} contigs, {r.cache}) "
+    said.append(f"`{command(r.section, r.tool, r.task)}` on {r.dataset} ({CONTIGS[r.dataset]:,} contigs) "
                 f"{what}{held}")
 if said:
     print("**Runs that did not finish.** " + "; ".join(said) + ". Each was really run until then: its time and "
@@ -1017,6 +987,9 @@ if said:
              " whose memory then never reaches GNU time." if ENDED["peak_mb"].isna().any() else ""))
 else:
     print(f"Every run finished within the {human(TIMEOUT)} time limit.")
+if len(SKIPPED):
+    print("\n**Not run.** " + "; ".join(f"`{command(r.section, r.tool, r.task)}` on {r.dataset}: {r.command}"
+                                       for r in SKIPPED.itertuples()) + ".")
 ```
 
 How many times faster metacooler runs than cooler (wall clock, means over runs); `>` where
@@ -1025,26 +998,22 @@ not run where it could not build the base map.
 
 ```{python}
 #| label: tbl-folds
-#| tbl-cap: "Speed-up: cooler's wall clock over metacooler's, warm and cold."
+#| tbl-cap: "Speed-up: cooler's wall clock over metacooler's."
 #| code-fold: true
 FOLDS = [
-    ("create", "cload pairs", "create pairs", "create a map from pairs", "warm"),
-    ("zoomify", "zoomify", "zoomify", "zoomify", "warm"),
-    ("query", "contig", "contig", "dump a contig", "warm"),
-    ("query", "contig", "contig", "dump a contig", "cold"),
-    ("query", "genome", "genome", "dump a genome", "warm"),
-    ("query", "genome", "genome", "dump a genome", "cold"),
-    ("query", "genome pair", "genome pair", "dump a genome pair", "warm"),
-    ("query", "genome pair", "genome pair", "dump a genome pair", "cold"),
-    ("aggregate", "genome network", "genome network", "genome network", "warm"),
-    ("aggregate", "genome network", "genome network", "genome network", "cold"),
+    ("create", "cload pairs", "create pairs", "create a map from pairs"),
+    ("zoomify", "zoomify", "zoomify", "zoomify"),
+    ("query", "contig", "contig", "dump a contig"),
+    ("query", "genome", "genome", "dump a genome"),
+    ("query", "genome pair", "genome pair", "dump a genome pair"),
+    ("aggregate", "genome network", "genome network", "genome network"),
 ]
 
 
-def fold(section, cooler_task, metacooler_task, ds, cache="warm"):
+def fold(section, cooler_task, metacooler_task, ds):
     """cooler's seconds over metacooler's, and how cooler's run ended: "ok",
     "timeout" (the ratio is then a lower bound), "oom" or "skipped" (no ratio)."""
-    pick = runs(t, section=section, dataset=ds, cache=cache)
+    pick = runs(t, section=section, dataset=ds)
     c = pick[(pick["tool"] == "cooler") & (pick["task"] == cooler_task)]
     m = pick[(pick["tool"] == "metacooler") & (pick["task"] == metacooler_task) & (pick["status"] == "ok")]
     if c.empty or m.empty:
@@ -1074,10 +1043,10 @@ def fold_text(f):
 
 
 rows = []
-for section, ct, mt, label, cache in FOLDS:
-    row = {"": label, "cache": cache}
+for section, ct, mt, label in FOLDS:
+    row = {"": label}
     for ds in DATASETS:
-        row[ds] = fold_text(fold(section, ct, mt, ds, cache))
+        row[ds] = fold_text(fold(section, ct, mt, ds))
     rows.append(row)
 FOLD_TABLE = pd.DataFrame(rows)
 FOLD_TABLE.to_csv(RESULTS / "speedups.tsv", sep="\t", index=False)
@@ -1092,11 +1061,11 @@ single run takes longer than the threshold below, or it is stopped at the time l
 
 ```{python}
 #| label: tbl-replicates
-#| tbl-cap: "Runs per command, dataset and cache state: n, and the coefficient of variation of their wall clock (sd / mean). One run: its time instead."
+#| tbl-cap: "Runs per command and dataset: n, and the coefficient of variation of their wall clock (sd / mean). One run: its time instead."
 #| code-fold: true
 ok = t[t["status"] == "ok"]
 REPS = (
-    ok.groupby(["section", "tool", "task", "cache", "dataset"], sort=False)["wall_s"]
+    ok.groupby(["section", "tool", "task", "dataset"], sort=False)["wall_s"]
     .agg(n="count", mean="mean", sd="std", fastest="min", slowest="max")
     .reset_index()
 )
@@ -1104,8 +1073,8 @@ REPS["cv"] = REPS["sd"] / REPS["mean"]
 REPS.to_csv(RESULTS / "replicates.tsv", sep="\t", index=False)
 REPS["cell"] = [f"n={n} · {cv:.1%}" if n > 1 else f"n=1 · {human(mean)}"
                 for n, cv, mean in zip(REPS["n"], REPS["cv"], REPS["mean"])]
-grid = REPS.pivot(index=["section", "tool", "task", "cache"], columns="dataset", values="cell")
-grid = grid.reindex(list(dict.fromkeys(zip(REPS["section"], REPS["tool"], REPS["task"], REPS["cache"]))))
+grid = REPS.pivot(index=["section", "tool", "task"], columns="dataset", values="cell")
+grid = grid.reindex(list(dict.fromkeys(zip(REPS["section"], REPS["tool"], REPS["task"]))))
 show(grid.reindex(columns=[d for d in DATASETS if d in grid.columns]).reset_index())
 ```
 
@@ -1117,15 +1086,15 @@ three = REPS[REPS["n"] >= 3]
 once = REPS[REPS["n"] == 1]
 worst = three.loc[three["cv"].idxmax()] if len(three) else None
 said = [
-    f"{len(three)} of {len(REPS)} command × dataset × cache combinations ran at least 3 times"
+    f"{len(three)} of {len(REPS)} command × dataset combinations ran at least 3 times"
     + (f"; across them the coefficient of variation has a median of **{three['cv'].median():.1%}**"
-       f" and a maximum of **{worst['cv']:.1%}** (`{command(worst['section'], worst['tool'], worst['task'])}`,"
-       f" {worst['cache']}, {worst['dataset']})." if worst is not None else ".")
+       f" and a maximum of **{worst['cv']:.1%}** (`{command(worst['section'], worst['tool'], worst['task'])}`"
+       f" on {worst['dataset']})." if worst is not None else ".")
 ]
 if len(once):
     said.append(
         f"{len(once)} ran once{f', each for over {human(LONG)}' if (once['mean'] > LONG).all() else ''}: "
-        + "; ".join(f"`{command(r.section, r.tool, r.task)}` ({r.cache}) on {r.dataset}, {human(r.mean)}"
+        + "; ".join(f"`{command(r.section, r.tool, r.task)}` on {r.dataset}, {human(r.mean)}"
                     for r in once.itertuples())
         + "."
     )
@@ -1142,21 +1111,23 @@ Filled in from this render; the sentences follow the manuscript draft.
 #| label: manuscript
 #| echo: false
 #| output: asis
-def mean_wall(section, ds, tool, task, cache="warm"):
+def mean_wall(section, ds, tool, task):
     """Mean wall clock of the runs that finished, and how the command ended."""
-    r = runs(t, section=section, dataset=ds, tool=tool, task=task, cache=cache)
+    r = runs(t, section=section, dataset=ds, tool=tool, task=task)
     ok = r[r.status == "ok"]["wall_s"]
     if len(ok):
         return ok.mean(), "ok"
     for status in ("timeout", "oom"):
         if (r.status == status).any():
             return r.loc[r.status == status, "wall_s"].max(), status
+    if (r.status == "skipped").any():
+        return None, "skipped"
     return None, None
 
 
 def peak(section, ds, tool, task):
-    """The largest peak memory of a command's warm runs (GB)."""
-    r = runs(t, section=section, dataset=ds, tool=tool, task=task, cache="warm")
+    """The largest peak memory of a command's runs (GB)."""
+    r = runs(t, section=section, dataset=ds, tool=tool, task=task)
     return r["peak_mb"].max() / 1024
 
 
@@ -1173,10 +1144,10 @@ def series(values):
     return (", ".join(parts[:-1]) + " and " if len(parts) > 1 else "") + parts[-1] + " contigs"
 
 
-def walls(section, tool, task, cache="warm"):
+def walls(section, tool, task):
     out = {}
     for ds in DATASETS:
-        s, ended = mean_wall(section, ds, tool, task, cache)
+        s, ended = mean_wall(section, ds, tool, task)
         if s is not None:
             out[ds] = {"timeout": "> ", "oom": "out of memory after "}.get(ended, "") + human(s)
     return out
@@ -1210,13 +1181,16 @@ for ds in DATASETS:
                f"a measured lower bound, not an extrapolation")
     elif ended == "oom":
         why = f"ran out of memory ({RAM:.0f} GB) after {human(c)}"
+    elif ended == "skipped":
+        reason = runs(t, section="create", dataset=ds, tool="cooler", task="cload pairs")["command"].iloc[-1]
+        why = f"was not run in this render: {reason}"
     else:
         continue
     lines.append(
         f"* At **{CONTIGS[ds]:,} contigs** ({SUMMARY[ds]['genomes']:,} genomes), `cooler cload pairs` {why}; "
         f"metacooler took {human(m)} (peak {peak('create', ds, 'metacooler', 'create pairs'):.1f} GB)."
     )
-peaks = runs(t, dataset=last, cache="warm")
+peaks = runs(t, dataset=last)
 peaks = peaks[peaks["status"] == "ok"]
 if len(peaks):
     top = {tool: r.loc[r["peak_mb"].idxmax()] for tool, r in peaks.groupby("tool")}
@@ -1238,17 +1212,16 @@ if len(store):
     )
 if walls("query", "cooler", "genome"):
     share = SHARE.get((last, "genome"))
-    warm_fold, cold_fold = fold("query", "genome", "genome", last), fold("query", "genome", "genome", last, "cold")
+    genome_fold = fold("query", "genome", "genome", last)
     lines.append(
         "* With cooler's command line, extracting a single MAG from a genome-agnostic .cool file is a "
         "linear scan of every pixel (`cooler dump --join`, filtered against the binning table): "
-        f"{series(walls('query', 'cooler', 'genome'))} (warm). `metacooler dump -r <MAG>` takes "
-        f"{series(walls('query', 'metacooler', 'genome'))} warm, and "
-        f"{series(walls('query', 'metacooler', 'genome', 'cold'))} cold."
-        + (f" On the simulated {CONTIGS[last]:,}-contig map that is {fold_text(warm_fold)} warm and "
-           f"{fold_text(cold_fold)} cold. cooler's scan reads every pixel of the map, metacooler only the "
-           f"MAG's ({share:.2%} of them here), so the fold depends on how a map's pixels split between its "
-           f"genomes: here the simulated community sets that, not a real sample." if warm_fold and share else "")
+        f"{series(walls('query', 'cooler', 'genome'))}. `metacooler dump -r <MAG>` takes "
+        f"{series(walls('query', 'metacooler', 'genome'))}."
+        + (f" On the simulated {CONTIGS[last]:,}-contig map that is {fold_text(genome_fold)}. cooler's scan "
+           f"reads every pixel of the map, metacooler only the MAG's ({share:.2%} of them here), so the fold "
+           f"depends on how a map's pixels split between its genomes: here the simulated community sets "
+           f"that, not a real sample." if genome_fold and genome_fold[0] and share else "")
     )
 agg, _ = mean_wall("aggregate", last, "metacooler", "genome-level .cool")
 if agg is not None:
@@ -1285,7 +1258,7 @@ t = timings()
 problems = t[t["status"] == "error"]
 if len(problems):
     display(Markdown(f"**{len(problems)} run(s) failed** — see their logs in `_work/logs/`:"))
-    display(show(problems[["section", "dataset", "tool", "task", "cache", "command"]]))
+    display(show(problems[["section", "dataset", "tool", "task", "command"]]))
 
 
 def link(path):
@@ -1304,9 +1277,9 @@ show(pd.DataFrame({
 
 | file | what |
 |---|---|
-| `timings.tsv` | every timed run: command, cache state, status, wall/CPU seconds, peak memory, output size, versions, machine |
+| `timings.tsv` | every timed run: command, status, wall/CPU seconds, peak memory, output size, versions, machine |
 | `datasets.tsv` | the datasets table above |
 | `storage.tsv` | the size on disk of each way to keep the map, per dataset |
 | `speedups.tsv` | the fold table above |
-| `replicates.tsv` | per command, dataset and cache state: runs, mean, sd, fastest, slowest, coefficient of variation |
+| `replicates.tsv` | per command and dataset: runs, mean, sd, fastest, slowest, coefficient of variation |
 | `figures/` | every figure, PNG and SVG |
