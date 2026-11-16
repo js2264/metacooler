@@ -26,6 +26,7 @@ __all__ = [
     "collect",
     # transforms and readers
     "reassign",
+    "annotate",
     "extract",
     "flatten",
     "merge",
@@ -86,6 +87,10 @@ def __getattr__(name: str) -> object:
         from metacooler.io.reassign import reassign as _reassign
 
         return _reassign
+    if name == "annotate":
+        from metacooler.io.annotate import annotate as _annotate
+
+        return _annotate
     if name == "from_cool":
         from metacooler.io.create import from_cool as _from_cool
 

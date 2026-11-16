@@ -7,9 +7,10 @@ from pathlib import Path
 import rich_click as click
 
 from metacooler.cli._options import (
-    CONTIGS_FORMAT_HELP,
+    contigs_format_option,
     filter_option,
     force_option,
+    genomes_format_option,
     quiet_option,
     verbose_option,
 )
@@ -21,8 +22,8 @@ def shared_options(f):
     """Apply options shared by all ``create`` subcommands.
 
     Adds: ``-o/--output``, ``--contigs``, ``--contigs-format``, ``--genomes``,
-    ``--filter``, ``--metadata``, ``--qc/--no-qc``, ``--qc-threshold``,
-    ``-f/--force``, ``-v/--verbose``, ``-q/--quiet``.
+    ``--genomes-format``, ``--filter``, ``--metadata``, ``--qc/--no-qc``,
+    ``--qc-threshold``, ``-f/--force``, ``-v/--verbose``, ``-q/--quiet``.
 
     The filter/force/verbose/quiet options come from
     :mod:`metacooler.cli._options` so they stay identical to every other
@@ -39,25 +40,26 @@ def shared_options(f):
         click.option(
             "--contigs",
             type=click.Path(exists=True, path_type=Path),
-            required=True,
-            help="Contig-to-genome assignment table. The expected layout depends on --contigs-format.",
+            default=None,
+            help=(
+                "Contig-to-genome assignment table; which columns hold the "
+                "names is set by [cyan]--contigs-format[/cyan]. Leave it out to "
+                "build a map with no binning yet: every contig in "
+                "__unbinned__, to be binned later with [cyan]reassign[/cyan]."
+            ),
         ),
-        click.option(
-            "--contigs-format",
-            type=str,
-            default="contigs",
-            show_default=False,
-            help=CONTIGS_FORMAT_HELP,
-        ),
+        contigs_format_option,
         click.option(
             "--genomes",
             "genomes_table",
             type=click.Path(exists=True, path_type=Path),
             help=(
-                "Optional genomes metadata table with header. "
-                "First column must be 'genome_name'; any further columns are stored in the /genomes table."
+                "Optional genomes metadata table. Its genome-name column (see "
+                "[cyan]--genomes-format[/cyan]) is matched against the genomes; "
+                "every other column is stored in the /genomes table."
             ),
         ),
+        genomes_format_option,
         filter_option,
         click.option(
             "--metadata",

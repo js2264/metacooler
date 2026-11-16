@@ -66,6 +66,7 @@ class TestInit:
             "collect",
             # transforms and readers
             "reassign",
+            "annotate",
             "extract",
             "flatten",
             "merge",

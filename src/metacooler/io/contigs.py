@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
-from typing import Literal
 
 import pandas as pd
 
 from metacooler.io._utils import read_user_table, rename_key_columns
+from metacooler.io.colspec import (
+    ASSIGNMENT_KEYS,
+    CONTIGS_FORMAT_ALIASES,
+    CONTIGS_FORMAT_DEFAULT,
+    parse_column_spec,
+    resolve_column_spec,
+)
 
 logger = logging.getLogger("metacooler")
 
@@ -65,132 +70,68 @@ def _name_mapping(df: pd.DataFrame) -> dict[str, str]:
 
 def parse_contigs_table(
     path: str | Path,
-    fmt: Literal["contig_genome", "metator", "contigs"] | str = "contigs",
+    fmt: str = CONTIGS_FORMAT_DEFAULT,
 ) -> tuple[dict[str, str], pd.DataFrame]:
     """Parse a contig-to-genome assignment table.
 
     Args:
         path: Path to the contig table file.
-        fmt: Format of the table.
-            - ``contigs``: TSV with at least ``contig_name`` and ``genome_name``
-                            columns. Additional columns are preserved and returned in the
-                            DataFrame. Expects a header.
-                        - ``contig_genome``: Two-column TSV ``contig_name<TAB>genome_name``.
-                            Expects no header.
-            - ``metator``: MetaTOR ``contig_data_final.txt`` with at least
-                            ``Name`` and ``Final_bin`` columns. Expects a header.
-                        - ``<i>,<j>``: Use column ``i`` for contig names and column ``j``
-                            for genome names (1-based indexing). Expects a header.
-                        - ``<i>,<j>,noheader``: Same as above but parses the file as having
-                            no header.
+        fmt: Which columns hold the contig and the genome names, in the grammar
+            of :mod:`metacooler.io.colspec`: ``CONTIG,GENOME[,noheader]``, each
+            column a 1-based position or a header name -- e.g.
+            ``"Name,Final_bin"``, ``"2,5"`` or ``"1,2,noheader"`` -- or one of
+            :data:`~metacooler.io.colspec.CONTIGS_FORMAT_ALIASES`.  The default,
+            ``contigs``, is ``contig_name,genome_name``: looked up by name, so
+            a table given without its format is refused rather than misread.
+            ``NA`` in the genome's place (``"1,NA,noheader"``,
+            ``"contig_name,NA"``) says the table has no genome column: every
+            contig it lists is assigned to ``__unbinned__``.
 
     Returns:
-        Tuple of (mapping ``contig_name → genome_name``, full DataFrame with
-        all columns renamed to ``contig_name`` / ``genome_id`` internally).
-        Contigs not present in the table are omitted from the
-        mapping (the caller decides whether to assign them to ``__unbinned__``
-        or drop them).
+        Tuple of (mapping ``contig_name -> genome_name``, full DataFrame with
+        the two key columns relabelled ``contig_name`` / ``genome_id`` in
+        place, every other column kept -- a headerless table's as ``colN``).
+        Contigs not present in the table are omitted from the mapping (the
+        caller decides whether to assign them to ``__unbinned__`` or drop
+        them).
 
-    Note:
-        The ``contigs`` format expects input columns named ``contig_name`` and
-        ``genome_name`` (as validated on read); ``genome_name`` is renamed
-        internally to ``genome_id`` in the returned DataFrame.
+    Raises:
+        FileNotFoundError: If *path* does not exist.
+        ValueError: If *fmt* is malformed, the table is empty or misaligned,
+            or the columns *fmt* names are not in it.
     """
+    spec = parse_column_spec(
+        fmt,
+        keys=ASSIGNMENT_KEYS,
+        aliases=CONTIGS_FORMAT_ALIASES,
+        option="--contigs-format",
+    )
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Contig table not found: {path}")
     _check_not_empty(path, "Contig table")
 
-    if fmt == "contigs":
-        df = read_user_table(path, kind="Contig table")
-        if df.shape[1] < 2:
-            raise ValueError(
-                "contigs format requires at least 2 columns: "
-                "column 1 (contig_name) and column 2 (genome_name)."
-            )
-        if df.columns[0] != "contig_name":
-            raise ValueError(
-                f"contigs format expects first column to be 'contig_name', "
-                f"got '{df.columns[0]}'."
-            )
-        if df.columns[1] != "genome_name":
-            raise ValueError(
-                f"contigs format expects second column to be 'genome_name', "
-                f"got '{df.columns[1]}'."
-            )
-        df = rename_key_columns(
-            df, {0: "contig_name", 1: "genome_id"}, kind="Contig table"
-        )
-        _warn_duplicate_contigs(df)
-        mapping = _name_mapping(df)
-        return mapping, df
-
-    if fmt == "contig_genome":
-        # Read WITHOUT a short ``names=`` list: passing fewer names than data
-        # columns makes pandas silently promote the first column to the index,
-        # shifting every field left by one and destroying the mapping.  Read all
-        # columns, require at least two, and keep the first two.
-        df = read_user_table(path, kind="Contig table", header=False)
-        if df.shape[1] < 2:
-            raise ValueError(
-                "contig_genome format requires at least 2 tab-separated columns "
-                f"(contig_name, genome_name); got {df.shape[1]}."
-            )
-        df = df.iloc[:, :2]
-        df.columns = ["contig_name", "genome_id"]
-        _warn_duplicate_contigs(df)
-        mapping = _name_mapping(df)
-        return mapping, df
-
-    if fmt == "metator":
-        df = read_user_table(path, kind="Contig table")
-        if "Name" not in df.columns or "Final_bin" not in df.columns:
-            raise ValueError("metator format requires 'Name' and 'Final_bin' columns")
-        columns = list(df.columns)
-        df = rename_key_columns(
-            df,
-            {
-                columns.index("Name"): "contig_name",
-                columns.index("Final_bin"): "genome_id",
-            },
-            kind="Contig table",
-        )
-        _warn_duplicate_contigs(df)
-        mapping = _name_mapping(df)
-        return mapping, df
-
-    colspec_match = re.fullmatch(r"\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(noheader))?\s*", fmt)
-    if colspec_match:
-        contig_col = int(colspec_match.group(1))
-        genome_col = int(colspec_match.group(2))
-        noheader = colspec_match.group(3) is not None
-
-        if contig_col < 1 or genome_col < 1:
-            raise ValueError("Column indices in contigs format must be >= 1")
-        if contig_col == genome_col:
-            raise ValueError(
-                f"contigs format column spec {fmt!r} points the contig-name and "
-                f"genome-name columns at the same column ({contig_col}). "
-                "Give two different 1-based column indices, e.g. '1,2'."
-            )
-
-        df = read_user_table(path, kind="Contig table", header=not noheader)
-
-        required_cols = max(contig_col, genome_col)
-        if df.shape[1] < required_cols:
-            raise ValueError(
-                "contigs format column spec requires at least "
-                f"{required_cols} columns in the table, got {df.shape[1]}."
-            )
-
-        # Positional, never by name: see rename_key_columns.
-        df = rename_key_columns(
-            df,
-            {contig_col - 1: "contig_name", genome_col - 1: "genome_id"},
-            kind="Contig table",
-        )
-        _warn_duplicate_contigs(df)
-        mapping = _name_mapping(df)
-        return mapping, df
-
-    raise ValueError(f"Unknown contig table format: {fmt!r}")
+    df = read_user_table(path, kind="Contig table", header=spec.header)
+    contig_col, genome_col = resolve_column_spec(
+        spec,
+        list(df.columns),
+        kind="Contig table",
+        path=path,
+        keys=ASSIGNMENT_KEYS,
+        hint=f", or an alias: {', '.join(CONTIGS_FORMAT_ALIASES)}",
+    )
+    assert contig_col is not None  # parse_column_spec refuses NA in its place
+    if genome_col is None:
+        # NA: the table assigns no genome.  Give it a genome column that says
+        # so on every row, and the rest of the pipeline reads an ordinary
+        # assignment table; a column of the table's own that happens to be
+        # called genome_id is moved aside by rename_key_columns, as ever.
+        genome_col = df.shape[1]
+        df = df.copy()
+        df.insert(genome_col, "__no_genome__", "__unbinned__", allow_duplicates=True)
+    # Positional, never by name: see rename_key_columns.
+    df = rename_key_columns(
+        df, {contig_col: "contig_name", genome_col: "genome_id"}, kind="Contig table"
+    )
+    _warn_duplicate_contigs(df)
+    return _name_mapping(df), df

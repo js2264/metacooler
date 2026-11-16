@@ -193,15 +193,16 @@ click.rich_click.OPTIONS_TABLE_COLUMN_TYPES = [
 click.rich_click.COMMAND_GROUPS = {
     "metacooler": [
         {
-            "name": "Create and edit",
-            "commands": [
-                "create",
-                "collect",
-                "reassign",
-                "merge",
-                "binnify",
-                "zoomify",
-            ],
+            "name": "Create",
+            "commands": ["create", "collect"],
+        },
+        {
+            "name": "Edit an existing map",
+            "commands": ["reassign", "annotate", "metadata"],
+        },
+        {
+            "name": "Combine and re-bin",
+            "commands": ["merge", "binnify", "zoomify"],
         },
         {
             "name": "Extract and view",
@@ -217,7 +218,7 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Inspect",
-            "commands": ["info", "qc", "tree", "metadata", "attrs", "check"],
+            "commands": ["info", "qc", "tree", "attrs", "check"],
         },
         {
             "name": "Manage collections",
@@ -245,6 +246,7 @@ def cli() -> None:
 # Import subcommands so they register
 from metacooler.cli import (  # noqa: E402, F401
     cmd_aggregate,
+    cmd_annotate,
     cmd_attrs,
     cmd_binnify,
     cmd_check,

@@ -93,12 +93,16 @@ Two modes:
 
 ### Contig-to-genome table
 
-Four formats are supported via `--contigs-format`:
+`--contigs-format` says which two columns of the table hold the contig and the
+genome names: `CONTIG,GENOME`, each a **1-based position** or a **header
+name**, plus `,noheader` when the table has no header line. Every other column
+is stored in the `/contigs` table. Aliases cover the tables of common binners
+(see [Contig and genome columns](../cli.md#contigs-format) for the full list).
 
 === "contigs (default)"
 
-    TSV with header. First column must be `contig_name`, second `genome_name`.
-    Additional columns are stored in the `/contigs` table.
+    `contig_name,genome_name`: a TSV whose header names those two columns,
+    wherever they are.
 
     ```
     contig_name  genome_name  gc_content  coverage
@@ -108,37 +112,22 @@ Four formats are supported via `--contigs-format`:
     ```
 
     ```bash
-    --contigs table.tsv --contigs-format contigs
+    --contigs table.tsv
     ```
 
-=== "contig_genome"
+=== "By header name"
 
-    Two-column TSV, **no header**. Contig name in column 1, genome name in
-    column 2.
-
-    ```
-    contig_0_0  MAG_01
-    contig_0_1  MAG_01
-    contig_1_0  MAG_02
-    ```
+    Any table, by the names of its two columns — here MetaTOR's
+    `contig_data_final.txt` (the `metator` alias says the same):
 
     ```bash
-    --contigs map.tsv --contigs-format contig_genome
+    --contigs contig_data_final.txt --contigs-format Name,Final_bin
     ```
 
-=== "metator"
+=== "By position"
 
-    MetaTOR `contig_data_final.txt` format. Expects `Name` and `Final_bin`
-    columns; all other columns are ignored.
-
-    ```bash
-    --contigs contig_data_final.txt --contigs-format metator
-    ```
-
-=== "Column index (I,J)"
-
-    Use column indices (1-based) when your table does not match the above
-    layouts. Append `,noheader` if the file has no header row.
+    Column positions (1-based), for a table whose header you would rather not
+    spell — or that has none:
 
     ```bash
     # Column 1 = contig, column 5 = genome, with header
@@ -148,10 +137,36 @@ Four formats are supported via `--contigs-format`:
     --contigs-format "2,3,noheader"
     ```
 
+=== "No binning yet"
+
+    Leave `--contigs` out: every contig lands in `__unbinned__`, and the map is
+    the cooler plus the genome layer. Bin it later with
+    [`metacooler reassign`](../cli.md#reassign). To store a table's columns
+    meanwhile, give it with `NA` as the genome column:
+
+    ```bash
+    --contigs depth.tsv --contigs-format contig_name,NA
+    ```
+
+=== "Binner aliases"
+
+    ```bash
+    --contigs contig_data_final.txt     --contigs-format metator  # MetaTOR
+    --contigs run_DASTool_contigs2bin.tsv --contigs-format dastool  # DAS Tool
+    --contigs final_contig_to_bin.tsv   --contigs-format binette  # Binette
+    --contigs contig_bins.tsv           --contigs-format semibin  # SemiBin2
+    --contigs vae_clusters_unsplit.tsv  --contigs-format vamb     # VAMB
+    --contigs map.tsv                   --contigs-format contig_genome  # 2 columns, no header
+    ```
+
 ### Genomes metadata table (optional)
 
-A TSV with header. First column must be `genome_name`. Any additional columns
-are stored in the `/genomes` table.
+A TSV whose genome-name column is the one `--genomes-format` names (by
+default the column called `genome_name`, wherever it is) — a 1-based position
+or a header name, plus `,noheader` when the table has no header line. Any
+additional columns are stored in the `/genomes` table. A QC tool's report works
+as it is: `--genomes-format Name` for CheckM2's `quality_report.tsv`,
+`--genomes-format user_genome` for GTDB-Tk's summary.
 
 ```
 genome_name  phylum         completeness  contamination  quality
@@ -162,6 +177,10 @@ MAG_02       Bacteroidetes  0.74          0.011          medium
 ```bash
 --genomes mag_quality.tsv
 ```
+
+Metadata that only exists once the map does — a QC run on the bins, coverage
+from another library — can be added later with
+[`metacooler annotate`](../cli.md#annotate), which reads these same tables.
 
 !!! important "The contigs table decides which genomes exist"
 
@@ -207,11 +226,13 @@ sequencing:
 --metadata sample_meta.yaml
 ```
 
-!!! warning "`commands` is reserved"
+!!! warning "Keys metacooler writes itself are reserved"
     A `--metadata` file may **not** contain a top-level `commands` key — that
     name holds metacooler's own provenance record (the exact command line used
-    to produce each file). Supplying it is an error; the file used to overwrite
-    the provenance silently.
+    to produce each file) — nor `qc`, `reassign` or `annotate`, which hold the
+    contact-quality block and those commands' histories. Supplying one is an
+    error; the file used to overwrite the provenance silently. `metacooler
+    metadata add` and `remove` refuse them too.
 
 ## Contig ordering
 
@@ -246,7 +267,9 @@ the input row order exactly; the default regroups contigs by genome.
 ## Handling unassigned contigs
 
 By default, contigs absent from the contig table are assigned to a special
-`__unbinned__` genome. Use `--drop-unassigned` to exclude them entirely:
+`__unbinned__` genome, and so are contigs whose genome reads `NA`, `N/A`,
+`nan`, `ND`, `n/d`, `-1` (SemiBin2's label) or is empty. Use
+`--drop-unassigned` to exclude them entirely:
 
 ```bash
 metacooler create pairs ... --drop-unassigned

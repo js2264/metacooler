@@ -54,7 +54,7 @@ One row per genome / MAG.
 | `n_contigs` | `int32` | Number of contigs assigned to this genome. |
 | `n_bins` | `int64` | Number of bins across all contigs of this genome. |
 | `qc_*` | `int64` / `float64` | Optional per-genome contact-quality columns (see [Contact-quality block](#qc-block)). Present when the file was created with `--qc` (the default) or annotated with `metacooler qc --store`. |
-| *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`). Stored as fixed-length bytes or numeric arrays. |
+| *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`), at creation or later with `metacooler annotate`. Stored as fixed-length bytes or numeric arrays. |
 
 The row *set* is derived from the contig-to-genome assignments: one row per
 distinct genome name in `/contigs`. A `--genomes` metadata table only supplies
@@ -77,7 +77,7 @@ link `/chroms → /contigs` makes it transparent to the cooler ecosystem.
 | `name` | `S<n>` (fixed bytes) | Contig name, unique within the file, ASCII only (see [Names must be ASCII](#names-must-be-ascii)). |
 | `length` | `int32` | Contig length in bp. |
 | `genome_id` | `int32` | Zero-based index into `/genomes`. |
-| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`). ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. |
+| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`), at creation or later with `metacooler annotate`. ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. |
 
 Row order is determined by the `--contig-order` strategy chosen at creation time
 and stored in the `contig-ordering` attribute.

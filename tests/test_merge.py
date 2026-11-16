@@ -74,3 +74,77 @@ class TestMerge:
         assert merged_sum == 2 * orig_sum, (
             f"Expected {2 * orig_sum} total counts but got {merged_sum}"
         )
+
+
+class TestMetadataColumns:
+    """Only identity columns decide whether two maps merge (annotate's knock-on)."""
+
+    def _copy(self, src, dst):
+        dst.write_bytes(src.read_bytes())
+        return dst
+
+    def test_an_annotated_replicate_still_merges(
+        self, tiny_metacooler, tmp_path, caplog
+    ):
+        from metacooler.api import MetaCooler
+        from metacooler.io.annotate import annotate
+
+        rep = self._copy(tiny_metacooler, tmp_path / "rep.metacool")
+        table = tmp_path / "g.tsv"
+        table.write_text("genome_name\tcompleteness\nMAG_1\t0.9\nMAG_2\t0.7\n")
+        annotate(rep, inplace=True, genomes_table=table)
+        out = tmp_path / "merged.metacool"
+        with caplog.at_level("WARNING", logger="metacooler"):
+            merge([tiny_metacooler, rep], out)
+        assert "genomes.completeness (only here)" in caplog.text
+        # The first input's metadata is the one kept.
+        assert "completeness" not in MetaCooler(out).genomes.columns
+
+        out2 = tmp_path / "merged2.metacool"
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="metacooler"):
+            merge([rep, tiny_metacooler], out2)
+        assert "genomes.completeness (absent here)" in caplog.text
+        assert "completeness" in MetaCooler(out2).genomes.columns
+
+    def test_differing_values_are_reported(self, tiny_metacooler, tmp_path, caplog):
+        from metacooler.io.annotate import annotate
+
+        a = self._copy(tiny_metacooler, tmp_path / "a.metacool")
+        b = self._copy(tiny_metacooler, tmp_path / "b.metacool")
+        for path, value in ((a, "0.9"), (b, "0.8")):
+            table = tmp_path / f"{path.stem}.tsv"
+            table.write_text(f"genome_name\tcompleteness\nMAG_1\t{value}\n")
+            annotate(path, inplace=True, genomes_table=table)
+        with caplog.at_level("WARNING", logger="metacooler"):
+            merge([a, b], tmp_path / "m.metacool")
+        assert "genomes.completeness (other values)" in caplog.text
+
+    def test_identity_hash_ignores_integer_width(self, tiny_metacooler, tmp_path):
+        import h5py
+        import numpy as np
+
+        from metacooler.io.merge import _hash_group
+
+        wide = self._copy(tiny_metacooler, tmp_path / "wide.metacool")
+        with h5py.File(wide, "a") as f:
+            lengths = f["contigs/length"][:]
+            del f["contigs/length"]
+            f["contigs"].create_dataset("length", data=lengths.astype(np.int64))
+        with h5py.File(tiny_metacooler, "r") as f0, h5py.File(wide, "r") as f1:
+            assert f0["contigs/length"].dtype != f1["contigs/length"].dtype
+            assert _hash_group(f0, "contigs") == _hash_group(f1, "contigs")
+
+    def test_a_different_assignment_is_still_refused(self, tiny_metacooler, tmp_path):
+        from metacooler.io.reassign import reassign
+
+        moved = tmp_path / "moved.metacool"
+        reassign(
+            tiny_metacooler,
+            {"contig_A": "MAG_2"},
+            moved,
+            layout="keep",
+            qc=False,
+        )
+        with pytest.raises(ValueError, match="Contigs table mismatch"):
+            merge([tiny_metacooler, moved], tmp_path / "m.metacool")

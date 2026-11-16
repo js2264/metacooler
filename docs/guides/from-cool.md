@@ -47,8 +47,8 @@ preserves row order exactly; every other ordering regroups contigs by genome.
 Note there is no `fasta` ordering here (and no `--fasta` option): contig lengths
 and order come from the input cool file's own bins table.
 
-A `--metadata` file may not contain a `commands` key — it is reserved for
-metacooler's provenance record.
+A `--metadata` file may not contain a key metacooler writes itself:
+`commands` (its provenance record), `qc`, `reassign` or `annotate`.
 
 !!! note "Pixel remapping"
     When the output contig order differs from the input cooler's, metacooler

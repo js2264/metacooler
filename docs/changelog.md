@@ -4,6 +4,19 @@
 
 ### Breaking
 
+- **The default `--contigs-format` (`contigs`) finds `contig_name` and
+  `genome_name` by name, wherever they are**, instead of requiring them to be
+  columns 1 and 2; likewise `--genomes`' `genome_name` and `collect --contigs`'
+  `contig_name`.
+- **`--contigs-format contig_genome` keeps a table's extra columns**, as `col3`,
+  `col4`, …, like every other headerless spec; it used to drop them.
+- **A genome named `-1` in a contig table means `__unbinned__`**, as `NA` and
+  `ND` already did: it is SemiBin2's label for unbinned contigs.
+- **`merge` compares only what makes two maps the same map** — contig names and
+  lengths, the contig-to-genome assignment, genome sizes. Metadata columns may
+  now differ between inputs: the output keeps the first input's, and each
+  difference is a warning. Integer width no longer matters either (`int32`
+  lengths from `create cool` against `int64` ones).
 - **`show` takes a positional input path.** The required `-f/--file` option is
   gone; `metacooler show FILE.metacool -o out.png` replaces
   `metacooler show -f FILE.metacool -o out.png`. `-f` now means `--force`, as in
@@ -123,6 +136,32 @@
 
 ### Added
 
+- **`metacooler annotate`** adds, replaces or drops metadata columns of
+  `/genomes` and `/contigs` in an existing map (API `metacooler.annotate`):
+  CheckM2, GTDB-Tk or depth tables that arrive after the map was built. Rows
+  are matched by name; the assignment, bins and pixels are never touched, so it
+  is cheap enough to run `--inplace`. Columns get the names, values and types
+  the same table would have given `create`. A changed column needs
+  `--replace` (`--missing keep|na` chooses between a patch and an authoritative
+  table); derived columns cannot be dropped or replaced; a contig table's
+  `genome_name` is checked, never applied; non-ASCII `/contigs` values are
+  refused. A bare `.mmetacool` path annotates every entry.
+- **One grammar for table columns.** `--contigs-format CONTIG,GENOME[,noheader]`
+  takes 1-based positions or header names (`Name,Final_bin`, `2,5`), and
+  aliases for common binners: `metator`, `dastool`, `binette`, `semibin`,
+  `vamb` (besides `contigs` and `contig_genome`). `collect` gets a
+  `--contigs-format` of its own, for its per-contig metadata table (see its
+  section).
+- **A map with no binning yet**: `--contigs` is optional on `create pairs` and
+  `create cool`. Without it the map is the cooler plus the genome layer, every
+  contig in `__unbinned__`, ready for `reassign` (`create cool --contig-order
+  cool` then keeps the cool file's contigs, bins and pixels unchanged). To keep
+  a table's other columns as contig metadata meanwhile, `--contigs-format
+  CONTIG,NA` says the table has no genome column; with `reassign`, the same
+  spec unbins the contigs the table lists.
+- **`--genomes-format`** on `create pairs`, `create cool`, `collect`, `reassign`
+  and `annotate`: which column of `--genomes` holds the genome names, so a
+  CheckM2 (`Name`) or GTDB-Tk (`user_genome`) report needs no editing.
 - **`create pairs` reads several pairs files in one pass** — one per Hi-C
   library of the same assembly: repeat `--pairs` (not comma-split, since a path
   may contain a comma), or pass a list as `from_pairs(pairs=[...])`; a single
@@ -307,6 +346,12 @@
 
 ### Fixed
 
+- **`metadata add` and `metadata remove` refuse the keys metacooler writes
+  itself** — `commands`, `qc`, and the `reassign` and `annotate` histories.
+  `metadata add -k commands --value '[]'` wiped the provenance record, and
+  `metadata remove -k commands` deleted it, both exiting 0, although a
+  `--metadata` file was already refused `commands` and `qc`. `--metadata` files
+  and `metadata load` now refuse the two history keys as well.
 - **`create pairs --sort-strategy external` works on large inputs with cooler
   < 0.12.** Its pixel chunks reached cooler's unordered writer unsorted, and
   cooler before 0.12 indexes each chunk as if it were sorted. Once the merge
@@ -394,6 +439,11 @@
 
 ### Documentation
 
+- **The CLI reference gives editing its own section.** "Create and edit" is
+  split into *Create* (`create`, `collect`), *Edit an existing map*
+  (`reassign`, `annotate` and `metadata`, moved from *Inspect*, with a table of
+  which one to use) and *Combine and re-bin* (`merge`, `binnify`, `zoomify`);
+  `metacooler --help` groups the commands the same way.
 - **The documentation site is restyled after doc.chromosomix.app.** The
   zensical theme keeps its layout but takes a new header, an in-column page
   footer with previous/next cards (also reached with the ← / → keys), a

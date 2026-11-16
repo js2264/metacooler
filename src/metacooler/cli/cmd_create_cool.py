@@ -7,7 +7,10 @@ from typing import Literal, cast
 
 import rich_click as click
 
-from metacooler.cli._options import check_output
+from metacooler.cli._options import (
+    check_output,
+    refuse_contigs_format_without_contigs,
+)
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
 
@@ -69,9 +72,10 @@ from metacooler.cli.cmd_create import create, shared_options
 def cmd_create_cool(
     cool_path: Path,
     output: Path,
-    contigs: Path,
+    contigs: Path | None,
     contigs_format: str,
     genomes_table: Path | None,
+    genomes_format: str,
     contig_order: str,
     assembly_name: str | None,
     drop_unassigned: bool,
@@ -95,6 +99,7 @@ def cmd_create_cool(
     from metacooler.io.create import from_cool
 
     setup_logging(verbose, command_name="metacooler create cool", quiet=quiet)
+    refuse_contigs_format_without_contigs(contigs)
 
     check_output(
         output,
@@ -121,11 +126,9 @@ def cmd_create_cool(
         cool_uri=cool_path,
         output=output,
         contig_genome_map=contigs,
-        contig_table_format=cast(
-            Literal["contigs", "contig_genome", "metator", "I,J"],
-            contigs_format,
-        ),
+        contig_table_format=contigs_format,
         genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
         contig_ordering=cast(
             Literal["genome-then-length", "genome-then-alpha", "cool", "alpha"],
             contig_order,
