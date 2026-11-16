@@ -614,3 +614,57 @@ def test_a_collected_map_takes_input_contig_names(tmp_path):
     shared = write(tmp_path / "s.tsv", "contig_name\tdepth\nchromosome\t1\n")
     with pytest.raises(ValueError, match="more than one genome"):
         annotate(out, inplace=True, contigs_table=shared)
+
+
+class TestEdges:
+    def test_an_empty_collection(self, tiny_mmetacool):
+        with h5py.File(tiny_mmetacool, "a") as f:
+            for entry in list(f["entries"]):
+                del f["entries"][entry]
+        with pytest.raises(ValueError, match="collection with no entry"):
+            annotate(tiny_mmetacool, inplace=True, drop=["genomes.x"])
+
+    def test_text_conflict_names_the_emptied_value(self, mc, checkm, tmp_path):
+        annotate(mc, inplace=True, genomes_table=checkm, genomes_table_format="Name")
+        patch = write(tmp_path / "p.tsv", "Name\tlineage\nMAG_1\tBacteroidota\n")
+        with pytest.raises(ValueError, match="'Bacillota' -> \\(empty\\)"):
+            annotate(
+                mc,
+                inplace=True,
+                genomes_table=patch,
+                genomes_table_format="Name",
+                missing="na",
+            )
+
+    def test_a_type_change_alone_is_described(self):
+        from metacooler.io.annotate import _describe_change
+
+        old = np.array(["1", "2"], dtype=object)
+        new = np.array([1, 2])
+        assert _describe_change(old, new, np.array(["a", "b"])) == (
+            "its type would change"
+        )
+
+    def test_group_attributes_survive_a_rewrite(self, mc, checkm):
+        with h5py.File(mc, "a") as f:
+            f["genomes"].attrs["note"] = "kept"
+        annotate(mc, inplace=True, genomes_table=checkm, genomes_table_format="Name")
+        with h5py.File(mc, "r") as f:
+            assert f["genomes"].attrs["note"] == "kept"
+
+    def test_metadata_stored_as_bytes(self, mc, checkm):
+        with h5py.File(mc, "a") as f:
+            meta = json.loads(f.attrs["metadata"])
+            meta["sample"] = "gut_T0"
+            f.attrs["metadata"] = np.bytes_(json.dumps(meta))
+        annotate(
+            mc,
+            inplace=True,
+            genomes_table=checkm,
+            genomes_table_format="Name",
+            metadata={"operator": "me"},
+        )
+        meta = MetaCooler(mc).metadata
+        assert meta["sample"] == "gut_T0"
+        assert meta["operator"] == "me"
+        assert meta["annotate"][-1]["added"][0] == "genomes.Completeness"

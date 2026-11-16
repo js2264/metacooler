@@ -303,3 +303,9 @@ def test_reassign_cli_genomes_format(
     )
     assert result.exit_code == 0, result.output
     assert "Completeness" in MetaCooler(out).genomes.columns
+
+
+def test_spec_callback_passes_none_through():
+    from metacooler.cli._options import _column_spec_callback
+
+    assert _column_spec_callback(("genome",))(None, None, None) is None
