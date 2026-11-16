@@ -491,23 +491,25 @@ metacooler collect *.cool \
 
 ## Edit an existing map { #edit }
 
-Two commands change a map that already exists without re-binning a single
-contact. Both write either an edited copy (`-o`) or the map itself
-(`--inplace`).
+Three commands change a map that already exists, each a different part of it,
+and none re-bins a single contact.
 
 | Command | What it changes | Cost |
 |---------|-----------------|------|
 | [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the QC block, and possibly the contig layout. | Seconds when the contigs keep their places; a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
 | [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds. |
+| [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | Instant. |
 
-The two meet in one place: after a reassignment, the metadata of the genomes
-whose contigs changed still describes their old contigs, and `reassign` names
-them. Refresh those values with `annotate --replace`, from a QC run on the new
-bins.
+`reassign` and `annotate` write either an edited copy (`-o`) or the map itself
+(`--inplace`); `metadata` always edits the map itself.
 
-Two more commands edit a map, each a single part of it: [`qc --store`](#qc)
-writes the contact-quality block and the `qc_*` columns, and
-[`metadata`](#metadata) the free-form `metadata` attribute.
+`reassign` and `annotate` meet in one place: after a reassignment, the metadata
+of the genomes whose contigs changed still describes their old contigs, and
+`reassign` names them. Refresh those values with `annotate --replace`, from a
+QC run on the new bins.
+
+One option of another command also edits a map: [`qc --store`](#qc) writes the
+contact-quality block and the `qc_*` columns back into the map it measured.
 
 ### `reassign` { #reassign }
 
@@ -733,6 +735,33 @@ command line in `commands`, and the tables and the columns added, replaced and
 dropped in `annotate`. A run that changes nothing writes nothing. Since
 [`merge`](#merge) compares only the identity of two maps, an annotated
 replicate still merges with the others.
+
+### `metadata` { #metadata }
+
+Read and edit the free-form `metadata` attribute. Subcommands:
+
+```bash
+metacooler metadata list   gut_T0.metacool                       # list user keys
+metacooler metadata get    gut_T0.metacool -k sample             # one value
+metacooler metadata add    gut_T0.metacool -k enzyme --value DpnII
+metacooler metadata remove gut_T0.metacool -k enzyme
+metacooler metadata load   sample_meta.yaml gut_T0.metacool      # INPUT_FILE first
+```
+
+!!! note "`metadata load` argument order"
+    `load` takes the metadata file **first**, then the target:
+    `metacooler metadata load <metadata.yaml> <file.metacool>`.
+
+!!! warning "Collection roots are rejected"
+    **All five** subcommands require a single map: pass an entry URI
+    (`reps.mmetacool::entries/rep1`), not the collection path. `add`, `get`,
+    `remove`, and `load` used to open the `.mmetacool` root and write there —
+    exiting 0 while the value stayed invisible from every entry.
+
+The `commands` key holds metacooler's own provenance record and cannot be
+overwritten, either by `metadata load` or by a `--metadata` file at creation
+time. It is hidden from `metadata list` but readable with
+`metadata get -k commands`.
 
 ---
 
@@ -1409,33 +1438,6 @@ Print the HDF5 group/dataset hierarchy of a `.metacool` or `.mmetacool` file.
 ```bash
 metacooler tree gut_T0.metacool
 ```
-
-### `metadata` { #metadata }
-
-Read and edit the free-form `metadata` attribute. Subcommands:
-
-```bash
-metacooler metadata list   gut_T0.metacool                       # list user keys
-metacooler metadata get    gut_T0.metacool -k sample             # one value
-metacooler metadata add    gut_T0.metacool -k enzyme --value DpnII
-metacooler metadata remove gut_T0.metacool -k enzyme
-metacooler metadata load   sample_meta.yaml gut_T0.metacool      # INPUT_FILE first
-```
-
-!!! note "`metadata load` argument order"
-    `load` takes the metadata file **first**, then the target:
-    `metacooler metadata load <metadata.yaml> <file.metacool>`.
-
-!!! warning "Collection roots are rejected"
-    **All five** subcommands require a single map: pass an entry URI
-    (`reps.mmetacool::entries/rep1`), not the collection path. `add`, `get`,
-    `remove`, and `load` used to open the `.mmetacool` root and write there —
-    exiting 0 while the value stayed invisible from every entry.
-
-The `commands` key holds metacooler's own provenance record and cannot be
-overwritten, either by `metadata load` or by a `--metadata` file at creation
-time. It is hidden from `metadata list` but readable with
-`metadata get -k commands`.
 
 ### `attrs` { #attrs }
 

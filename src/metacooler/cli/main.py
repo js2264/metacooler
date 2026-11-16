@@ -198,7 +198,7 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Edit an existing map",
-            "commands": ["reassign", "annotate"],
+            "commands": ["reassign", "annotate", "metadata"],
         },
         {
             "name": "Combine and re-bin",
@@ -218,7 +218,7 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Inspect",
-            "commands": ["info", "qc", "tree", "metadata", "attrs", "check"],
+            "commands": ["info", "qc", "tree", "attrs", "check"],
         },
         {
             "name": "Manage collections",
