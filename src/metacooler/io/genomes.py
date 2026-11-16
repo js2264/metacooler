@@ -57,6 +57,7 @@ def parse_genomes_table(
     (key,) = resolve_column_spec(
         spec, list(df.columns), kind="Genomes table", path=path, keys=GENOMES_KEYS
     )
+    assert key is not None  # parse_column_spec refuses NA for a genomes table
     # Positional, never by name: see rename_key_columns.
     df = rename_key_columns(df, {key: "genome_id"}, kind="Genomes table")
     dup = df["genome_id"].duplicated()

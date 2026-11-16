@@ -34,7 +34,13 @@ from metacooler.io._utils import (
     to_upper_triangle,
     write_cooler,
 )
-from metacooler.io.colspec import CONTIGS_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
+from metacooler.io.colspec import (
+    ASSIGNMENT_KEYS,
+    CONTIGS_FORMAT_ALIASES,
+    CONTIGS_FORMAT_DEFAULT,
+    GENOMES_FORMAT_DEFAULT,
+    parse_column_spec,
+)
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
 from metacooler.ps import (
@@ -1009,11 +1015,71 @@ def _apply_create_filters(
     return filtered, bins_df
 
 
+def _no_genome_column(
+    contig_genome_map: dict[str, str] | str | Path,
+    contig_table_format: str,
+    *,
+    genomes_table: str | Path | None,
+    drop_unassigned: bool,
+) -> bool:
+    """Whether the contig table assigns no genome (``NA`` in the genome's place).
+
+    Then nothing is binned yet: every contig lands in ``__unbinned__``.  Two
+    options cannot mean anything with that, and are refused before any work:
+    ``drop_unassigned`` would drop every contig, and a genomes table would have
+    no genome to describe.
+
+    Args:
+        contig_genome_map: The contig table's path, or a ready-made mapping
+            (which has no column spec).
+        contig_table_format: The spec the table is read with.
+        genomes_table: The genomes metadata table, if any.
+        drop_unassigned: Whether unassigned contigs are to be dropped.
+
+    Returns:
+        ``True`` when the spec says the table has no genome column.
+
+    Raises:
+        ValueError: If *drop_unassigned* or *genomes_table* is given with such
+            a spec.
+    """
+    if isinstance(contig_genome_map, dict):
+        return False
+    spec = parse_column_spec(
+        contig_table_format,
+        keys=ASSIGNMENT_KEYS,
+        aliases=CONTIGS_FORMAT_ALIASES,
+        option="--contigs-format",
+    )
+    if not spec.no_genome:
+        return False
+    if drop_unassigned:
+        raise ValueError(
+            f"--drop-unassigned would drop every contig: --contigs-format "
+            f"{spec.text!r} assigns none to a genome."
+        )
+    if genomes_table is not None:
+        raise ValueError(
+            f"A genomes table was given, but --contigs-format {spec.text!r} "
+            "assigns no contig to a genome, so there is no genome for it to "
+            "describe. Leave it out, and add it with 'metacooler annotate' once "
+            "the contigs are binned ('metacooler reassign')."
+        )
+    logger.info(
+        "--contigs-format %r has no genome column: nothing is binned yet, and "
+        "every contig is assigned to __unbinned__.",
+        spec.text,
+    )
+    return True
+
+
 def _check_contig_map_matches(
     cg_map: Mapping[str, str],
     contig_lengths: Mapping[str, int],
     source: dict[str, str] | str | Path,
     contig_table_format: str,
+    *,
+    unbinned_on_purpose: bool = False,
 ) -> None:
     """Refuse a contig table that names no contig of the assembly.
 
@@ -1033,6 +1099,8 @@ def _check_contig_map_matches(
         contig_lengths: Every contig of the assembly.
         source: Where *cg_map* came from: the table's path, or a dict.
         contig_table_format: The column spec the table was read with.
+        unbinned_on_purpose: The spec says the table assigns no genome, so an
+            empty table is no surprise worth a warning.
 
     Raises:
         ValueError: If *cg_map* has rows but none names an assembly contig.
@@ -1043,7 +1111,7 @@ def _check_contig_map_matches(
         else f"Contig table {str(source)!r}"
     )
     if not cg_map:
-        logger.warning(
+        (logger.info if unbinned_on_purpose else logger.warning)(
             "%s has no row: every contig is assigned to __unbinned__.", where
         )
         return
@@ -2578,6 +2646,12 @@ def from_pairs(
             "binsize and bins are mutually exclusive: pass binsize to tile "
             "fixed-size bins, or bins to use a pre-defined bin table."
         )
+    unbinned = _no_genome_column(
+        contig_genome_map,
+        contig_table_format,
+        genomes_table=genomes_table,
+        drop_unassigned=drop_unassigned,
+    )
     # Guard the P(s) sidecar before the streaming pass, not after it: finding
     # out that the table cannot be written is worth seconds, not hours.
     ps_path = ps_table_path(uri) if ps else None
@@ -2614,7 +2688,11 @@ def from_pairs(
     contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
     logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
     _check_contig_map_matches(
-        cg_map, contig_lengths, contig_genome_map, contig_table_format
+        cg_map,
+        contig_lengths,
+        contig_genome_map,
+        contig_table_format,
+        unbinned_on_purpose=unbinned,
     )
 
     # --- Filter unassigned contigs ---
@@ -2901,6 +2979,12 @@ def from_cool(
     cool_path = Path(cool_uri)
     output_path = Path(output)
     timer = time.perf_counter()
+    unbinned = _no_genome_column(
+        contig_genome_map,
+        contig_table_format,
+        genomes_table=genomes_table,
+        drop_unassigned=drop_unassigned,
+    )
 
     # --- Validate and load cool file ---
     if not cooler.fileops.is_cooler(str(cool_path)):
@@ -2954,7 +3038,11 @@ def from_cool(
     # --- Parse contig assignments ---
     contig_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
     _check_contig_map_matches(
-        contig_map, contig_lengths, contig_genome_map, contig_table_format
+        contig_map,
+        contig_lengths,
+        contig_genome_map,
+        contig_table_format,
+        unbinned_on_purpose=unbinned,
     )
     extra_genomes_df = _load_extra_genomes_table(genomes_table, genomes_table_format)
 

@@ -149,6 +149,10 @@
   `vamb` (besides `contigs` and `contig_genome`). `collect` gets a
   `--contigs-format` of its own, for its per-contig metadata table (see its
   section).
+- **A map with no binning yet**: `--contigs-format CONTIG,NA` (e.g.
+  `1,NA,noheader` for a plain list of contig names) says the contig table has
+  no genome column, so `create` puts every contig in `__unbinned__`, ready for
+  `reassign`; with `reassign`, it unbins the contigs the table lists.
 - **`--genomes-format`** on `create pairs`, `create cool`, `collect`, `reassign`
   and `annotate`: which column of `--genomes` holds the genome names, so a
   CheckM2 (`Name`) or GTDB-Tk (`user_genome`) report needs no editing.

@@ -137,6 +137,17 @@ is stored in the `/contigs` table. Aliases cover the tables of common binners
     --contigs-format "2,3,noheader"
     ```
 
+=== "No binning yet"
+
+    `NA` as the genome column: the table only lists contigs, and every contig
+    lands in `__unbinned__`. Bin them later with
+    [`metacooler reassign`](../cli.md#reassign).
+
+    ```bash
+    cut -f1 assembly.fa.fai > contigs.txt
+    --contigs contigs.txt --contigs-format 1,NA,noheader
+    ```
+
 === "Binner aliases"
 
     ```bash

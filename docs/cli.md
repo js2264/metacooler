@@ -197,6 +197,11 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.m
     layouts claimed the same ordering and `merge` would scramble them.
 
 ```bash
+# No binning yet: every contig in __unbinned__, to be binned with reassign later
+cut -f1 assembly.fa.fai > contigs.txt
+metacooler create pairs --pairs contacts.pairs.gz --bins 2000 --fasta assembly.fa \
+    --contigs contigs.txt --contigs-format 1,NA,noheader -o gut_T0.metacool
+
 # Fragment-level bins from MetaTOR output
 metacooler create pairs \
     --pairs contacts.pairs.gz \
@@ -247,6 +252,14 @@ read with the wrong columns. Aliases cover the tables common binners write:
 - **Unbinned contigs.** A contig absent from the table is unbinned, and so is
   one whose genome reads `NA`, `N/A`, `nan`, `ND`, `n/d`, `-1` (SemiBin2's
   unbinned label) or is empty: all of them land in `__unbinned__`.
+- **No binning yet.** `NA` in the genome's place — `1,NA,noheader` for a plain
+  list of contig names, `contig_name,NA` for a table with a header — says the
+  table has no genome column. Every contig then lands in `__unbinned__`, the
+  table's other columns are still stored in `/contigs`, and the contigs can be
+  binned later with [`reassign`](#reassign). It has to be written out: a spec
+  that just leaves the genome column off is an error, so a forgotten column
+  cannot pass for "no binning". `--genomes` and `--drop-unassigned` are refused
+  with it — there is no genome to describe, and every contig would be dropped.
 - **An alias wins** over a header name it happens to equal; give such a column
   by position.
 - **CONCOCT** writes comma-separated tables, which have no alias: convert one
@@ -486,7 +499,7 @@ metacooler reassign METACOOL_PATH --contigs TABLE --inplace [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--contigs` | *required* | New contig-to-genome table. It need not list every contig — see `--missing`. Only its two name columns are read; extra columns are ignored. |
-| `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). |
+| `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). `NA` as the genome column moves every contig the table lists to `__unbinned__`. |
 | `-o, --output` | *required* | Output `.metacool` path. Required unless `--inplace`. |
 | `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file. Only possible when no contig has to move (see `--layout`). |
 | `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. To add or change a few columns without reassigning anything, use [`annotate`](#annotate). |

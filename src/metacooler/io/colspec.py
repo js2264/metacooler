@@ -3,15 +3,21 @@
 Every option that tells metacooler how to read a user table --
 ``--contigs-format`` and ``--genomes-format`` -- takes the same grammar::
 
-    SPEC   := ALIAS | COLUMN ["," COLUMN] ["," "noheader"]
+    SPEC   := ALIAS | COLUMN ["," GENOME] ["," "noheader"]
     COLUMN := a 1-based position (digits only) | a header name (anything else)
+    GENOME := COLUMN | "NA"
 
 A table's *key* columns are the ones holding names: the contig and the genome
 of a contig-to-genome assignment table, the contig of a per-contig metadata
 table, the genome of a genomes table.  Every other column is metadata.
 
 Positions and names may be mixed.  A name needs a header line to be looked up
-in, so ``Name,Final_bin,noheader`` is refused.  Names are only ever used to
+in, so ``Name,Final_bin,noheader`` is refused.  ``NA`` in the genome's place
+says that the table has *no* genome column: no contig is assigned to a genome,
+so ``create`` builds a map with every contig in ``__unbinned__`` (nothing is
+binned yet) and ``reassign`` unbins the contigs the table lists.  It has to be
+written out: a spec that simply leaves the genome column off is refused where
+one is needed, so a forgotten column cannot pass for "no binning".  Names are only ever used to
 *find* positions: the key columns are then relabelled by position (see
 :func:`metacooler.io._utils.rename_key_columns`), never with ``df.rename``.
 
@@ -30,6 +36,9 @@ if TYPE_CHECKING:
 
 #: Trailing token of a spec saying that the table has no header line.
 NOHEADER = "noheader"
+#: Token, in the genome's place, saying that the table has no genome column
+#: (any case).  The same ``NA`` that, as a genome *label*, means "unbinned".
+NO_GENOME = "NA"
 
 #: ``--contigs-format`` aliases: the layout of each contig-to-bin table a common
 #: binner writes, taken from the tool's own writer rather than from memory --
@@ -78,16 +87,22 @@ class ColumnSpec:
 
     Attributes:
         columns: The key columns, in order: an ``int`` is a 1-based position,
-            a ``str`` a header name.
+            a ``str`` a header name, ``None`` (from ``NA``) a genome column the
+            table does not have.
         header: Whether the table's first line names its columns.
         text: The spec as given -- an alias with its expansion -- for messages.
         option: The option the spec came from, for messages.
     """
 
-    columns: tuple[int | str, ...]
+    columns: tuple[int | str | None, ...]
     header: bool
     text: str
     option: str
+
+    @property
+    def no_genome(self) -> bool:
+        """Whether the spec says, with ``NA``, that there is no genome column."""
+        return len(self.columns) > 1 and self.columns[1] is None
 
 
 def alias_listing(aliases: Mapping[str, str]) -> str:
@@ -121,8 +136,9 @@ def parse_column_spec(
 
     Raises:
         ValueError: If *spec* is malformed, names the wrong number of columns,
-            gives a position below 1, gives a name with ``noheader``, or names
-            one column twice.
+            gives a position below 1, gives a name with ``noheader``, puts
+            ``NA`` anywhere but in the genome's place, or names one column
+            twice.
     """
     aliases = aliases or {}
     required = len(keys) if required is None else required
@@ -141,8 +157,13 @@ def parse_column_spec(
     if not required <= len(tokens) <= len(keys):
         raise ValueError(_count_message(text, tokens, keys, required, aliases, option))
 
-    columns: list[int | str] = []
-    for token in tokens:
+    columns: list[int | str | None] = []
+    for index, token in enumerate(tokens):
+        if token.upper() == NO_GENOME:
+            if index == 0:
+                raise ValueError(_no_genome_misplaced(text, keys, option))
+            columns.append(None)
+            continue
         if token.isdigit():
             position = int(token)
             if position < 1:
@@ -159,9 +180,24 @@ def parse_column_spec(
             )
         else:
             columns.append(token)
-    if len(set(columns)) < len(columns):
-        raise ValueError(_same_column_message(text, columns, keys, option))
+    named = [column for column in columns if column is not None]
+    if len(set(named)) < len(named):
+        raise ValueError(_same_column_message(text, named, keys, option))
     return ColumnSpec(columns=tuple(columns), header=header, text=text, option=option)
+
+
+def _no_genome_misplaced(text: str, keys: Sequence[str], option: str) -> str:
+    """Explain an ``NA`` given where a column of names is needed."""
+    if len(keys) == 1:
+        return (
+            f"{option} {text!r}: {NO_GENOME} stands for a missing genome column, "
+            f"but a {keys[0]}s table is nothing without its {keys[0]} names."
+        )
+    return (
+        f"{option} {text!r}: {NO_GENOME} stands for a missing genome column, so "
+        f"it only goes in the genome's place, after the {keys[0]} column -- e.g. "
+        f"'1,{NO_GENOME}' or '{keys[0]}_name,{NO_GENOME}'."
+    )
 
 
 def _count_message(
@@ -198,7 +234,7 @@ def _count_message(
 
 
 def _same_column_message(
-    text: str, columns: Sequence[int | str], keys: Sequence[str], option: str
+    text: str, columns: Sequence[int | str | None], keys: Sequence[str], option: str
 ) -> str:
     """Explain a spec that points two key columns at the same column."""
     repeated = next(c for c in columns if list(columns).count(c) > 1)
@@ -217,7 +253,7 @@ def resolve_column_spec(
     path: str | Path,
     keys: Sequence[str],
     hint: str = "",
-) -> list[int]:
+) -> list[int | None]:
     """Find the 0-based position of every key column of *spec* in a table.
 
     Args:
@@ -231,14 +267,15 @@ def resolve_column_spec(
             aliases on offer).
 
     Returns:
-        One 0-based position per entry of ``spec.columns``, in the same order.
+        One 0-based position per entry of ``spec.columns``, in the same order;
+        ``None`` for an ``NA`` genome column.
 
     Raises:
         ValueError: If the table is too narrow for the spec, a named column is
             absent from its header, or two entries resolve to one column.
     """
     names = [str(label) for label in labels]
-    wanted = len(spec.columns)
+    wanted = sum(column is not None for column in spec.columns)
     if len(names) < wanted:
         what = " and the ".join(keys[:wanted])
         raise ValueError(
@@ -246,8 +283,11 @@ def resolve_column_spec(
             f"(the {what} name{'s' if wanted > 1 else ''}), but {path} has "
             f"{len(names)}."
         )
-    positions: list[int] = []
+    positions: list[int | None] = []
     for column, key in zip(spec.columns, keys, strict=False):
+        if column is None:
+            positions.append(None)
+            continue
         if isinstance(column, int):
             if column > len(names):
                 raise ValueError(
@@ -267,10 +307,11 @@ def resolve_column_spec(
                 f"names, by header name or 1-based position{hint}."
             )
         positions.append(names.index(column))
-    if len(set(positions)) < len(positions):
+    present = [position for position in positions if position is not None]
+    if len(set(present)) < len(present):
         raise ValueError(
             f"{spec.option} {spec.text!r} points the "
-            f"{' and the '.join(keys[: len(positions)])} columns at the same "
-            f"column ({positions[0] + 1}) of {path}. Give two different columns."
+            f"{' and the '.join(keys[: len(present)])} columns at the same "
+            f"column ({present[0] + 1}) of {path}. Give two different columns."
         )
     return positions

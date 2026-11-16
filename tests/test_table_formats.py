@@ -309,3 +309,187 @@ def test_spec_callback_passes_none_through():
     from metacooler.cli._options import _column_spec_callback
 
     assert _column_spec_callback(("genome",))(None, None, None) is None
+
+
+class TestNoBinningYet:
+    """--contigs-format CONTIG,NA: a map with every contig in __unbinned__."""
+
+    @pytest.fixture
+    def contig_list(self, tmp_path):
+        return write(tmp_path / "contigs.txt", "contig_A\ncontig_B\ncontig_C\n")
+
+    def test_create_cool(self, tmp_path, tiny_cool, contig_list, caplog):
+        out = tmp_path / "o.metacool"
+        with caplog.at_level("INFO", logger="metacooler"):
+            from_cool(
+                tiny_cool,
+                out,
+                contig_genome_map=contig_list,
+                contig_table_format="1,NA,noheader",
+                qc=False,
+            )
+        assert "nothing is binned yet" in caplog.text
+        genomes = MetaCooler(out).genomes
+        assert genomes["name"].tolist() == ["__unbinned__"]
+        assert genomes["n_contigs"].tolist() == [4]
+
+    def test_metadata_columns_are_kept(self, tmp_path, tiny_cool):
+        table = write(
+            tmp_path / "c.tsv", "contig_name\tdepth\ncontig_A\t12\ncontig_D\t3\n"
+        )
+        out = tmp_path / "o.metacool"
+        from_cool(
+            tiny_cool,
+            out,
+            contig_genome_map=table,
+            contig_table_format="contig_name,NA",
+            qc=False,
+        )
+        contigs = MetaCooler(out).contigs.set_index("name")
+        assert contigs.loc["contig_A", "depth"] == 12
+        assert set(MetaCooler(out).genomes["name"]) == {"__unbinned__"}
+
+    def test_an_empty_list_is_not_a_warning(self, tmp_path, tiny_cool, caplog):
+        table = write(tmp_path / "c.tsv", "contig_name\n")
+        with caplog.at_level("INFO", logger="metacooler"):
+            from_cool(
+                tiny_cool,
+                tmp_path / "o.metacool",
+                contig_genome_map=table,
+                contig_table_format="contig_name,NA",
+                qc=False,
+            )
+        empty = [r for r in caplog.records if "has no row" in r.getMessage()]
+        assert [r.levelname for r in empty] == ["INFO"]
+
+    def test_a_wrong_contig_column_is_still_refused(self, tmp_path, tiny_cool):
+        table = write(tmp_path / "c.tsv", "1\tcontig_A\n")
+        with pytest.raises(ValueError, match="names none of the assembly's"):
+            from_cool(
+                tiny_cool,
+                tmp_path / "o.metacool",
+                contig_genome_map=table,
+                contig_table_format="1,NA,noheader",
+            )
+
+    def test_genomes_table_is_refused(self, tmp_path, tiny_cool, contig_list, checkm):
+        with pytest.raises(ValueError, match="no genome for it to describe"):
+            from_cool(
+                tiny_cool,
+                tmp_path / "o.metacool",
+                contig_genome_map=contig_list,
+                contig_table_format="1,NA,noheader",
+                genomes_table=checkm,
+            )
+
+    def test_drop_unassigned_is_refused(
+        self, tmp_path, tiny_pairs, tiny_bins_bed, contig_list
+    ):
+        with pytest.raises(ValueError, match="would drop every contig"):
+            from_pairs(
+                tmp_path / "o.metacool",
+                bins=tiny_bins_bed,
+                pairs=tiny_pairs,
+                contig_genome_map=contig_list,
+                contig_table_format="1,NA,noheader",
+                drop_unassigned=True,
+            )
+
+    def test_create_pairs_cli(self, tmp_path, tiny_pairs, tiny_bins_bed, contig_list):
+        out = tmp_path / "o.metacool"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "create",
+                "pairs",
+                "--pairs",
+                str(tiny_pairs),
+                "--bins",
+                str(tiny_bins_bed),
+                "--contigs",
+                str(contig_list),
+                "--contigs-format",
+                "1,NA,noheader",
+                "-o",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert MetaCooler(out).genomes["name"].tolist() == ["__unbinned__"]
+
+    @pytest.mark.parametrize(
+        ("option", "spec", "message"),
+        [
+            ("--contigs-format", "NA,1", "only goes in the genome's place"),
+            ("--genomes-format", "NA", "nothing without its genome names"),
+        ],
+    )
+    def test_misplaced_na_is_refused_while_parsing_options(
+        self, tmp_path, tiny_cool, tiny_contigs_table, checkm, option, spec, message
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "create",
+                "cool",
+                "--cool",
+                str(tiny_cool),
+                "--contigs",
+                str(tiny_contigs_table),
+                "--genomes",
+                str(checkm),
+                option,
+                spec,
+                "-o",
+                str(tmp_path / "o.metacool"),
+            ],
+        )
+        assert result.exit_code == 2
+        assert message in flat(result.output)
+
+    def test_reassign_unbins_the_listed_contigs(self, tmp_path, tiny_metacooler):
+        table = write(tmp_path / "c.txt", "contig_A\n")
+        out = tmp_path / "r.metacool"
+        reassign(
+            tiny_metacooler,
+            table,
+            out,
+            contig_table_format="1,NA,noheader",
+            layout="keep",
+            qc=False,
+        )
+        mc = MetaCooler(out)
+        genome_of = dict(
+            zip(
+                mc.contigs["name"],
+                mc.genomes["name"].to_numpy()[mc.contigs["genome_id"].to_numpy()],
+                strict=True,
+            )
+        )
+        assert genome_of["contig_A"] == "__unbinned__"
+        assert genome_of["contig_B"] == "MAG_1"
+
+        everything = tmp_path / "all.metacool"
+        reassign(
+            tiny_metacooler,
+            table,
+            everything,
+            contig_table_format="1,NA,noheader",
+            missing="unbinned",
+            layout="keep",
+            qc=False,
+        )
+        assert MetaCooler(everything).genomes["name"].tolist() == ["__unbinned__"]
+
+    def test_annotate_reads_contig_na_as_contig(self, tmp_path, tiny_metacooler):
+        from metacooler.io.annotate import annotate
+
+        table = write(tmp_path / "c.tsv", "contig_name\tdepth\ncontig_A\t5\n")
+        out = tmp_path / "a.metacool"
+        annotate(
+            tiny_metacooler,
+            out,
+            contigs_table=table,
+            contigs_table_format="contig_name,NA",
+        )
+        assert MetaCooler(out).contigs.set_index("name").loc["contig_A", "depth"] == 5

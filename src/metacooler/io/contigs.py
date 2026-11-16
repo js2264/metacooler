@@ -83,6 +83,9 @@ def parse_contigs_table(
             :data:`~metacooler.io.colspec.CONTIGS_FORMAT_ALIASES`.  The default,
             ``contigs``, is ``contig_name,genome_name``: looked up by name, so
             a table given without its format is refused rather than misread.
+            ``NA`` in the genome's place (``"1,NA,noheader"``,
+            ``"contig_name,NA"``) says the table has no genome column: every
+            contig it lists is assigned to ``__unbinned__``.
 
     Returns:
         Tuple of (mapping ``contig_name -> genome_name``, full DataFrame with
@@ -117,6 +120,15 @@ def parse_contigs_table(
         keys=ASSIGNMENT_KEYS,
         hint=f", or an alias: {', '.join(CONTIGS_FORMAT_ALIASES)}",
     )
+    assert contig_col is not None  # parse_column_spec refuses NA in its place
+    if genome_col is None:
+        # NA: the table assigns no genome.  Give it a genome column that says
+        # so on every row, and the rest of the pipeline reads an ordinary
+        # assignment table; a column of the table's own that happens to be
+        # called genome_id is moved aside by rename_key_columns, as ever.
+        genome_col = df.shape[1]
+        df = df.copy()
+        df.insert(genome_col, "__no_genome__", "__unbinned__", allow_duplicates=True)
     # Positional, never by name: see rename_key_columns.
     df = rename_key_columns(
         df, {contig_col: "contig_name", genome_col: "genome_id"}, kind="Contig table"

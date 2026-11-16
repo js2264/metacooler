@@ -549,7 +549,8 @@ def _read_contig_metadata(
         fmt: Column spec (see :mod:`metacooler.io.colspec`): the contig-name
             column, by 1-based position or header name, plus ``,noheader``
             when the table has no header line.  A second column, when given,
-            is the genome column.
+            is the genome column; a second column of ``NA`` is the same as
+            none.
 
     Returns:
         ``(table, has_genome)``: the table with its contig column relabelled
@@ -577,14 +578,17 @@ def _read_contig_metadata(
     positions = resolve_column_spec(
         spec, list(table.columns), kind="Contigs table", path=path, keys=ASSIGNMENT_KEYS
     )
-    keys = {positions[0]: "contig_name"}
-    if len(positions) > 1:
-        keys[positions[1]] = "genome_name"
+    contig_col = positions[0]
+    assert contig_col is not None  # parse_column_spec refuses NA in its place
+    keys = {contig_col: "contig_name"}
+    genome_col = positions[1] if len(positions) > 1 else None
+    if genome_col is not None:
+        keys[genome_col] = "genome_name"
     elif spec.header:
         # The optional genome column is found by its header name, as it always
         # was; it is a check, so a table without one simply skips it.
         labels = [str(column) for column in table.columns]
-        if "genome_name" in labels and labels.index("genome_name") != positions[0]:
+        if "genome_name" in labels and labels.index("genome_name") != contig_col:
             keys[labels.index("genome_name")] = "genome_name"
     # Positional, never by name: see rename_key_columns.
     table = rename_key_columns(table, keys, kind="Contigs table")

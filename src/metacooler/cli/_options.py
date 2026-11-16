@@ -32,6 +32,10 @@ CONTIGS_FORMAT_HELP = (
     "genome names: [cyan]CONTIG,GENOME[/cyan], each a 1-based position or a "
     "header name — e.g. [cyan]2,5[/cyan] or [cyan]Name,Final_bin[/cyan] — plus "
     "[cyan],noheader[/cyan] when the table has no header line. "
+    "[cyan]NA[/cyan] as the genome column ([cyan]1,NA,noheader[/cyan], "
+    "[cyan]contig_name,NA[/cyan]) says the table assigns no genome: "
+    "[cyan]create[/cyan] bins nothing yet (every contig in __unbinned__), "
+    "[cyan]reassign[/cyan] unbins the contigs it lists. "
     f"[dim]\\[default: {CONTIGS_FORMAT_DEFAULT}][/dim]\n\n"
     "Aliases for the tables of common binners: "
     + ", ".join(

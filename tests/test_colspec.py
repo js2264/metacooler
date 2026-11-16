@@ -220,3 +220,59 @@ class TestGenomesTables:
     def test_missing_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             parse_genomes_table(tmp_path / "nope.tsv")
+
+
+class TestNoGenome:
+    """NA in the genome's place: the table assigns no genome (no binning yet)."""
+
+    def test_na_in_the_genome_place(self):
+        spec = assignment("1,NA")
+        assert spec.columns == (1, None)
+        assert spec.no_genome
+        assert spec.header
+        assert assignment("contig_name,na").no_genome
+        spec = assignment("1,NA,noheader")
+        assert spec.no_genome and not spec.header
+        assert metadata("contig_name,NA").no_genome
+        assert not assignment("1,2").no_genome
+        assert not metadata("1").no_genome
+
+    def test_a_name_still_needs_a_header(self):
+        with pytest.raises(ValueError, match="no header line"):
+            assignment("contig_name,NA,noheader")
+
+    def test_na_cannot_be_the_contig_column(self):
+        with pytest.raises(ValueError, match="only goes in the genome's place"):
+            assignment("NA,1")
+
+    def test_na_cannot_be_the_genome_names_of_a_genomes_table(self):
+        with pytest.raises(ValueError, match="nothing without its genome names"):
+            genomes("NA")
+
+    def test_resolution_keeps_the_missing_column(self):
+        spec = assignment("1,NA")
+        assert resolve_column_spec(
+            spec, ["only"], kind="T", path="t", keys=ASSIGNMENT_KEYS
+        ) == [0, None]
+
+    def test_every_listed_contig_is_unbinned(self, tmp_path):
+        path = write(tmp_path / "t.tsv", "c1\nc2\n")
+        mapping, df = parse_contigs_table(path, "1,NA,noheader")
+        assert mapping == {"c1": "__unbinned__", "c2": "__unbinned__"}
+        assert list(df.columns) == ["contig_name", "genome_id"]
+        assert _parse_contig_map(path, "1,NA,noheader")[0] == mapping
+
+    def test_other_columns_are_kept(self, tmp_path):
+        path = write(
+            tmp_path / "t.tsv",
+            "contig_name\tdepth\tgenome_id\nc1\t3\tX\n",
+        )
+        mapping, df = parse_contigs_table(path, "contig_name,NA")
+        assert mapping == {"c1": "__unbinned__"}
+        # The table's own genome_id column is moved aside, not mistaken for one.
+        assert list(df.columns) == [
+            "contig_name",
+            "depth",
+            "genome_id_col3",
+            "genome_id",
+        ]
