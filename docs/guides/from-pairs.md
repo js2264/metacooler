@@ -159,10 +159,6 @@ is stored in the `/contigs` table. Aliases cover the tables of common binners
     --contigs map.tsv                   --contigs-format contig_genome  # 2 columns, no header
     ```
 
-A table none of whose rows names a contig of the assembly is refused before
-anything is binned: it is the wrong table, or `--contigs-format` points at the
-wrong columns.
-
 ### Genomes metadata table (optional)
 
 A TSV whose genome-name column is the one `--genomes-format` names (by
@@ -276,6 +272,11 @@ By default, contigs absent from the contig table are assigned to a special
 ```bash
 metacooler create pairs ... --drop-unassigned
 ```
+
+A table that names *no* contig of the assembly is refused rather than sending
+every contig to `__unbinned__`: that is the wrong table, or the wrong
+`--contigs-format`. Rows naming contigs the assembly does not have are ignored
+with a warning. See [The contig table](../cli.md#create-contig-table).
 
 ## Large files
 

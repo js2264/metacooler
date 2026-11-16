@@ -274,8 +274,8 @@ class TestCreatePairsContigsFormats:
         """``contig_genome`` has no header validation.
 
         A headered file is treated as all-data rows: the header row becomes a
-        spurious mapping ("contig_name" → "genome_name") that is silently
-        ignored because no bin has a contig named "contig_name".  The real
+        spurious mapping ("contig_name" → "genome_name") that is ignored, with
+        a warning, because no bin has a contig named "contig_name".  The real
         contigs present in rows 2-4 are still correctly assigned, so the
         command succeeds.
         """
@@ -292,6 +292,7 @@ class TestCreatePairsContigsFormats:
         )
         assert result.exit_code == 0, result.output
         assert out.exists()
+        assert "were ignored: 'contig_name'" in " ".join(result.output.split())
 
 
 # ===========================================================================

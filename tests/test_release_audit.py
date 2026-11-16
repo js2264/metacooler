@@ -522,9 +522,8 @@ class TestEarlyRefusals:
     ):
         """Failed only after the whole pairs pass, inside cooler.
 
-        The table names a real contig, so it passes the no-match check, but
-        assigns it to no genome: every contig is unassigned, and the drop
-        leaves nothing.
+        The table names a contig of the assembly -- one naming none is refused
+        earlier, as a wrong table -- but leaves it unassigned.
         """
         table = tmp_path / "c.tsv"
         table.write_text("contig_name\tgenome_name\ncontig_A\tNA\n")
@@ -533,16 +532,7 @@ class TestEarlyRefusals:
         )
         assert result.exit_code != 0
         assert "removed all 4 contig(s)" in _flat(result.output)
-
-    def test_table_naming_no_contig_is_refused_before_binning(
-        self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path
-    ):
-        """Every contig used to land in __unbinned__, with exit 0 and no warning."""
-        table = tmp_path / "c.tsv"
-        table.write_text("contig_name\tgenome_name\nnot_a_contig\tMAG_1\n")
-        result, out = _create(tmp_path, table, tiny_pairs, tiny_bins_bed)
-        assert result.exit_code != 0
-        assert "names none of the assembly's 4 contig(s)" in _flat(result.output)
+        assert "assigns none of them to a genome" in _flat(result.output)
         assert not out.exists()
 
 

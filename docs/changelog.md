@@ -4,12 +4,6 @@
 
 ### Breaking
 
-- **`create` refuses a contig table that names no contig of the assembly**,
-  before anything is binned. A table read with the wrong columns (a
-  positional `--contigs-format` one column off, an ID column taken for the
-  contig names) used to give a valid map with every contig in `__unbinned__`,
-  exit 0 and no warning. Rows naming contigs the assembly lacks are now
-  reported; an empty table still unbins everything, with a warning.
 - **The default `--contigs-format` (`contigs`) finds `contig_name` and
   `genome_name` by name, wherever they are**, instead of requiring them to be
   columns 1 and 2; likewise `--genomes`' `genome_name` and `collect --contigs`'
@@ -118,6 +112,15 @@
 - **Zero-width bins in `--bins`, and a `--drop-unassigned` that removes every
   contig, are refused before binning** rather than failing after the whole
   pairs pass.
+- **`create pairs` and `create cool` refuse a `--contigs` table that names no
+  contig of the assembly**, or has no row, before anything is binned. Every
+  contig used to land in `__unbinned__`, and the command exited 0 with nothing
+  logged above INFO — the signature of the wrong table, or of the wrong
+  `--contigs-format` (a leading ID column read as `1,2` takes the IDs for
+  contig names). The error shows a few names from each side and points at
+  `--contigs-format`. A table naming contigs the assembly does not have is
+  still accepted, now with a warning naming up to 10 of them. See
+  [The contig table](cli.md#create-contig-table).
 - **`--metadata` files may not contain a `qc` key**, which `create` overwrote.
 - **`validate()` is stricter:** it refuses a repeated `(bin1_id, bin2_id)`
   pixel, a `/chroms` link that does not resolve to the map's own `/contigs`,

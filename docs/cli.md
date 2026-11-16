@@ -172,11 +172,11 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.m
 | `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`. Its other columns land in `/contigs`. A table none of whose rows names a contig of the assembly is refused before anything is binned. |
+| `--contigs` | *required* | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`, and its other columns land in `/contigs`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). |
 | `--contigs-format` | `contigs` | `CONTIG,GENOME[,noheader]`, each a 1-based position or a header name, or an alias for a binner's table — see [Contig and genome columns](#contigs-format) below. |
 | `--genomes` | — | Optional genome metadata TSV; extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `Name` for CheckM2's `quality_report.tsv`, `user_genome` for GTDB-Tk's summary. |
-| `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a `commands` or `qc` key — those names are reserved for the provenance record and the contact-quality block metacooler writes itself. |
+| `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a key metacooler writes itself: `commands` (the provenance record), `qc` (the contact-quality block), `reassign` or `annotate` (those commands' histories). |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `fasta`, or `alpha`. See [Contig ordering](concepts.md#contig-ordering). |
 | `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs headers have no `#chromsize:` lines. |
 | `--assembly-name` | — | Name for this assembly / metagenome. Stored in the standard cooler `genome-assembly` attribute (reported as `assembly` by `info`). |
@@ -223,6 +223,44 @@ metacooler create pairs \
     -o gut_T0_2kb.metacool
 ```
 
+#### The contig table { #create-contig-table }
+
+`--contigs` assigns contigs to genomes, and need not cover the whole assembly —
+nor only this assembly:
+
+- **A contig the table does not list** is collected under `__unbinned__`, or
+  dropped with `--drop-unassigned`. So is one listed with an empty or NA-like
+  genome name: `NA`, `N/A`, `nan`, `ND`, `n/d`, or `-1` (SemiBin2's label for
+  an unbinned contig).
+- **A row naming a contig the assembly does not have** is ignored, with a
+  warning naming up to 10 such rows, so one table can serve several
+  assemblies.
+- **A table naming no contig of the assembly at all** — or with no row — is
+  **refused**, before anything is binned. Every contig would land in
+  `__unbinned__`, and that is never the map you meant: it is the wrong table,
+  or the right one read with the wrong `--contigs-format` — typically a leading
+  ID column read as `1,2`, which takes the IDs for contig names and the contig
+  names for genome names.
+
+```console
+$ metacooler create pairs ... --contigs mags.tsv --contigs-format 1,2
+Error: None of the 44 contig name(s) in the contig table mags.tsv matches a
+contig in the bins file fragments.bed, so no contig would be assigned to a
+genome.
+  table names:      '1', '2', '3', ...
+  assembly contigs: 'contig_1_000', 'contig_1_001', 'contig_1_002', ...
+Check that the table describes this assembly and that --contigs-format (here
+'1,2') selects its contig-name and genome-name columns.
+```
+
+The table is compared with every contig of the assembly — as named by the bins
+file, the FASTA or the pairs `#chromsize:` header, whichever supplies the
+contig lengths — *before* `--drop-unassigned` and `--filter` narrow them. A
+filter that keeps only contigs the table does not list is therefore not a
+refusal: those contigs are unbinned, as asked. `create cool` applies the same
+rule against the cool file's contigs, and [`reassign`](#reassign) refuses such
+a table too.
+
 #### Contig and genome columns { #contigs-format }
 
 `--contigs-format` says which two columns of the `--contigs` table hold the
@@ -253,9 +291,6 @@ read with the wrong columns. Aliases cover the tables common binners write:
 | `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |
 | `vamb` | `contigname,clustername` | VAMB's `vae_clusters_unsplit.tsv` / `vae_clusters_split.tsv`. |
 
-- **Unbinned contigs.** A contig absent from the table is unbinned, and so is
-  one whose genome reads `NA`, `N/A`, `nan`, `ND`, `n/d`, `-1` (SemiBin2's
-  unbinned label) or is empty: all of them land in `__unbinned__`.
 - **No binning yet.** `NA` in the genome's place — `1,NA,noheader` for a plain
   list of contig names, `contig_name,NA` for a table with a header — says the
   table has no genome column. Every contig then lands in `__unbinned__`, the
@@ -326,11 +361,11 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
 |--------|---------|-------------|
 | `--cool` | *required* | Input `.cool` file to convert. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; which columns hold the names is set by `--contigs-format`. A table none of whose rows names a contig of the cool file is refused. |
+| `--contigs` | *required* | Contig-to-genome table; which columns hold the names is set by `--contigs-format`. Must name at least one contig of the cool file — see below. |
 | `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). |
 | `--genomes` | — | Optional genome metadata TSV. Decorates the genome rows derived from `--contigs`; same semantics and warnings as `create pairs`. |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
-| `--metadata` | — | JSON or YAML metadata file (no `commands` or `qc` key — see `create pairs`). |
+| `--metadata` | — | JSON or YAML metadata file (no key metacooler writes itself — see `create pairs`). |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `cool` (preserve the input's order), or `alpha`. |
 | `--assembly-name` | — | Assembly / metagenome name, stored as `genome-assembly`. |
 | `--drop-unassigned` | off | Drop unassigned contigs. |
@@ -346,6 +381,12 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
   own bins table.
 - `--contig-order cool` is the only ordering that round-trips row order exactly;
   the default regroups contigs by genome.
+- The `--contigs` table follows the rule of
+  [`create pairs`](#create-contig-table), compared with the contigs of the cool
+  file (its `chroms` table): unlisted contigs go to `__unbinned__`, rows naming
+  a contig the cool file does not have are ignored with a warning, and a table
+  naming none of its contigs is refused before a single pixel is read — before
+  `--drop-unassigned` and `--filter` narrow anything.
 
 ```bash
 metacooler create cool \
@@ -380,7 +421,7 @@ file stem (`E_coli.cool` → `E_coli`) unless `--names` says otherwise, and
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line. |
 | `--contigs` | — | Optional per-contig metadata TSV; extra columns land in `/contigs`. See [The contigs table](#collect-contigs-table) below. |
 | `--contigs-format` | `contig_name` | Which column of `--contigs` holds the contig names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `contigName` or `1,noheader`. |
-| `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
+| `--metadata` | — | JSON or YAML metadata file (no key metacooler writes itself — see `create pairs`). |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, before anything is written — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. Unlike in `create`, `genomes.n_bins` is available: the bins come with the inputs. See [Filtering with `--filter`](#filter). |
 | `--contig-order` | `cool` | Order of the contigs *within* each genome: `cool` keeps each input's own order, `genome-then-length` puts the longest first, `genome-then-alpha` sorts them by name. Genomes themselves are always laid out alphabetically, in `genome_id` order. |
 | `--assembly-name` | — | Name for the collection, stored as `genome-assembly`. |
@@ -534,7 +575,7 @@ metacooler reassign METACOOL_PATH --contigs TABLE --inplace [OPTIONS]
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
 | `--missing` | `keep` | What to do with a contig the table does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
 | `--layout` | `auto` | `auto`, `keep`, `genome-then-alpha`, or `genome-then-length` — see below. |
-| `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
+| `--metadata` | — | JSON or YAML metadata file (no key metacooler writes itself — see `create pairs`). |
 | `--qc / --no-qc` | on | Recompute the contact-quality block when the source carries one. With `--no-qc` the stale block is dropped and not replaced. |
 | `--chunksize` | `50000000` | Source pixels read and remapped per chunk, on the re-ordering path only. |
 | `-f, --force` | off | Overwrite the output if it already exists. The previous file is replaced only once the new one has validated, and an input (the map, `--contigs`, `--genomes`, `--metadata`) is never overwritten. |
@@ -619,8 +660,9 @@ moving a pixel.
 !!! note "`reassign` never adds or removes a contig"
     A name in the table that is not a contig of the file is ignored with a
     warning (and a table matching *no* contig at all is refused — that is a
-    wrong table, or a wrong `--contigs-format`). To *drop* contigs, and the
-    pixels that touch them, use [`extract`](#extract).
+    wrong table, or a wrong `--contigs-format` — as it is by
+    [`create`](#create-contig-table)). To *drop* contigs, and the pixels that
+    touch them, use [`extract`](#extract).
 
 ```bash
 # Incremental: move two contigs into MAG_07, leave everything else alone
