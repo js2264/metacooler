@@ -151,7 +151,11 @@ metacooler create pairs --pairs contacts.pairs.gz --bins 2000 --fasta assembly.f
 
 ---
 
-## Create and edit
+## Create { #create }
+
+Build a map: from pairs files ([`create pairs`](#create-pairs)), from a cool
+file ([`create cool`](#create-cool)), or from single-genome cool files, one
+genome each ([`collect`](#collect)).
 
 ### `create pairs` { #create-pairs }
 
@@ -483,6 +487,28 @@ metacooler collect *.cool \
     -o species.metacool
 ```
 
+---
+
+## Edit an existing map { #edit }
+
+Two commands change a map that already exists without re-binning a single
+contact. Both write either an edited copy (`-o`) or the map itself
+(`--inplace`).
+
+| Command | What it changes | Cost |
+|---------|-----------------|------|
+| [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the QC block, and possibly the contig layout. | Seconds when the contigs keep their places; a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
+| [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds. |
+
+The two meet in one place: after a reassignment, the metadata of the genomes
+whose contigs changed still describes their old contigs, and `reassign` names
+them. Refresh those values with `annotate --replace`, from a QC run on the new
+bins.
+
+Two more commands edit a map, each a single part of it: [`qc --store`](#qc)
+writes the contact-quality block and the `qc_*` columns, and
+[`metadata`](#metadata) the free-form `metadata` attribute.
+
 ### `reassign` { #reassign }
 
 Re-attribute contigs to genomes (MAGs) in a file that already exists, from a
@@ -707,6 +733,14 @@ command line in `commands`, and the tables and the columns added, replaced and
 dropped in `annotate`. A run that changes nothing writes nothing. Since
 [`merge`](#merge) compares only the identity of two maps, an annotated
 replicate still merges with the others.
+
+---
+
+## Combine and re-bin { #combine }
+
+Build a new map from the pixels of existing ones: [`merge`](#merge) sums
+replicates of one assembly, [`binnify`](#binnify) re-bins to a coarser bin
+size, and [`zoomify`](#zoomify) builds a multi-resolution collection.
 
 ### `merge` { #merge }
 

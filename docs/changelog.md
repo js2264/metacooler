@@ -427,6 +427,11 @@
 
 ### Documentation
 
+- **The CLI reference gives editing its own section.** "Create and edit" is
+  split into *Create* (`create`, `collect`), *Edit an existing map*
+  (`reassign`, `annotate`, with a table of which one to use) and *Combine and
+  re-bin* (`merge`, `binnify`, `zoomify`); `metacooler --help` groups the
+  commands the same way.
 - **The documentation site is restyled after doc.chromosomix.app.** The
   zensical theme keeps its layout but takes a new header, an in-column page
   footer with previous/next cards (also reached with the ← / → keys), a

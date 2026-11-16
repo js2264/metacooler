@@ -193,16 +193,16 @@ click.rich_click.OPTIONS_TABLE_COLUMN_TYPES = [
 click.rich_click.COMMAND_GROUPS = {
     "metacooler": [
         {
-            "name": "Create and edit",
-            "commands": [
-                "create",
-                "collect",
-                "reassign",
-                "annotate",
-                "merge",
-                "binnify",
-                "zoomify",
-            ],
+            "name": "Create",
+            "commands": ["create", "collect"],
+        },
+        {
+            "name": "Edit an existing map",
+            "commands": ["reassign", "annotate"],
+        },
+        {
+            "name": "Combine and re-bin",
+            "commands": ["merge", "binnify", "zoomify"],
         },
         {
             "name": "Extract and view",
