@@ -109,6 +109,10 @@ _CONTIGS_RESERVED_COLUMNS = frozenset({"name", "length", "genome_id"})
 _MAX_REPORTED_UNKNOWN_CONTIGS = 10
 # How many genome names to name when the contigs and genomes tables diverge.
 _MAX_REPORTED_DIVERGENT_GENOMES = 10
+# How many names to quote from each side when a contig table matches no contig
+# of the assembly, and how many unmatched names to list when only some miss.
+_MAX_SHOWN_TABLE_NAMES = 3
+_MAX_REPORTED_STRAY_CONTIGS = 10
 
 logger = logging.getLogger("metacooler")
 
@@ -998,11 +1002,105 @@ def _apply_create_filters(
     return filtered, bins_df
 
 
+def _quote_names(names: Iterable[str], limit: int) -> str:
+    """Quote the first *limit* of *names*, comma-separated, ``...`` past them.
+
+    ``repr`` makes whitespace visible -- a trailing space, a stray carriage
+    return -- which is the usual reason two names that print alike differ.
+    Only ``limit + 1`` names are drawn from *names*, so it may be a whole
+    assembly's worth.
+    """
+    shown = list(itertools.islice(names, limit + 1))
+    text = ", ".join(repr(str(name)) for name in shown[:limit])
+    return text + (", ..." if len(shown) > limit else "")
+
+
+def _check_contig_table_matches(
+    contig_map: Mapping[str, str],
+    assembly_contigs: Mapping[str, object],
+    *,
+    source: Mapping[str, str] | str | Path,
+    contig_table_format: str,
+    assembly_source: str,
+) -> None:
+    """Refuse a contig table that names no contig of the assembly.
+
+    A contig the table does not list is collected under ``__unbinned__`` --
+    a table may cover only part of an assembly -- so a table that matched
+    *nothing* produced a map with a single ``__unbinned__`` genome holding every
+    contig, exited 0, and logged nothing above INFO.  That is a wrong table, or
+    the right one read with the wrong ``--contigs-format`` (``1,2`` over a
+    table with a leading ID column takes the IDs for contig names and the
+    contig names for genomes), never a metagenome anyone meant to build;
+    ``reassign`` refuses the same table for the same reason.  So is a table
+    with no row at all.
+
+    A table that matches *some* contigs is accepted, and the names it holds
+    beyond the assembly (another assembly's contigs, a header line read as
+    data) are only warned about: one table covering several assemblies is
+    legitimate.
+
+    The callers run this against every contig the assembly names, before
+    non-positive lengths, ``--drop-unassigned`` and ``--filter`` narrow them --
+    the table is right or wrong about the assembly, whatever those then keep
+    -- and before a single pair or pixel is read.
+
+    Args:
+        contig_map: Parsed ``{contig name: genome name}`` table.
+        assembly_contigs: Every contig of the assembly, keyed by name, in the
+            assembly's order (only the keys are read).
+        source: What *contig_map* was parsed from: a path, which the messages
+            name, or a mapping passed in directly.
+        contig_table_format: The format a *source* path was read with.
+        assembly_source: Where the assembly's contig names came from, for the
+            messages, e.g. ``"the cool file x.cool"``.
+
+    Raises:
+        ValueError: If the table names no contig of the assembly, or no contig
+            at all.
+    """
+    if isinstance(source, str | Path):
+        table = f"the contig table {source}"
+        hint = (
+            f" and that --contigs-format (here {contig_table_format!r}) selects "
+            "its contig-name and genome-name columns"
+        )
+    else:
+        table, hint = "the contig-to-genome mapping", ""
+    if not contig_map:
+        raise ValueError(
+            f"There is no row in {table}, so no contig would be assigned to a genome."
+        )
+    unmatched = [name for name in contig_map if name not in assembly_contigs]
+    if len(unmatched) == len(contig_map):
+        raise ValueError(
+            f"None of the {len(contig_map)} contig name(s) in {table} matches a "
+            f"contig in {assembly_source}, so no contig would be assigned to a "
+            "genome.\n"
+            f"  table names:      {_quote_names(contig_map, _MAX_SHOWN_TABLE_NAMES)}\n"
+            "  assembly contigs: "
+            f"{_quote_names(assembly_contigs, _MAX_SHOWN_TABLE_NAMES)}\n"
+            f"Check that the table describes this assembly{hint}."
+        )
+    if unmatched:
+        logger.warning(
+            "%d of the %d name(s) in %s are not contigs in %s and were ignored: %s",
+            len(unmatched),
+            len(contig_map),
+            table,
+            assembly_source,
+            _quote_names(unmatched, _MAX_REPORTED_STRAY_CONTIGS),
+        )
+
+
 def _require_assigned_contigs(contig_lengths: dict, n_before: int) -> None:
     """Refuse a ``--drop-unassigned`` that left no contig at all.
 
     Without this the run streamed every pair before cooler failed with "not
-    enough values to unpack" -- hours later, and without naming the cause.
+    enough values to unpack" -- hours later, and without naming the cause.  A
+    table naming no contig of the assembly is refused before this, by
+    :func:`_check_contig_table_matches`, so what reaches it is a table whose
+    every match is unassigned.
 
     Args:
         contig_lengths: Contigs remaining after the drop.
@@ -1013,9 +1111,9 @@ def _require_assigned_contigs(contig_lengths: dict, n_before: int) -> None:
     """
     if not contig_lengths:
         raise ValueError(
-            f"--drop-unassigned removed all {n_before} contig(s): none is "
-            "assigned to a genome in the contig table. Check that its contig "
-            "names match the FASTA / pairs / bins file."
+            f"--drop-unassigned removed all {n_before} contig(s): the contig "
+            "table assigns none of them to a genome (an empty, NA-like or "
+            "__unbinned__ genome name counts as unassigned)."
         )
 
 
@@ -2403,6 +2501,9 @@ def from_pairs(
         contig_genome_map: Either a ``dict[contig_name → genome_name]`` or a path
             to a contig table file (see *contig_table_format*).  Format-specific
             colspec strings are also accepted (see ``io/contigs.py`` for details).
+            Contigs it does not list are collected under ``__unbinned__``, and
+            names that are not contigs of the assembly are ignored with a
+            warning, but it must name at least one contig of the assembly.
         contig_table_format: Column spec when *contig_genome_map* is a file path.
             Built-in values are ``"contigs"``, ``"contig_genome"``, and ``"metator"``,
             but any valid colspec string is accepted.
@@ -2462,8 +2563,9 @@ def from_pairs(
             are those of ``nproc=1``; memory grows by one batch per thread.
 
     Raises:
-        ValueError: If *nproc* is below 1, no pairs file is given, or the
-            pairs files are not compatible (see *pairs*).
+        ValueError: If *nproc* is below 1, no pairs file is given, the pairs
+            files are not compatible (see *pairs*), or *contig_genome_map*
+            names no contig of the assembly (checked before any pair is read).
         FileNotFoundError: If a pairs file does not exist -- checked before
             any is read, so a typo in the last of several libraries does not
             cost a binning pass over the others.
@@ -2508,15 +2610,31 @@ def from_pairs(
     if isinstance(bins, str | Path):
         bins_df = _read_bins_bed(bins)
         contig_lengths = _read_contig_lengths(bins=bins_df)
+        assembly_source = f"the bins file {bins}"
     elif isinstance(bins, pd.DataFrame):
         bins_df = bins.copy()
         contig_lengths = _read_contig_lengths(bins=bins_df)
+        assembly_source = "the bins table"
     elif bins is None:
         # Integer binsize mode: need contig lengths from fasta or pairs header
         contig_lengths = _read_contig_lengths(fasta=fasta, pairs=pairs_paths)
+        assembly_source = (
+            f"the FASTA {fasta}" if fasta is not None else "the pairs header(s)"
+        )
         bins_df = None
     else:
         raise TypeError("bins must be a path, DataFrame, or None")
+
+    # --- Check the contig table against the assembly, before a pair is read ---
+    # Against every contig the assembly names: non-positive lengths,
+    # --drop-unassigned and --filter only narrow the set afterwards.
+    _check_contig_table_matches(
+        cg_map,
+        contig_lengths,
+        source=contig_genome_map,
+        contig_table_format=contig_table_format,
+        assembly_source=assembly_source,
+    )
 
     # --- Resolve the reference ("fasta") contig order, if one is requested ---
     # When lengths come from a bins table their dict order is whatever
@@ -2767,7 +2885,10 @@ def from_cool(
         cool_uri: Path to the source cool file.
         output: Destination path for the output metacool file.
         contig_genome_map: Path to contig-to-genome assignment table
-            (``str`` or ``Path`` only; dicts are not accepted here).
+            (``str`` or ``Path`` only; dicts are not accepted here).  Contigs
+            it does not list are collected under ``__unbinned__``, and names
+            that are not contigs of the cool file are ignored with a warning,
+            but it must name at least one contig of the cool file.
         contig_table_format: Column spec for the contig assignment table.
             Built-in values are ``"contigs"``, ``"contig_genome"``,
             ``"metator"``, and ``"I,J"``, but any valid colspec string is
@@ -2803,7 +2924,9 @@ def from_cool(
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
 
     Raises:
-        ValueError: If ``cool_uri`` is not a valid cooler file.
+        ValueError: If ``cool_uri`` is not a valid cooler file, or
+            *contig_genome_map* names no contig of it (checked before any
+            pixel is read).
     """
     cool_path = Path(cool_uri)
     output_path = Path(output)
@@ -2849,7 +2972,9 @@ def from_cool(
     # ``observed=True`` also drops the empty groups a zero-length chrom would
     # otherwise contribute as a NaN max, which ``int()`` cannot convert.
     chroms = clr.chroms()[:]
-    contig_id_to_name = dict(enumerate(chroms["name"]))
+    # Every contig of the cool file, keyed by name in the file's order: the
+    # "cool" ordering preserves it, and the contig table is checked against it.
+    cool_contigs = dict.fromkeys(chroms["name"])
     _max_end = bins.groupby("chrom", observed=True)["end"].max()
     contig_lengths: dict[str, int] = {
         str(name): int(end)
@@ -2860,6 +2985,15 @@ def from_cool(
 
     # --- Parse contig assignments ---
     contig_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
+    # Against every contig of the cool file, before --drop-unassigned and
+    # --filter narrow them, and before a single pixel is read.
+    _check_contig_table_matches(
+        contig_map,
+        cool_contigs,
+        source=contig_genome_map,
+        contig_table_format=contig_table_format,
+        assembly_source=f"the cool file {cool_path}",
+    )
     extra_genomes_df = _load_extra_genomes_table(genomes_table)
 
     # --- Filter unassigned contigs ---
@@ -2881,9 +3015,7 @@ def from_cool(
     if contig_ordering == "cool":
         # Preserve the original contig order from the cool file's chroms table,
         # filtered to only contigs present in contig_lengths (after drop_unassigned).
-        contig_order = [
-            name for name in contig_id_to_name.values() if name in contig_lengths
-        ]
+        contig_order = [name for name in cool_contigs if name in contig_lengths]
     else:
         contig_order = _build_contig_order(
             contig_lengths=contig_lengths,
@@ -2915,7 +3047,7 @@ def from_cool(
     # Free the sources the tables were derived from before the pixel stream, for
     # the reason given in from_pairs: the streaming pass is where the memory is
     # wanted, and none of these is read again.
-    del bins, chroms, contig_id_to_name, contig_df, contig_map, extra_genomes_df
+    del bins, chroms, cool_contigs, contig_df, contig_map, extra_genomes_df
     del contig_lengths, contig_order
 
     # --- Stream, remap, sort, and write ---
