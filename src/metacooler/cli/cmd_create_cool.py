@@ -72,6 +72,7 @@ def cmd_create_cool(
     contigs: Path,
     contigs_format: str,
     genomes_table: Path | None,
+    genomes_format: str,
     contig_order: str,
     assembly_name: str | None,
     drop_unassigned: bool,
@@ -121,11 +122,9 @@ def cmd_create_cool(
         cool_uri=cool_path,
         output=output,
         contig_genome_map=contigs,
-        contig_table_format=cast(
-            Literal["contigs", "contig_genome", "metator", "I,J"],
-            contigs_format,
-        ),
+        contig_table_format=contigs_format,
         genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
         contig_ordering=cast(
             Literal["genome-then-length", "genome-then-alpha", "cool", "alpha"],
             contig_order,

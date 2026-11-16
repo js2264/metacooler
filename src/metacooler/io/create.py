@@ -34,6 +34,7 @@ from metacooler.io._utils import (
     to_upper_triangle,
     write_cooler,
 )
+from metacooler.io.colspec import CONTIGS_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
 from metacooler.io.contigs import parse_contigs_table
 from metacooler.io.genomes import parse_genomes_table
 from metacooler.ps import (
@@ -73,8 +74,10 @@ if TYPE_CHECKING:
     from typing import Literal
 
 
+# Genome names a contig table uses to say "no genome": MetaTOR writes ``ND``,
+# SemiBin2 ``-1``, and spreadsheets ``NA`` or an empty cell.
 _UNBINNED_SENTINELS: frozenset[str] = frozenset(
-    {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", ""}
+    {"__unbinned__", "na", "nan", "n/a", "nd", "n/d", "-1", ""}
 )
 # Row budget for the in-memory pixel sort, shared by ``from_pairs`` and
 # ``from_cool``. Beyond it, pixels go through cooler's external sort instead.
@@ -107,6 +110,8 @@ _GENOMES_RESERVED_COLUMNS = frozenset(
 _CONTIGS_RESERVED_COLUMNS = frozenset({"name", "length", "genome_id"})
 # How many distinct unknown contig names to remember for the dropped-pair report.
 _MAX_REPORTED_UNKNOWN_CONTIGS = 10
+# How many names to quote when a contig table matches (some of) no contig.
+_MAX_QUOTED_NAMES = 5
 # How many genome names to name when the contigs and genomes tables diverge.
 _MAX_REPORTED_DIVERGENT_GENOMES = 10
 
@@ -627,6 +632,26 @@ def _protect_reserved_columns(
     return df.rename(columns=renames)
 
 
+def _coerce_numeric_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
+    """Store each text column of *df* in *columns* as numbers, when all parse.
+
+    The one typing rule for user metadata: a column is numeric when every one
+    of its values parses as a number (an empty cell is a missing value), and
+    text otherwise -- so ``0.63`` sorts and filters as a number while a single
+    ``N/A`` keeps its whole column text.  ``create``, ``collect`` and
+    ``annotate`` all type their tables here, so one table gives one column type
+    whichever command stores it.
+
+    Args:
+        df: Table to convert, in place.
+        columns: Columns to consider; numeric ones are left alone.
+    """
+    for col in columns:
+        if pd.api.types.is_string_dtype(df[col].dtype) or df[col].dtype == object:
+            with contextlib.suppress(ValueError, TypeError):
+                df[col] = pd.to_numeric(df[col], errors="raise")
+
+
 def _report_genome_table_divergence(
     derived: list[str], extra_genomes_df: pd.DataFrame
 ) -> None:
@@ -756,13 +781,7 @@ def _build_genomes_table(
         # De-duplicate on the merge key so a repeated genome name cannot explode
         # the genomes table into duplicate rows (last row wins).
         extra = extra.drop_duplicates(subset="name", keep="last")
-        for col in extra_cols:
-            if (
-                pd.api.types.is_string_dtype(extra[col].dtype)
-                or extra[col].dtype == object
-            ):
-                with contextlib.suppress(ValueError, TypeError):
-                    extra[col] = pd.to_numeric(extra[col], errors="raise")
+        _coerce_numeric_columns(extra, extra_cols)
         df = df.merge(extra, on="name", how="left")
 
     # Ensure column order: name, length, n_contigs, then extras
@@ -845,15 +864,7 @@ def _build_contigs_table(
             # desync attrs['nchroms'] from len(/contigs)).  Last row wins,
             # matching the last-wins semantics of the contig→genome mapping.
             extra = extra.drop_duplicates(subset="name", keep="last")
-            # Convert types for extra columns
-            for col in extra_cols:
-                if (
-                    pd.api.types.is_string_dtype(extra[col].dtype)
-                    or extra[col].dtype == object
-                ):
-                    # Try numeric conversion
-                    with contextlib.suppress(ValueError, TypeError):
-                        extra[col] = pd.to_numeric(extra[col], errors="raise")
+            _coerce_numeric_columns(extra, extra_cols)
             df = df.merge(extra, on="name", how="left")
 
     # Ensure column order: name, length, genome_id, then extras
@@ -996,6 +1007,72 @@ def _apply_create_filters(
     if bins_df is not None:
         bins_df = bins_df[bins_df["chrom"].isin(filtered)].copy()
     return filtered, bins_df
+
+
+def _check_contig_map_matches(
+    cg_map: Mapping[str, str],
+    contig_lengths: Mapping[str, int],
+    source: dict[str, str] | str | Path,
+    contig_table_format: str,
+) -> None:
+    """Refuse a contig table that names no contig of the assembly.
+
+    A table read with the wrong columns -- a positional ``--contigs-format``
+    pointing one column off, an ID column taken for the contig names -- parses
+    cleanly and matches nothing, and every contig then lands in
+    ``__unbinned__``: a finished, valid, useless map, without a warning.
+    ``reassign`` already refuses such a table; this is the same rule for
+    ``create``, checked before any pair is binned.
+
+    An empty table is not refused (it is how a map is built before binning,
+    every contig unbinned), only reported; rows naming contigs the assembly
+    lacks are reported and ignored, since a table may cover a larger assembly.
+
+    Args:
+        cg_map: The parsed contig -> genome mapping.
+        contig_lengths: Every contig of the assembly.
+        source: Where *cg_map* came from: the table's path, or a dict.
+        contig_table_format: The column spec the table was read with.
+
+    Raises:
+        ValueError: If *cg_map* has rows but none names an assembly contig.
+    """
+    where = (
+        "The contig map"
+        if isinstance(source, dict)
+        else f"Contig table {str(source)!r}"
+    )
+    if not cg_map:
+        logger.warning(
+            "%s has no row: every contig is assigned to __unbinned__.", where
+        )
+        return
+    unknown = [name for name in cg_map if name not in contig_lengths]
+    if len(unknown) == len(cg_map):
+        examples = ", ".join(repr(n) for n in unknown[:_MAX_QUOTED_NAMES])
+        assembly = ", ".join(repr(n) for n in list(contig_lengths)[:_MAX_QUOTED_NAMES])
+        spec = (
+            ""
+            if isinstance(source, dict)
+            else (
+                f" Check that --contigs-format ({contig_table_format!r}) points at "
+                "the contig and the genome columns."
+            )
+        )
+        raise ValueError(
+            f"{where} names none of the assembly's {len(contig_lengths)} "
+            f"contig(s): its {len(cg_map)} contig name(s) look like {examples}, "
+            f"the assembly's like {assembly}.{spec}"
+        )
+    if unknown:
+        logger.warning(
+            "%s: %d of its %d contig(s) are not in the assembly and are "
+            "ignored, e.g. %s.",
+            where,
+            len(unknown),
+            len(cg_map),
+            ", ".join(repr(n) for n in unknown[:_MAX_QUOTED_NAMES]),
+        )
 
 
 def _require_assigned_contigs(contig_lengths: dict, n_before: int) -> None:
@@ -1818,18 +1895,21 @@ def _parse_contig_map(
 
 def _load_extra_genomes_table(
     genomes_table: str | Path | None,
+    fmt: str = GENOMES_FORMAT_DEFAULT,
 ) -> pd.DataFrame | None:
     """Load an optional genomes metadata table from disk.
 
     Args:
         genomes_table: Path to the TSV file, or ``None``.
+        fmt: Which column holds the genome names (see
+            :func:`metacooler.io.genomes.parse_genomes_table`).
 
     Returns:
         Parsed DataFrame or ``None`` if *genomes_table* is ``None``.
     """
     if genomes_table is None:
         return None
-    df = parse_genomes_table(genomes_table)
+    df = parse_genomes_table(genomes_table, fmt)
     logger.info(f"Parsed genomes table for {len(df)} genomes from {genomes_table}")
     return df
 
@@ -2363,7 +2443,7 @@ def from_pairs(
     bins: str | Path | pd.DataFrame | None = None,
     pairs: str | Path | Sequence[str | Path] | None = None,
     contig_genome_map: dict[str, str] | str | Path | None = None,
-    contig_table_format: str = "contigs",
+    contig_table_format: str = CONTIGS_FORMAT_DEFAULT,
     fasta: str | Path | None = None,
     assembly_name: str | None = None,
     contig_ordering: Literal[
@@ -2373,6 +2453,7 @@ def from_pairs(
     filters: Sequence[str] | None = None,
     binsize: int | None = None,
     genomes_table: str | Path | None = None,
+    genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
     pairs_kwargs: dict | None = None,
     metadata: dict | None = None,
     chunksize: int = DEFAULT_CHUNKSIZE,
@@ -2401,11 +2482,12 @@ def from_pairs(
             ``#chromsize:`` headers are united, and one contig given two
             different lengths is refused, as is the same file given twice.
         contig_genome_map: Either a ``dict[contig_name → genome_name]`` or a path
-            to a contig table file (see *contig_table_format*).  Format-specific
-            colspec strings are also accepted (see ``io/contigs.py`` for details).
-        contig_table_format: Column spec when *contig_genome_map* is a file path.
-            Built-in values are ``"contigs"``, ``"contig_genome"``, and ``"metator"``,
-            but any valid colspec string is accepted.
+            to a contig table file (see *contig_table_format*).  A table none
+            of whose rows names a contig of the assembly is refused.
+        contig_table_format: Which columns of a table *contig_genome_map* hold
+            the contig and the genome names: ``CONTIG,GENOME[,noheader]``, each
+            a 1-based position or a header name, or an alias (see
+            :func:`metacooler.io.contigs.parse_contigs_table`).
         fasta: Assembly fasta (required if *bins* is ``None``).
         assembly_name: Name for this assembly / metagenome.
         contig_ordering: Canonical ordering strategy.
@@ -2417,9 +2499,12 @@ def from_pairs(
             contig gets no bins, and its pairs are discarded while binning.
             ``genomes.n_bins`` is not available here.
         binsize: Fixed bin size (used only when *bins* is ``None``).
-        genomes_table: Optional path to a genomes metadata TSV **with a header
-            row**. The first column must be named ``genome_name``; any additional
-            columns are stored in the ``/genomes`` table.
+        genomes_table: Optional path to a genomes metadata TSV.  One column
+            holds the genome names (see *genomes_table_format*); every other
+            column is stored in the ``/genomes`` table.
+        genomes_table_format: Which column of *genomes_table* holds the genome
+            names: a 1-based position or a header name, plus ``,noheader`` for
+            a table without a header line.  Defaults to ``genome_name``.
         pairs_kwargs: Extra kwargs passed to the pairs reader (column
             indices, etc.), the same for every pairs file.
         metadata: Additional metadata dict stored in file attrs.
@@ -2502,7 +2587,7 @@ def from_pairs(
 
     # --- Parse contig map and optional genomes metadata table ---
     cg_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
-    extra_genomes_df = _load_extra_genomes_table(genomes_table)
+    extra_genomes_df = _load_extra_genomes_table(genomes_table, genomes_table_format)
 
     # --- Resolve contig lengths and initial bins DataFrame ---
     if isinstance(bins, str | Path):
@@ -2528,6 +2613,9 @@ def from_pairs(
 
     contig_lengths, bins_df = _drop_nonpositive_contigs(contig_lengths, bins_df)
     logger.info(f"Determined lengths for {len(contig_lengths)} contigs")
+    _check_contig_map_matches(
+        cg_map, contig_lengths, contig_genome_map, contig_table_format
+    )
 
     # --- Filter unassigned contigs ---
     if drop_unassigned:
@@ -2747,7 +2835,7 @@ def from_cool(
     cool_uri: str | Path,
     output: str | Path,
     contig_genome_map: str | Path,
-    contig_table_format: str = "contigs",
+    contig_table_format: str = CONTIGS_FORMAT_DEFAULT,
     genomes_table: str | Path | None = None,
     contig_ordering: Literal[
         "genome-then-length", "genome-then-alpha", "cool", "alpha"
@@ -2760,6 +2848,7 @@ def from_cool(
     sort_in_memory: bool | None = None,
     qc: bool = True,
     qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
+    genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
 ) -> None:
     """Create a metacool file from an existing cool file.
 
@@ -2767,11 +2856,12 @@ def from_cool(
         cool_uri: Path to the source cool file.
         output: Destination path for the output metacool file.
         contig_genome_map: Path to contig-to-genome assignment table
-            (``str`` or ``Path`` only; dicts are not accepted here).
-        contig_table_format: Column spec for the contig assignment table.
-            Built-in values are ``"contigs"``, ``"contig_genome"``,
-            ``"metator"``, and ``"I,J"``, but any valid colspec string is
-            accepted.
+            (``str`` or ``Path`` only; dicts are not accepted here).  A table
+            none of whose rows names a contig of the cool file is refused.
+        contig_table_format: Which columns of the table hold the contig and
+            the genome names: ``CONTIG,GENOME[,noheader]``, each a 1-based
+            position or a header name, or an alias (see
+            :func:`metacooler.io.contigs.parse_contigs_table`).
         genomes_table: Optional path to genomes metadata table.
         contig_ordering: Strategy for ordering contigs within the metacool file.
             ``'cool'`` preserves the original contig order from the input cool file.
@@ -2801,6 +2891,9 @@ def from_cool(
             measured between bin midpoints and the block records
             ``source="pixels"``.
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        genomes_table_format: Which column of *genomes_table* holds the genome
+            names: a 1-based position or a header name, plus ``,noheader`` for
+            a table without a header line.  Defaults to ``genome_name``.
 
     Raises:
         ValueError: If ``cool_uri`` is not a valid cooler file.
@@ -2860,7 +2953,10 @@ def from_cool(
 
     # --- Parse contig assignments ---
     contig_map, contig_df = _parse_contig_map(contig_genome_map, contig_table_format)
-    extra_genomes_df = _load_extra_genomes_table(genomes_table)
+    _check_contig_map_matches(
+        contig_map, contig_lengths, contig_genome_map, contig_table_format
+    )
+    extra_genomes_df = _load_extra_genomes_table(genomes_table, genomes_table_format)
 
     # --- Filter unassigned contigs ---
     if drop_unassigned:

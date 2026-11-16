@@ -42,10 +42,19 @@ from metacooler.io._utils import (
     check_output_not_an_input,
     chrom_codes,
     read_user_table,
+    rename_key_columns,
     resolve_count_dtype,
     store_qc,
     to_upper_triangle,
     write_cooler,
+)
+from metacooler.io.colspec import (
+    ASSIGNMENT_KEYS,
+    CONTIG_METADATA_FORMAT_DEFAULT,
+    CONTIGS_FORMAT_ALIASES,
+    GENOMES_FORMAT_DEFAULT,
+    parse_column_spec,
+    resolve_column_spec,
 )
 from metacooler.io.create import (
     _CONTIGS_RESERVED_COLUMNS,
@@ -58,6 +67,7 @@ from metacooler.io.create import (
     _ensure_nonempty_pixel_stream,
     _genome_id_order,
     _load_extra_genomes_table,
+    _normalize_genome_name,
     _protect_reserved_columns,
     _staged_output,
     _tally_pixel_qc,
@@ -488,52 +498,164 @@ def _report_genome_divergence(genomes: Sequence[str], extra: pd.DataFrame) -> No
         )
 
 
-def _load_contig_metadata(
-    path: str | Path, catalog: pd.DataFrame
-) -> pd.DataFrame | None:
-    """Read a per-contig metadata table and resolve its rows to collected contigs.
+#: Wording of the contig-metadata messages, per command: ``collect`` reads the
+#: table against the inputs it is collecting, ``annotate`` against a map that
+#: already exists.  The rules are the same; only the nouns differ.
+_CONTIG_METADATA_WORDING = {
+    "collect": {
+        "unit": "input",
+        "verb": "comes from",
+        "never": (
+            "collect assigns every contig to the genome of its input file; a "
+            "genome_name column only says which input a row refers to."
+        ),
+        "does_not": "it does not come from",
+        "target": "collected contig",
+        "naming": (
+            "A row names a contig as it appears in its input cool, or as "
+            "collected ('<genome>__<contig>')"
+        ),
+        "full_names": "the collected names ('<genome>__<contig>')",
+    },
+    "annotate": {
+        "unit": "genome",
+        "verb": "belongs to",
+        "never": (
+            "annotate never moves a contig to another genome: a genome_name "
+            "column is only checked. Leave that column out, or run 'metacooler "
+            "reassign' first to change the assignment."
+        ),
+        "does_not": "it does not belong to in this map",
+        "target": "contig of the map",
+        "naming": "A row names a contig as the map stores it",
+        "full_names": "the names the map stores ('<genome>__<contig>')",
+    },
+}
 
-    The table is a TSV with a header whose first column is ``contig_name``.
-    A row may name a contig as it appears in its input cool (``chromosome``)
-    or as it is collected (``E_coli__chromosome``).  A ``genome_name`` column
-    is optional; when present, each row is looked up inside that genome, which
-    is what disambiguates a name several inputs share, and a row that puts a
-    contig under a genome it does not come from is an error — collect assigns
-    every contig to the genome of its input, and never re-assigns one.  Every
-    other column is metadata, stored in ``/contigs``.
+
+def _read_contig_metadata(
+    path: str | Path, fmt: str = CONTIG_METADATA_FORMAT_DEFAULT
+) -> tuple[pd.DataFrame, bool]:
+    """Read a per-contig metadata table, its key columns relabelled.
+
+    The table is a TSV whose contig-name column *fmt* names (by default the
+    column called ``contig_name``).  An optional genome column says which
+    genome each row describes: the second column of a two-column *fmt*, or
+    else the header column called ``genome_name``.  Every other column is
+    metadata.
 
     Args:
         path: The table.
-        catalog: Output of :func:`_contig_catalog`.
+        fmt: Column spec (see :mod:`metacooler.io.colspec`): the contig-name
+            column, by 1-based position or header name, plus ``,noheader``
+            when the table has no header line.  A second column, when given,
+            is the genome column.
 
     Returns:
-        A frame shaped like :func:`metacooler.io.contigs.parse_contigs_table`'s:
-        ``contig_name`` (collected name), ``genome_id`` (genome name) and the
-        metadata columns, one row per described contig.  ``None`` when the
-        table has no metadata column.
+        ``(table, has_genome)``: the table with its contig column relabelled
+        ``contig_name`` and its genome column, if any, ``genome_name``; and
+        whether it has a genome column.
 
     Raises:
         FileNotFoundError: If *path* does not exist.
-        ValueError: If the table is empty or malformed, names a contig
-            ambiguously, or contradicts the genome a contig comes from.
+        ValueError: If *fmt* is malformed, or the table is empty, misaligned,
+            or lacks a column *fmt* names.
     """
+    spec = parse_column_spec(
+        fmt,
+        keys=ASSIGNMENT_KEYS,
+        required=1,
+        aliases=CONTIGS_FORMAT_ALIASES,
+        option="--contigs-format",
+    )
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Contigs table not found: {path}")
     if path.stat().st_size == 0:
         raise ValueError(f"Contigs table is empty: {path}")
-    table = read_user_table(path, kind="Contigs table")
-    if str(table.columns[0]) != "contig_name":
-        raise ValueError(
-            f"Contigs table expects its first column to be 'contig_name', got "
-            f"{str(table.columns[0])!r}: {path}"
-        )
-    has_genome = "genome_name" in table.columns
+    table = read_user_table(path, kind="Contigs table", header=spec.header)
+    positions = resolve_column_spec(
+        spec, list(table.columns), kind="Contigs table", path=path, keys=ASSIGNMENT_KEYS
+    )
+    keys = {positions[0]: "contig_name"}
+    if len(positions) > 1:
+        keys[positions[1]] = "genome_name"
+    elif spec.header:
+        # The optional genome column is found by its header name, as it always
+        # was; it is a check, so a table without one simply skips it.
+        labels = [str(column) for column in table.columns]
+        if "genome_name" in labels and labels.index("genome_name") != positions[0]:
+            keys[labels.index("genome_name")] = "genome_name"
+    # Positional, never by name: see rename_key_columns.
+    table = rename_key_columns(table, keys, kind="Contigs table")
+    return table, "genome_name" in keys.values()
+
+
+def _load_contig_metadata(
+    path: str | Path,
+    catalog: pd.DataFrame,
+    fmt: str = CONTIG_METADATA_FORMAT_DEFAULT,
+    *,
+    command: Literal["collect", "annotate"] = "collect",
+) -> pd.DataFrame | None:
+    """Read a per-contig metadata table and resolve its rows to known contigs.
+
+    See :func:`_read_contig_metadata` for the table and
+    :func:`_resolve_contig_metadata` for how its rows are matched.
+    """
+    table, has_genome = _read_contig_metadata(path, fmt)
+    return _resolve_contig_metadata(table, has_genome, catalog, path, command=command)
+
+
+def _resolve_contig_metadata(
+    table: pd.DataFrame,
+    has_genome: bool,
+    catalog: pd.DataFrame,
+    path: str | Path,
+    *,
+    command: Literal["collect", "annotate"] = "collect",
+) -> pd.DataFrame | None:
+    """Resolve the rows of a per-contig metadata table to known contigs.
+
+    A row may name a contig as stored (``E_coli__chromosome``) or by its
+    ``original`` name (``chromosome``, as in its input cool).  With a genome
+    column, each row is looked up inside that genome, which is what
+    disambiguates a name several genomes share, and a row that puts a contig
+    under a genome it does not come from is an error -- neither ``collect``
+    nor ``annotate`` ever moves a contig to another genome.  A genome name
+    ``create`` reads as "unbinned" (``NA``, ``ND``, ``-1``, ...) stands for
+    ``__unbinned__`` unless a genome really carries it.  Every other column is
+    metadata.
+
+    Args:
+        table: Output of :func:`_read_contig_metadata`.
+        has_genome: Whether *table* has a ``genome_name`` column.
+        catalog: One row per known contig: ``name`` (as stored), ``original``,
+            ``genome`` and ``source`` (where the contig comes from, for
+            messages).
+        path: The table, for messages.
+        command: Which command is asking, for the wording of the messages.
+
+    Returns:
+        A frame shaped like :func:`metacooler.io.contigs.parse_contigs_table`'s:
+        ``contig_name`` (stored name), ``genome_id`` (genome name) and the
+        metadata columns, one row per described contig.  ``None`` when the
+        table has no metadata column.
+
+    Raises:
+        ValueError: If a row names a contig ambiguously, or contradicts the
+            genome a contig comes from.
+    """
+    wording = _CONTIG_METADATA_WORDING[command]
     names = table["contig_name"]
     genome_of = pd.Series(catalog["genome"].to_numpy(), index=catalog["name"])
 
     if has_genome:
+        known = set(catalog["genome"])
         genomes = table["genome_name"]
+        genomes = genomes.where(
+            genomes.isin(known), genomes.map(_normalize_genome_name)
+        )
         # Inside the genome first: that lookup is the one a shared name needs.
         by_key = pd.Series(
             catalog["name"].to_numpy(),
@@ -543,11 +665,9 @@ def _load_contig_metadata(
         direct = resolved.isna() & names.isin(genome_of.index)
         wrong = direct & (names.map(genome_of) != genomes)
         resolved = resolved.fillna(names.where(direct & ~wrong))
-        # A contig that does exist, but under another collected genome.
+        # A contig that does exist, but under another known genome.
         elsewhere = (
-            resolved.isna()
-            & genomes.isin(set(catalog["genome"]))
-            & names.isin(set(catalog["original"]))
+            resolved.isna() & genomes.isin(known) & names.isin(set(catalog["original"]))
         )
         misplaced = wrong | elsewhere
         if misplaced.any():
@@ -555,7 +675,7 @@ def _load_contig_metadata(
             origin_of_collected = pd.Series(origin.to_numpy(), index=catalog["name"])
             origin_of_original = origin.groupby(catalog["original"]).agg(" and ".join)
             detail = "\n".join(
-                f"  {c!r} is listed under {g!r} but comes from genome "
+                f"  {c!r} is listed under {g!r} but {wording['verb']} genome "
                 + (
                     origin_of_collected[c]
                     if c in origin_of_collected.index
@@ -567,9 +687,8 @@ def _load_contig_metadata(
             )
             raise ValueError(
                 f"Contigs table ({path}): {int(misplaced.sum())} row(s) put a "
-                f"contig under a genome it does not come from:\n{detail}\n"
-                "collect assigns every contig to the genome of its input file; "
-                "a genome_name column only says which input a row refers to."
+                f"contig under a genome {wording['does_not']}:\n{detail}\n"
+                f"{wording['never']}"
             )
     else:
         originals = catalog["original"]
@@ -584,10 +703,10 @@ def _load_contig_metadata(
         if ambiguous.any():
             raise ValueError(
                 f"Contigs table ({path}): {int(ambiguous.sum())} row(s) name a "
-                "contig ambiguously — the name belongs to more than one input, "
-                f"e.g. {_examples(pd.unique(names[ambiguous]))}. Add a "
-                "genome_name column saying which genome each row describes, or "
-                "use the collected names ('<genome>__<contig>')."
+                f"contig ambiguously — the name belongs to more than one "
+                f"{wording['unit']}, e.g. {_examples(pd.unique(names[ambiguous]))}. "
+                "Add a genome_name column saying which genome each row "
+                f"describes, or use {wording['full_names']}."
             )
         resolved = names.map(unique_original)
         resolved = resolved.fillna(names.where(names.isin(genome_of.index)))
@@ -595,13 +714,14 @@ def _load_contig_metadata(
     matched = resolved.notna()
     if not matched.all():
         logger.warning(
-            "Contigs table (%s): %d of %d row(s) match no collected contig and "
-            "are ignored, e.g. %s. A row names a contig as it appears in its "
-            "input cool, or as collected ('<genome>__<contig>')%s.",
+            "Contigs table (%s): %d of %d row(s) match no %s and are ignored, "
+            "e.g. %s. %s%s.",
             path,
             int((~matched).sum()),
             len(table),
+            wording["target"],
             _examples(pd.unique(names[~matched])),
+            wording["naming"],
             ", in the genome its genome_name column gives" if has_genome else "",
         )
     repeated = resolved[matched].duplicated(keep=False)
@@ -902,6 +1022,8 @@ def collect(
     chunksize: int = DEFAULT_CHUNKSIZE,
     qc: bool = True,
     qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
+    genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
+    contigs_table_format: str = CONTIG_METADATA_FORMAT_DEFAULT,
 ) -> None:
     """Collect single-genome cool files into one metacool file, one genome each.
 
@@ -921,16 +1043,16 @@ def collect(
             sibling first and moved into place once it validates.
         names: Genome name for each input, in order.  Defaults to the file
             stems, which must then be unique.
-        genomes_table: Optional genomes metadata TSV with a header whose first
-            column is ``genome_name``, matched against the genome names; any
-            further column is stored in ``/genomes``.  A mismatch in either
+        genomes_table: Optional genomes metadata TSV.  Its genome-name column
+            (see *genomes_table_format*) is matched against the genome names;
+            every other column is stored in ``/genomes``.  A mismatch in either
             direction is reported as a warning.
-        contigs_table: Optional per-contig metadata TSV with a header whose
-            first column is ``contig_name``; any further column is stored in
-            ``/contigs``.  A row names a contig as in its input cool or as
-            collected.  An optional ``genome_name`` column says which genome
-            each row describes — it disambiguates names several inputs share,
-            and is checked, never used to move a contig to another genome.
+        contigs_table: Optional per-contig metadata TSV.  Its contig-name
+            column (see *contigs_table_format*) names a contig as in its input
+            cool or as collected; every other column is stored in ``/contigs``.
+            An optional ``genome_name`` column says which genome each row
+            describes — it disambiguates names several inputs share, and is
+            checked, never used to move a contig to another genome.
         contig_ordering: ``"cool"`` (default) keeps every input's own contig
             order; ``"genome-then-length"`` puts each genome's longest contig
             first; ``"genome-then-alpha"`` sorts each genome's contigs by name.
@@ -957,6 +1079,11 @@ def collect(
             as ``create cool`` does (``source="pixels"``).  The
             ``inter_genome`` category is 0 by construction.
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        genomes_table_format: Which column of *genomes_table* holds the genome
+            names: a 1-based position or a header name, plus ``,noheader`` for
+            a table without a header line.  Defaults to ``genome_name``.
+        contigs_table_format: Which column of *contigs_table* holds the contig
+            names, in the same grammar.  Defaults to ``contig_name``.
 
     Raises:
         ValueError: On an empty or ill-formed input list, inputs of different
@@ -1025,11 +1152,11 @@ def collect(
     contig_genome: dict[str, str] = dict(
         zip(catalog["name"], catalog["genome"], strict=True)
     )
-    extra_genomes_df = _load_extra_genomes_table(genomes_table)
+    extra_genomes_df = _load_extra_genomes_table(genomes_table, genomes_table_format)
     if extra_genomes_df is not None:
         _report_genome_divergence(genome_names, extra_genomes_df)
     contig_df = (
-        _load_contig_metadata(contigs_table, catalog)
+        _load_contig_metadata(contigs_table, catalog, contigs_table_format)
         if contigs_table is not None
         else None
     )

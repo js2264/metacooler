@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,39 +29,90 @@ from metacooler.uri import parse_uri
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
 
+logger = logging.getLogger("metacooler")
+
+#: The columns of ``/contigs`` and ``/genomes`` that say *what* a map is: which
+#: assembly, which genomes, which contig belongs to which, how many bins each
+#: holds.  Two maps merge only when these agree.  Every other column is
+#: metadata -- completeness, taxonomy, coverage, added at creation or later by
+#: ``annotate`` -- and the ``qc_*`` columns describe each input's own contacts;
+#: neither changes what the pixels mean, so neither may block a merge of
+#: replicates.  Requiring them equal made annotating one replicate (or
+#: re-running ``qc --store`` on it) enough to make it unmergeable.
+_IDENTITY_COLUMNS: dict[str, tuple[str, ...]] = {
+    "contigs": ("name", "length", "genome_id"),
+    "genomes": ("name", "length", "n_contigs", "n_bins"),
+}
+
+
+def _column_bytes(dataset: h5py.Dataset) -> bytes:
+    """Serialise one column for hashing, independently of its storage width.
+
+    Integers are widened to ``int64`` and floats to ``float64`` (``from_cool``
+    keeps a source's ``int32`` lengths where another writer stores ``int64``);
+    text is joined on NUL, which no name can contain, so neither a fixed-length
+    dtype's padding nor a vlen string's object array changes the digest.
+    """
+    arr = dataset[:]
+    if arr.dtype.kind in "iub":
+        return arr.astype(np.int64).tobytes()
+    if arr.dtype.kind == "f":
+        return arr.astype(np.float64).tobytes()
+    return b"\0".join(
+        v.encode() if isinstance(v, str) else bytes(v) for v in arr.ravel()
+    )
+
 
 def _hash_group(f: h5py.Group, group: str) -> str:
-    """Return an MD5 hex digest of all datasets in a group.
+    """Return an MD5 hex digest of the identity columns of a table.
 
     Used to compare ``contigs`` and ``genomes`` tables across files for
-    merge compatibility checking.
+    merge compatibility checking: only the columns in
+    :data:`_IDENTITY_COLUMNS` take part (see there for why).
 
     Args:
         f: Open ``h5py.File`` (or any HDF5 group-like object).
-        group: HDF5 group path to hash (e.g. ``"contigs"`` or ``"genomes"``).
+        group: Table to hash: ``"contigs"`` or ``"genomes"``.
 
     Returns:
-        Lowercase hex MD5 digest string of all dataset values, sorted by
-        key name for determinism.
+        Lowercase hex MD5 digest of the identity columns, in a fixed order.
     """
     h = hashlib.md5(usedforsecurity=False)
     g = f[group]
-    for key in sorted(g.keys()):
-        # QC columns describe each input's own contacts, not the assembly they
-        # share, so two libraries of the same metagenome legitimately differ
-        # there. Hashing them would reject exactly the merge this command
-        # exists for — replicates over one assembly.
-        if str(key).startswith(QC_COLUMN_PREFIX):
-            continue
-        arr = g[key][:]
-        # Variable-length string datasets read back as object arrays of Python
-        # strings; encode them to bytes for a stable hash.
-        if arr.dtype == object or str(arr.dtype).startswith("S"):
-            arr = np.array(
-                [v.encode() if isinstance(v, str) else bytes(v) for v in arr.ravel()]
-            )
-        h.update(arr.tobytes())
+    for key in _IDENTITY_COLUMNS[group]:
+        h.update(key.encode())
+        h.update(_column_bytes(g[key]) if key in g else b"<absent>")
     return h.hexdigest()
+
+
+def _metadata_digests(f: h5py.Group) -> dict[str, str]:
+    """Digest of every metadata column, keyed ``table.column``.
+
+    Metadata columns are those neither in :data:`_IDENTITY_COLUMNS` nor
+    ``qc_*``.
+    """
+    digests = {}
+    for table, identity in _IDENTITY_COLUMNS.items():
+        for key in f[table]:
+            if key in identity or str(key).startswith(QC_COLUMN_PREFIX):
+                continue
+            digests[f"{table}.{key}"] = hashlib.md5(
+                _column_bytes(f[table][key]), usedforsecurity=False
+            ).hexdigest()
+    return digests
+
+
+def _metadata_differences(first: dict[str, str], other: dict[str, str]) -> list[str]:
+    """Describe how an input's metadata columns differ from the first input's."""
+    out = []
+    for name in sorted(set(first) | set(other)):
+        if name not in other:
+            out.append(f"{name} (absent here)")
+        elif name not in first:
+            out.append(f"{name} (only here)")
+        elif first[name] != other[name]:
+            out.append(f"{name} (other values)")
+    return out
 
 
 def _bins_signature(f: h5py.Group) -> tuple[int, str]:
@@ -134,12 +186,15 @@ def merge(
 ) -> None:
     """Merge multiple ``.metacool`` files with identical axes into one.
 
-    All input files must have identical ``contigs`` and ``genomes`` tables
-    and the same ``contig-ordering`` attribute.  Pixels from all inputs are
-    concatenated, re-sorted externally by ``cooler.merge_coolers()``, and
-    saved to *output*.  Metacooler-specific groups (``genomes``, ``contigs``,
-    ``genome_offset``, format attributes) are then copied from the first
-    input file.
+    All input files must describe the same contigs and genomes -- names,
+    lengths, contig-to-genome assignment, bins per genome -- with the same
+    bins and the same ``contig-ordering`` attribute.  Their metadata columns
+    (completeness, coverage, ...) may differ: the output keeps the first
+    input's, and each difference is reported as a warning.  Pixels from all
+    inputs are concatenated, re-sorted externally by ``cooler.merge_coolers()``,
+    and saved to *output*.  Metacooler-specific groups (``genomes``,
+    ``contigs``, ``genome_offset``, format attributes) are then copied from the
+    first input file.
 
     Args:
         inputs: Iterable of paths to the input ``.metacool`` files, or
@@ -168,6 +223,7 @@ def merge(
     with _open_uri(first) as f0:
         contigs_hash = _hash_group(f0, "contigs")
         genomes_hash = _hash_group(f0, "genomes")
+        metadata_digests = _metadata_digests(f0)
         # ``contig-ordering`` may be absent or explicitly null; normalise both
         # sides of the comparison so a missing attribute does not later become
         # ``f.attrs[...] = None``, which h5py rejects with a raw TypeError.
@@ -211,6 +267,16 @@ def merge(
                 raise ValueError(f"Genomes table mismatch: {first} vs {inp}")
             if (f.attrs.get("contig-ordering") or "genome-then-alpha") != ordering:
                 raise ValueError(f"contig-ordering mismatch: {first} vs {inp}")
+            differences = _metadata_differences(metadata_digests, _metadata_digests(f))
+            if differences:
+                logger.warning(
+                    "%s has other metadata columns than %s: %s. The merged map "
+                    "keeps those of %s.",
+                    inp,
+                    first,
+                    ", ".join(differences),
+                    first,
+                )
 
     # Use cooler's merge logic on the pixel tables.  ``dtypes`` is mandatory:
     # without it the summed counts inherit the int32 of the inputs and wrap.

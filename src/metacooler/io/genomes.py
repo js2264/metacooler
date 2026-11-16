@@ -11,42 +11,54 @@ from pathlib import Path
 import pandas as pd
 
 from metacooler.io._utils import read_user_table, rename_key_columns
+from metacooler.io.colspec import (
+    GENOMES_FORMAT_DEFAULT,
+    GENOMES_KEYS,
+    parse_column_spec,
+    resolve_column_spec,
+)
 
 logger = logging.getLogger("metacooler")
 
 
-def parse_genomes_table(path: str | Path) -> pd.DataFrame:
-    """Parse a genomes metadata table (with header).
+def parse_genomes_table(
+    path: str | Path, fmt: str = GENOMES_FORMAT_DEFAULT
+) -> pd.DataFrame:
+    """Parse a genomes metadata table.
 
-    The file must be a tab-separated file **with a header row**.  The first
-    column must be named ``genome_name`` (required); any additional columns
-    are stored verbatim in the ``genomes`` table.
+    One column holds the genome names; every other column is metadata, stored
+    verbatim in the ``genomes`` table.
 
     Args:
         path: Path to the genomes TSV file.
+        fmt: Which column holds the genome names, in the grammar of
+            :mod:`metacooler.io.colspec`: a 1-based position or a header name,
+            plus ``,noheader`` when the table has no header line (its metadata
+            columns are then named ``col2``, ``col3``, ...).  Defaults to the
+            column named ``genome_name``, wherever it is.
 
     Returns:
-        DataFrame with at least a ``genome_id`` column (renamed from
-        ``genome_name``) and any extra columns.
+        DataFrame with a ``genome_id`` column (the genome names, relabelled in
+        place) and every other column of the table.
 
     Raises:
         FileNotFoundError: If *path* does not exist.
-        ValueError: If the file is empty, its header and data rows disagree on
-            the number of fields, or its first column is not named
-            ``genome_name``.
+        ValueError: If *fmt* is malformed, the file is empty, its header and
+            data rows disagree on the number of fields, or the column *fmt*
+            names is not in it.
     """
+    spec = parse_column_spec(fmt, keys=GENOMES_KEYS, option="--genomes-format")
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Genomes table not found: {path}")
     if path.stat().st_size == 0:
         raise ValueError(f"Genomes table is empty: {path}")
-    df = read_user_table(path, kind="Genomes table")
-    if df.columns[0] != "genome_name":
-        raise ValueError(
-            f"genomes table expects first column to be 'genome_name', "
-            f"got '{df.columns[0]}'."
-        )
-    df = rename_key_columns(df, {0: "genome_id"}, kind="Genomes table")
+    df = read_user_table(path, kind="Genomes table", header=spec.header)
+    (key,) = resolve_column_spec(
+        spec, list(df.columns), kind="Genomes table", path=path, keys=GENOMES_KEYS
+    )
+    # Positional, never by name: see rename_key_columns.
+    df = rename_key_columns(df, {key: "genome_id"}, kind="Genomes table")
     dup = df["genome_id"].duplicated()
     if dup.any():
         names = df.loc[dup, "genome_id"].unique().tolist()

@@ -17,7 +17,7 @@ A few conventions hold across the whole CLI:
 |------------|---------|
 | `METACOOL_PATH` | A **positional** path to a `.metacool` file, or an `.mmetacool` entry URI (`file.mmetacool::entries/<name>`). Every command takes its input this way — there are no input *options*. |
 | `-o, --output` | Output path. Required unless the command writes to stdout. |
-| `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create` and `reassign` keep the previous file until the new one has been written and validated. |
+| `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create`, `reassign` and `annotate` keep the previous file until the new one has been written and validated. |
 | `-v, --verbose` | Enable debug logging. Available on every command. |
 | `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
@@ -36,7 +36,8 @@ A few conventions hold across the whole CLI:
     ```
 
     Only `ls`, `tree`, and `attrs` — which describe the container itself —
-    accept a bare `.mmetacool` path.
+    accept a bare `.mmetacool` path, and [`annotate`](#annotate), which then
+    annotates every entry of the collection.
 
 !!! warning "Contig and genome names must be ASCII"
     `create` refuses a non-ASCII name before it bins anything:
@@ -167,9 +168,10 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.m
 | `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
-| `--contigs-format` | `contigs` | `contigs`, `contig_genome`, `metator`, or a column-index spec `I,J[,noheader]`. See [Creating from pairs](guides/from-pairs.md#contig-to-genome-table). |
-| `--genomes` | — | Optional genome metadata TSV (first column `genome_name`); extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
+| `--contigs` | *required* | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`. Its other columns land in `/contigs`. A table none of whose rows names a contig of the assembly is refused before anything is binned. |
+| `--contigs-format` | `contigs` | `CONTIG,GENOME[,noheader]`, each a 1-based position or a header name, or an alias for a binner's table — see [Contig and genome columns](#contigs-format) below. |
+| `--genomes` | — | Optional genome metadata TSV; extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
+| `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `Name` for CheckM2's `quality_report.tsv`, `user_genome` for GTDB-Tk's summary. |
 | `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a `commands` or `qc` key — those names are reserved for the provenance record and the contact-quality block metacooler writes itself. |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `fasta`, or `alpha`. See [Contig ordering](concepts.md#contig-ordering). |
 | `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs headers have no `#chromsize:` lines. |
@@ -211,6 +213,46 @@ metacooler create pairs \
     --contigs contigs2mag.tsv --contigs-format contig_genome \
     -o gut_T0_2kb.metacool
 ```
+
+#### Contig and genome columns { #contigs-format }
+
+`--contigs-format` says which two columns of the `--contigs` table hold the
+contig and the genome names, in that order:
+
+```console
+--contigs-format CONTIG,GENOME[,noheader]
+```
+
+Each column is a **1-based position** (digits only) or a **header name**
+(anything else), and the two can be mixed: `2,5`, `Name,Final_bin`,
+`1,Final_bin`. Add `,noheader` when the table has no header line; only
+positions work then. Names are looked up wherever they are in the header, and
+every other column of the table is stored in `/contigs` (named `col3`, `col4`,
+… in a table without a header).
+
+The default, `contigs`, means `contig_name,genome_name`: looked up by name, so a
+table given without its format fails with its header listed instead of being
+read with the wrong columns. Aliases cover the tables common binners write:
+
+| Alias | Same as | Table |
+|-------|---------|-------|
+| `contigs` | `contig_name,genome_name` | metacooler's own layout (the default). |
+| `contig_genome` | `1,2,noheader` | Two columns, contig then genome, no header. |
+| `metator` | `Name,Final_bin` | MetaTOR's `contig_data_final.txt`. |
+| `dastool` | `1,2,noheader` | DAS Tool's `*_DASTool_contigs2bin.tsv`, and the tables its `Fasta_to_Contigs2Bin.sh` builds from FASTA bins (MetaBAT2, MaxBin2, …). |
+| `binette` | `1,2,noheader` | Binette's `final_contig_to_bin.tsv`. |
+| `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |
+| `vamb` | `contigname,clustername` | VAMB's `vae_clusters_unsplit.tsv` / `vae_clusters_split.tsv`. |
+
+- **Unbinned contigs.** A contig absent from the table is unbinned, and so is
+  one whose genome reads `NA`, `N/A`, `nan`, `ND`, `n/d`, `-1` (SemiBin2's
+  unbinned label) or is empty: all of them land in `__unbinned__`.
+- **An alias wins** over a header name it happens to equal; give such a column
+  by position.
+- **CONCOCT** writes comma-separated tables, which have no alias: convert one
+  first (`tr ',' '\t' < clustering_merged.csv > clustering_merged.tsv`), then
+  give its columns by position — contig first, cluster second: `1,2`, or
+  `1,2,noheader` if the file has no header line.
 
 #### Several libraries { #create-pairs-libraries }
 
@@ -267,9 +309,10 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
 |--------|---------|-------------|
 | `--cool` | *required* | Input `.cool` file to convert. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
-| `--contigs-format` | `contigs` | Same choices as `create pairs`. |
+| `--contigs` | *required* | Contig-to-genome table; which columns hold the names is set by `--contigs-format`. A table none of whose rows names a contig of the cool file is refused. |
+| `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). |
 | `--genomes` | — | Optional genome metadata TSV. Decorates the genome rows derived from `--contigs`; same semantics and warnings as `create pairs`. |
+| `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
 | `--metadata` | — | JSON or YAML metadata file (no `commands` or `qc` key — see `create pairs`). |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `cool` (preserve the input's order), or `alpha`. |
 | `--assembly-name` | — | Assembly / metagenome name, stored as `genome-assembly`. |
@@ -316,8 +359,10 @@ file stem (`E_coli.cool` → `E_coli`) unless `--names` says otherwise, and
 |--------|---------|-------------|
 | `-o, --output` | *required* | Output `.metacool` path. It may not be one of the inputs. |
 | `--names` | file stems | Genome name for each input, in input order — comma-separated or repeated. Names (or, without `--names`, file stems) must be unique. |
-| `--genomes` | — | Optional genome metadata TSV (first column `genome_name`, matched against the genome names); extra columns land in `/genomes`. A genome with no row keeps empty metadata, a row matching no input is ignored, and both are reported as warnings. |
-| `--contigs` | — | Optional per-contig metadata TSV (first column `contig_name`); extra columns land in `/contigs`. See [The contigs table](#collect-contigs-table) below. |
+| `--genomes` | — | Optional genome metadata TSV; its genome-name column (`--genomes-format`) is matched against the genome names, and extra columns land in `/genomes`. A genome with no row keeps empty metadata, a row matching no input is ignored, and both are reported as warnings. |
+| `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line. |
+| `--contigs` | — | Optional per-contig metadata TSV; extra columns land in `/contigs`. See [The contigs table](#collect-contigs-table) below. |
+| `--contigs-format` | `contig_name` | Which column of `--contigs` holds the contig names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `contigName` or `1,noheader`. |
 | `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, before anything is written — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. Unlike in `create`, `genomes.n_bins` is available: the bins come with the inputs. See [Filtering with `--filter`](#filter). |
 | `--contig-order` | `cool` | Order of the contigs *within* each genome: `cool` keeps each input's own order, `genome-then-length` puts the longest first, `genome-then-alpha` sorts them by name. Genomes themselves are always laid out alphabetically, in `genome_id` order. |
@@ -378,8 +423,11 @@ resolutions), and a cooler stored as a full `square` matrix.
 #### The contigs table { #collect-contigs-table }
 
 `--contigs` attaches per-contig metadata — coverage, GC content, taxonomy — to
-the collected contigs. It is a TSV with a header whose first column is
-`contig_name`; every column other than `contig_name` and `genome_name` is
+the collected contigs. It is a TSV whose contig-name column is the one
+`--contigs-format` names: a 1-based position or a header name, plus
+`,noheader` when the table has no header line (its other columns are then
+named `col2`, `col3`, …). By default it is the column called `contig_name`,
+wherever it is. Every column other than the contig names and `genome_name` is
 stored in `/contigs`.
 
 ```text
@@ -438,10 +486,11 @@ metacooler reassign METACOOL_PATH --contigs TABLE --inplace [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--contigs` | *required* | New contig-to-genome table. It need not list every contig — see `--missing`. Only its two name columns are read; extra columns are ignored. |
-| `--contigs-format` | `contigs` | Same choices as `create pairs`: `contigs`, `contig_genome`, `metator`, or an `I,J[,noheader]` column spec. |
+| `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). |
 | `-o, --output` | *required* | Output `.metacool` path. Required unless `--inplace`. |
 | `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file. Only possible when no contig has to move (see `--layout`). |
-| `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. |
+| `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. To add or change a few columns without reassigning anything, use [`annotate`](#annotate). |
+| `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
 | `--missing` | `keep` | What to do with a contig the table does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
 | `--layout` | `auto` | `auto`, `keep`, `genome-then-alpha`, or `genome-then-length` — see below. |
 | `--metadata` | — | JSON or YAML metadata file (no `commands` key — see `create pairs`). |
@@ -550,6 +599,102 @@ metacooler reassign huge.metacool --contigs fixes.tsv --layout keep --inplace
 metacooler reassign reps.mmetacool::entries/rep1 --contigs fixes.tsv -o rep1_v2.metacool
 ```
 
+### `annotate` { #annotate }
+
+Add, replace or drop the **metadata columns** of `/genomes` and `/contigs` in a
+map that already exists — completeness and taxonomy from CheckM2 or GTDB-Tk,
+coverage from a depth table, anything that arrives after the map was built.
+Rows are matched by name; the genome assignment, the bins and the pixels are
+never touched, so this costs seconds even on a large map. **API:**
+`metacooler.annotate` (`metacooler.io.annotate.annotate`).
+
+```console
+metacooler annotate METACOOL_PATH [--genomes T] [--contigs T] [OPTIONS] (-o OUT | --inplace)
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--genomes` | — | Genomes metadata table. Its genome-name column (`--genomes-format`) is matched against `/genomes/name`; every other column is added to `/genomes`. |
+| `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `Name` for CheckM2's `quality_report.tsv`, `user_genome` for GTDB-Tk's summary. |
+| `--contigs` | — | Per-contig metadata table. Its contig-name column (`--contigs-format`) is matched against `/contigs/name`; every other column is added to `/contigs`. A `genome_name` column is **checked**, never applied: a row placing a contig under another genome than the map's is an error — that is [`reassign`](#reassign)'s job. |
+| `--contigs-format` | `contig_name` | Which column of `--contigs` holds the contig names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `contigName` for a MetaBAT depth table. |
+| `--columns` | all | Take only these columns of the tables, as `genomes.<name>` / `contigs.<name>` (comma-separated or repeated), named as in the tables. |
+| `--drop` | — | Remove these metadata columns, as `genomes.<name>` / `contigs.<name>`. |
+| `--replace` | off | Allow changing the values of a column the map already has. |
+| `--missing` | `keep` | For a replaced column, what the rows the table does not list get. `keep`: their current value, so a short table is a patch. `na`: an empty value, so the table is authoritative. |
+| `-o, --output` | — | Write an annotated copy here. Required unless `--inplace`. |
+| `--inplace` | off | Edit `METACOOL_PATH` itself. |
+| `-f, --force` | off | Overwrite the output if it already exists (only once the new file validates). An input is never overwritten. |
+| `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+A column gets the same name, values and type it would have had if its table
+had been given to `create` (or `collect`): a column called `name`, `length`,
+`n_contigs`, `n_bins` or `genome_id` is stored as `user_<name>`, and a column is
+numeric when every non-empty value parses as a number. So `--filter` reads an
+annotated column exactly as it reads one added at creation:
+
+```bash
+# CheckM2 completeness and contamination, straight from its report
+metacooler annotate gut_T0.metacool --inplace \
+    --genomes quality_report.tsv --genomes-format Name \
+    --columns genomes.Completeness,genomes.Contamination
+
+# ... then use them
+metacooler extract gut_T0.metacool --split -o hq \
+    --filter "genomes.Completeness >= 90" --filter "genomes.Contamination < 5"
+
+# Per-contig depth from MetaBAT's jgi_summarize_bam_contig_depths
+metacooler annotate gut_T0.metacool --inplace \
+    --contigs depth.txt --contigs-format contigName --columns contigs.totalAvgDepth
+
+# CheckM2 again, on the bins a reassignment changed: patch only those rows
+metacooler annotate gut_T0_v2.metacool --inplace --replace \
+    --genomes quality_report_v2.tsv --genomes-format Name
+
+# Every resolution of a zoomified collection at once
+metacooler annotate gut_T0.mmetacool --inplace --genomes gtdbtk.bac120.summary.tsv \
+    --genomes-format user_genome --columns genomes.classification
+```
+
+How rows and columns are matched:
+
+- **Names, not positions.** A table may list its rows in any order and cover
+  any subset of the map. A genome or contig it does not list gets an empty
+  value in a new column; a table row naming nothing in the map is ignored with
+  a warning; a table that matches *nothing* is refused — it is the wrong table,
+  or the format points at the wrong column. Rows are never added or removed.
+- **Existing columns.** Giving a column the values it already holds is not a
+  change, so re-running a command is harmless. A table that would change an
+  existing column is refused unless `--replace`, with the number of rows that
+  would change and an example.
+- **Derived columns are off limits.** `name`, `length`, `genome_id`,
+  `n_contigs`, `n_bins` and the `qc_*` columns cannot be dropped or replaced:
+  the assignment changes with [`reassign`](#reassign), the QC columns with
+  [`qc --store`](#qc).
+- **Contig names.** A row names a contig as the map stores it — or, in a map
+  made by [`collect`](#collect), as in its input cool (`chromosome`, with a
+  `genome_name` column to say which genome), as `collect` itself accepts. Its
+  `genome_name` may use the unbinned labels `create` reads as `__unbinned__`
+  (`NA`, `ND`, `-1`, …).
+- **ASCII in `/contigs`.** cooler reads every `/contigs` column, so a non-ASCII
+  value there is refused before anything is written; `/genomes` metadata may
+  hold any text.
+
+Where it writes:
+
+| `METACOOL_PATH` | With `--inplace` | With `-o OUT` |
+|-----------------|------------------|---------------|
+| `x.metacool` | `x` itself | a copy of `x` |
+| `c.mmetacool::entries/rep1` | that entry, inside `c`; the other entries are untouched | a standalone `.metacool` |
+| `c.mmetacool` | **every entry** of `c` | a copy of the whole collection |
+
+Every table is checked against every map before anything is written, and each
+annotated map is validated. The run is recorded in the map's metadata: the
+command line in `commands`, and the tables and the columns added, replaced and
+dropped in `annotate`. A run that changes nothing writes nothing. Since
+[`merge`](#merge) compares only the identity of two maps, an annotated
+replicate still merges with the others.
+
 ### `merge` { #merge }
 
 Sum the pixel counts of two or more metacool files that share **identical**
@@ -557,6 +702,13 @@ bins, contigs, genomes, and contig ordering (e.g. sequencing replicates of the
 same assembly). Inputs may be `.mmetacool` entry URIs. Integer counts are
 summed in `int64`, float counts in `float64`. **API:**
 `metacooler.merge` (`metacooler.io.merge.merge`).
+
+"Identical" means the same contig names and lengths, the same contig-to-genome
+assignment and the same genome sizes — the columns that say what the pixels
+are. Metadata columns (completeness, coverage, …, whether from creation or
+[`annotate`](#annotate)) and the `qc_*` columns may differ: the merged map keeps
+the first input's metadata, and each difference is reported as a warning naming
+the input and the columns.
 
 ```console
 metacooler merge A.metacool B.metacool [...] -o merged.metacool [OPTIONS]

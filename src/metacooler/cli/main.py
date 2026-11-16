@@ -198,6 +198,7 @@ click.rich_click.COMMAND_GROUPS = {
                 "create",
                 "collect",
                 "reassign",
+                "annotate",
                 "merge",
                 "binnify",
                 "zoomify",
@@ -245,6 +246,7 @@ def cli() -> None:
 # Import subcommands so they register
 from metacooler.cli import (  # noqa: E402, F401
     cmd_aggregate,
+    cmd_annotate,
     cmd_attrs,
     cmd_binnify,
     cmd_check,

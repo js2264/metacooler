@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING, cast
 import rich_click as click
 
 from metacooler.cli._options import (
-    CONTIGS_FORMAT_HELP,
     check_output,
+    contigs_format_option,
     force_option,
+    genomes_format_option,
     quiet_option,
     verbose_option,
 )
@@ -37,13 +38,7 @@ if TYPE_CHECKING:
         "columns are ignored."
     ),
 )
-@click.option(
-    "--contigs-format",
-    type=str,
-    default="contigs",
-    show_default=False,
-    help=CONTIGS_FORMAT_HELP,
-)
+@contigs_format_option
 @click.option(
     "-o",
     "--output",
@@ -66,12 +61,13 @@ if TYPE_CHECKING:
     type=click.Path(exists=True, path_type=Path),
     default=None,
     help=(
-        "Genomes metadata table for the new genomes (first column "
-        "[cyan]genome_name[/cyan]). Replaces — does not merge with — the "
-        "metadata columns carried over from the source [cyan]/genomes[/cyan] "
-        "table."
+        "Genomes metadata table for the new genomes (genome names in the "
+        "column [cyan]--genomes-format[/cyan] names). Replaces — does not "
+        "merge with — the metadata columns carried over from the source "
+        "[cyan]/genomes[/cyan] table."
     ),
 )
+@genomes_format_option
 @click.option(
     "--missing",
     type=click.Choice(["keep", "unbinned"]),
@@ -139,6 +135,7 @@ def cmd_reassign(
     output: Path | None,
     inplace: bool,
     genomes_table: Path | None,
+    genomes_format: str,
     missing: Literal["keep", "unbinned"],
     layout: str,
     metadata: Path | None,
@@ -190,6 +187,7 @@ def cmd_reassign(
         output=output,
         contig_table_format=contigs_format,
         genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
         missing=missing,
         layout=cast("Layout", layout),
         inplace=inplace,

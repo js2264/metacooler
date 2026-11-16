@@ -12,17 +12,46 @@ from pathlib import Path
 
 import rich_click as click
 
-# Help text for the ``--contigs-format`` option, shared by every command that
-# reads a contig-to-genome assignment table (``create pairs``, ``create cool``,
-# ``reassign``).  One copy, so the four formats cannot drift apart between the
-# command that writes a file and the command that re-labels it.
-CONTIGS_FORMAT_HELP = """
-    Format of the contig assignment table. Four formats are supported: [dim]\\[default: contigs][/dim]\n
-    - [yellow]contigs[/yellow]: TSV [white][bold]with a header row[/white][/bold]. Column 1 must be named `contig_name` and column 2 `genome_name`. Additional columns are stored verbatim.\n
-    - [yellow]contig_genome[/yellow]: Two-column TSV (`contig<TAB>genome`) [white][bold]with no header[/white][/bold]. First value is contig name, second is genome assignment.\n
-    - [yellow]metator[/yellow]: MetaTOR output table (ie `contig_data_final.txt`). Expects a header with columns `Name` (contig) and `Final_bin` (genome). Other columns ignored.\n
-    - [yellow]I,J(,noheader)[/yellow]: Column-index spec (1-based). Use column `I` for contigs and `J` for genomes. Header expected by default. Append `,noheader` (e.g., `1,5,noheader`) to treat the first row as data.
-    """
+from metacooler.io.colspec import (
+    ASSIGNMENT_KEYS,
+    CONTIG_METADATA_FORMAT_DEFAULT,
+    CONTIGS_FORMAT_ALIASES,
+    CONTIGS_FORMAT_DEFAULT,
+    GENOMES_FORMAT_DEFAULT,
+    GENOMES_KEYS,
+    parse_column_spec,
+)
+
+# Help texts for the column-spec options (grammar in metacooler.io.colspec).
+# One copy each, so the commands that read the same kind of table cannot drift
+# apart.  An *assignment* table (``create pairs``, ``create cool``,
+# ``reassign``) names two columns; a per-contig *metadata* table (``collect``,
+# ``annotate``) and a genomes table name one.
+CONTIGS_FORMAT_HELP = (
+    "Which columns of the [cyan]--contigs[/cyan] table hold the contig and the "
+    "genome names: [cyan]CONTIG,GENOME[/cyan], each a 1-based position or a "
+    "header name — e.g. [cyan]2,5[/cyan] or [cyan]Name,Final_bin[/cyan] — plus "
+    "[cyan],noheader[/cyan] when the table has no header line. "
+    f"[dim]\\[default: {CONTIGS_FORMAT_DEFAULT}][/dim]\n\n"
+    "Aliases for the tables of common binners: "
+    + ", ".join(
+        f"[yellow]{name}[/yellow] ({spec})"
+        for name, spec in CONTIGS_FORMAT_ALIASES.items()
+    )
+    + "."
+)
+CONTIG_METADATA_FORMAT_HELP = (
+    "Which column of the [cyan]--contigs[/cyan] table holds the contig names: a "
+    "1-based position or a header name — e.g. [cyan]contigName[/cyan] or "
+    "[cyan]2[/cyan] — plus [cyan],noheader[/cyan] when the table has no header "
+    f"line. [dim]\\[default: {CONTIG_METADATA_FORMAT_DEFAULT}][/dim]"
+)
+GENOMES_FORMAT_HELP = (
+    "Which column of the [cyan]--genomes[/cyan] table holds the genome names: a "
+    "1-based position or a header name — e.g. [cyan]Name[/cyan] (CheckM2) or "
+    "[cyan]user_genome[/cyan] (GTDB-Tk) — plus [cyan],noheader[/cyan] when the "
+    f"table has no header line. [dim]\\[default: {GENOMES_FORMAT_DEFAULT}][/dim]"
+)
 
 
 def parse_comma_list(ctx, param, value):
@@ -190,4 +219,87 @@ def quiet_option(f):
         "--quiet",
         is_flag=True,
         help="Suppress informational logging (warnings and errors still shown).",
+    )(f)
+
+
+def _column_spec_callback(
+    keys: tuple[str, ...],
+    *,
+    required: int | None = None,
+    aliases: dict[str, str] | None = None,
+):
+    """Build a callback checking a column spec while the options are parsed.
+
+    The spec is passed through unchanged -- the io layer parses it again when
+    it reads the table -- but a typo is reported before any file is opened,
+    and against the option that caused it.
+    """
+
+    def callback(ctx, param, value):
+        if value is None:
+            return value
+        try:
+            parse_column_spec(
+                value,
+                keys=keys,
+                required=required,
+                aliases=aliases,
+                option=param.opts[0],
+            )
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+        return value
+
+    return callback
+
+
+def contigs_format_option(f):
+    """Attach ``--contigs-format`` for a contig-to-genome *assignment* table.
+
+    Used by the commands whose ``--contigs`` table says which genome each
+    contig belongs to (``create pairs``, ``create cool``, ``reassign``), so the
+    spec names two columns.
+    """
+    return click.option(
+        "--contigs-format",
+        type=str,
+        default=CONTIGS_FORMAT_DEFAULT,
+        show_default=False,
+        metavar="SPEC",
+        callback=_column_spec_callback(ASSIGNMENT_KEYS, aliases=CONTIGS_FORMAT_ALIASES),
+        help=CONTIGS_FORMAT_HELP,
+    )(f)
+
+
+def contig_metadata_format_option(f):
+    """Attach ``--contigs-format`` for a per-contig *metadata* table.
+
+    Used by the commands whose ``--contigs`` table only describes contigs whose
+    genome is already known (``collect``, ``annotate``): the spec names the
+    contig column.  A second, genome column is accepted -- it is only checked
+    -- as are the assignment aliases, but neither is documented here.
+    """
+    return click.option(
+        "--contigs-format",
+        type=str,
+        default=CONTIG_METADATA_FORMAT_DEFAULT,
+        show_default=False,
+        metavar="SPEC",
+        callback=_column_spec_callback(
+            ASSIGNMENT_KEYS, required=1, aliases=CONTIGS_FORMAT_ALIASES
+        ),
+        help=CONTIG_METADATA_FORMAT_HELP,
+    )(f)
+
+
+def genomes_format_option(f):
+    """Attach ``--genomes-format``: which column of ``--genomes`` holds names."""
+    return click.option(
+        "--genomes-format",
+        type=str,
+        default=GENOMES_FORMAT_DEFAULT,
+        show_default=False,
+        metavar="SPEC",
+        callback=_column_spec_callback(GENOMES_KEYS),
+        help=GENOMES_FORMAT_HELP,
     )(f)

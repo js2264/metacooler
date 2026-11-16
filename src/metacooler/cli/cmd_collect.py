@@ -9,8 +9,10 @@ import rich_click as click
 
 from metacooler.cli._options import (
     check_output,
+    contig_metadata_format_option,
     filter_option,
     force_option,
+    genomes_format_option,
     parse_comma_list,
     quiet_option,
     verbose_option,
@@ -59,23 +61,25 @@ _ORDERINGS = ["cool", "genome-then-length", "genome-then-alpha"]
     "genomes_table",
     type=click.Path(exists=True, path_type=Path),
     help=(
-        "Optional genomes metadata table with header. First column must be "
-        "'genome_name', matched against the genome names; any further columns "
-        "are stored in the /genomes table."
+        "Optional genomes metadata table. Its genome-name column (see "
+        "[cyan]--genomes-format[/cyan]) is matched against the genome names; "
+        "every other column is stored in the /genomes table."
     ),
 )
+@genomes_format_option
 @click.option(
     "--contigs",
     "contigs_table",
     type=click.Path(exists=True, path_type=Path),
     help=(
-        "Optional per-contig metadata table with header. First column must be "
-        "'contig_name': a contig as named in its input cool, or as collected "
-        "([cyan]<genome>__<contig>[/cyan]). An optional 'genome_name' column says "
-        "which genome a row describes. Further columns are stored in the "
-        "/contigs table."
+        "Optional per-contig metadata table. Its contig-name column (see "
+        "[cyan]--contigs-format[/cyan]) names a contig as in its input cool, or "
+        "as collected ([cyan]<genome>__<contig>[/cyan]). An optional "
+        "'genome_name' column says which genome a row describes. Every other "
+        "column is stored in the /contigs table."
     ),
 )
+@contig_metadata_format_option
 @filter_option
 @click.option(
     "--metadata",
@@ -157,7 +161,9 @@ def cmd_collect(
     output: Path,
     names: list[str],
     genomes_table: Path | None,
+    genomes_format: str,
     contigs_table: Path | None,
+    contigs_format: str,
     filters: list[str],
     metadata: Path | None,
     contig_order: str,
@@ -206,7 +212,9 @@ def cmd_collect(
         output=output,
         names=names or None,
         genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
         contigs_table=contigs_table,
+        contigs_table_format=contigs_format,
         contig_ordering=cast(
             Literal["cool", "genome-then-length", "genome-then-alpha"], contig_order
         ),

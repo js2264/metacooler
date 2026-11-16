@@ -55,6 +55,7 @@ from metacooler.io._utils import (
     write_column,
     write_cooler,
 )
+from metacooler.io.colspec import CONTIGS_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
 from metacooler.io.create import (
     _build_contig_order,
     _build_contigs_table,
@@ -669,8 +670,9 @@ def reassign(
     contig_genome_map: str | Path | dict[str, str],
     output: str | Path | None = None,
     *,
-    contig_table_format: str = "contigs",
+    contig_table_format: str = CONTIGS_FORMAT_DEFAULT,
     genomes_table: str | Path | None = None,
+    genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
     missing: Literal["keep", "unbinned"] = "keep",
     layout: Layout = "auto",
     inplace: bool = False,
@@ -693,14 +695,18 @@ def reassign(
             ``{contig: genome}`` mapping.  It need not cover every contig — see
             *missing*.
         output: Destination ``.metacool`` path.  Required unless *inplace*.
-        contig_table_format: Layout of the reassignment table, as accepted by
-            :func:`metacooler.io.contigs.parse_contigs_table` (``contigs``,
-            ``contig_genome``, ``metator``, or an ``I,J[,noheader]`` column
-            spec).  Extra columns of the table are ignored; only the two name
-            columns are read.
+        contig_table_format: Which columns of the reassignment table hold the
+            contig and the genome names, as accepted by
+            :func:`metacooler.io.contigs.parse_contigs_table`:
+            ``CONTIG,GENOME[,noheader]``, each a 1-based position or a header
+            name, or an alias.  Extra columns of the table are ignored; only
+            the two name columns are read.
         genomes_table: Optional ``--genomes`` metadata table for the *new*
             genomes.  When given it replaces the metadata columns carried over
             from the source ``/genomes`` table rather than merging with them.
+        genomes_table_format: Which column of *genomes_table* holds the genome
+            names: a 1-based position or a header name, plus ``,noheader`` for
+            a table without a header line.  Defaults to ``genome_name``.
         missing: What to do with a contig the table does not mention.
             ``"keep"`` (default) leaves its current genome, which makes a short
             table an incremental edit; ``"unbinned"`` moves it to
@@ -839,7 +845,7 @@ def reassign(
         contig_lengths=contig_lengths,
         contig_genome_map=assignment,
         extra_genomes_df=(
-            _load_extra_genomes_table(genomes_table)
+            _load_extra_genomes_table(genomes_table, genomes_table_format)
             if genomes_table is not None
             else _carry_genome_metadata(
                 old_genomes,

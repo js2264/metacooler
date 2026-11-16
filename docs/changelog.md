@@ -4,6 +4,25 @@
 
 ### Breaking
 
+- **`create` refuses a contig table that names no contig of the assembly**,
+  before anything is binned. A table read with the wrong columns (a
+  positional `--contigs-format` one column off, an ID column taken for the
+  contig names) used to give a valid map with every contig in `__unbinned__`,
+  exit 0 and no warning. Rows naming contigs the assembly lacks are now
+  reported; an empty table still unbins everything, with a warning.
+- **The default `--contigs-format` (`contigs`) finds `contig_name` and
+  `genome_name` by name, wherever they are**, instead of requiring them to be
+  columns 1 and 2; likewise `--genomes`' `genome_name` and `collect --contigs`'
+  `contig_name`.
+- **`--contigs-format contig_genome` keeps a table's extra columns**, as `col3`,
+  `col4`, …, like every other headerless spec; it used to drop them.
+- **A genome named `-1` in a contig table means `__unbinned__`**, as `NA` and
+  `ND` already did: it is SemiBin2's label for unbinned contigs.
+- **`merge` compares only what makes two maps the same map** — contig names and
+  lengths, the contig-to-genome assignment, genome sizes. Metadata columns may
+  now differ between inputs: the output keeps the first input's, and each
+  difference is a warning. Integer width no longer matters either (`int32`
+  lengths from `create cool` against `int64` ones).
 - **`show` takes a positional input path.** The required `-f/--file` option is
   gone; `metacooler show FILE.metacool -o out.png` replaces
   `metacooler show -f FILE.metacool -o out.png`. `-f` now means `--force`, as in
@@ -114,6 +133,25 @@
 
 ### Added
 
+- **`metacooler annotate`** adds, replaces or drops metadata columns of
+  `/genomes` and `/contigs` in an existing map (API `metacooler.annotate`):
+  CheckM2, GTDB-Tk or depth tables that arrive after the map was built. Rows
+  are matched by name; the assignment, bins and pixels are never touched, so it
+  is cheap enough to run `--inplace`. Columns get the names, values and types
+  the same table would have given `create`. A changed column needs
+  `--replace` (`--missing keep|na` chooses between a patch and an authoritative
+  table); derived columns cannot be dropped or replaced; a contig table's
+  `genome_name` is checked, never applied; non-ASCII `/contigs` values are
+  refused. A bare `.mmetacool` path annotates every entry.
+- **One grammar for table columns.** `--contigs-format CONTIG,GENOME[,noheader]`
+  takes 1-based positions or header names (`Name,Final_bin`, `2,5`), and
+  aliases for common binners: `metator`, `dastool`, `binette`, `semibin`,
+  `vamb` (besides `contigs` and `contig_genome`). `collect` gets a
+  `--contigs-format` of its own, for its per-contig metadata table (see its
+  section).
+- **`--genomes-format`** on `create pairs`, `create cool`, `collect`, `reassign`
+  and `annotate`: which column of `--genomes` holds the genome names, so a
+  CheckM2 (`Name`) or GTDB-Tk (`user_genome`) report needs no editing.
 - **`create pairs` reads several pairs files in one pass** — one per Hi-C
   library of the same assembly: repeat `--pairs` (not comma-split, since a path
   may contain a comma), or pass a list as `from_pairs(pairs=[...])`; a single
