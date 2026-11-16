@@ -226,11 +226,13 @@ sequencing:
 --metadata sample_meta.yaml
 ```
 
-!!! warning "`commands` is reserved"
+!!! warning "Keys metacooler writes itself are reserved"
     A `--metadata` file may **not** contain a top-level `commands` key — that
     name holds metacooler's own provenance record (the exact command line used
-    to produce each file). Supplying it is an error; the file used to overwrite
-    the provenance silently.
+    to produce each file) — nor `qc`, `reassign` or `annotate`, which hold the
+    contact-quality block and those commands' histories. Supplying one is an
+    error; the file used to overwrite the provenance silently. `metacooler
+    metadata add` and `remove` refuse them too.
 
 ## Contig ordering
 
