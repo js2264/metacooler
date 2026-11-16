@@ -445,3 +445,81 @@ class TestNoBinningYet:
             contigs_table_format="contig_name,NA",
         )
         assert MetaCooler(out).contigs.set_index("name").loc["contig_A", "depth"] == 5
+
+
+class TestNoContigTable:
+    """No --contigs at all: the cooler plus the genome layer, nothing binned."""
+
+    def test_create_pairs_cli(self, tmp_path, tiny_pairs, tiny_bins_bed):
+        out = tmp_path / "o.metacool"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "create",
+                "pairs",
+                "--pairs",
+                str(tiny_pairs),
+                "--bins",
+                str(tiny_bins_bed),
+                "--filter",
+                "contigs.length >= 1",
+                "-o",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        genomes = MetaCooler(out).genomes
+        assert genomes["name"].tolist() == ["__unbinned__"]
+        assert genomes["n_contigs"].tolist() == [4]
+
+    def test_create_cool_keeps_the_cool_file(self, tmp_path, tiny_cool, caplog):
+        import cooler
+        import numpy as np
+
+        out = tmp_path / "o.metacool"
+        with caplog.at_level("INFO", logger="metacooler"):
+            from_cool(tiny_cool, out, contig_ordering="cool", qc=False)
+        assert "No contig table was given: nothing is binned yet" in caplog.text
+        src, dst = cooler.Cooler(str(tiny_cool)), cooler.Cooler(str(out))
+        assert list(src.chromnames) == list(dst.chromnames)
+        cols = ["start", "end"]
+        assert src.bins()[:][cols].equals(dst.bins()[:][cols])
+        assert np.array_equal(src.pixels()[:].to_numpy(), dst.pixels()[:].to_numpy())
+        assert MetaCooler(out).genomes["name"].tolist() == ["__unbinned__"]
+
+    def test_from_pairs_without_a_map(self, tmp_path, tiny_pairs, tiny_bins_bed):
+        out = tmp_path / "o.metacool"
+        from_pairs(out, bins=tiny_bins_bed, pairs=tiny_pairs, ps=False)
+        assert MetaCooler(out).genomes["name"].tolist() == ["__unbinned__"]
+
+    def test_a_map_of_the_wrong_type(self, tmp_path, tiny_pairs, tiny_bins_bed):
+        with pytest.raises(TypeError, match="a dict, a path, or None"):
+            from_pairs(
+                tmp_path / "o.metacool",
+                bins=tiny_bins_bed,
+                pairs=tiny_pairs,
+                contig_genome_map=42,  # ty: ignore[invalid-argument-type]
+            )
+
+    def test_genomes_and_drop_unassigned_are_refused(self, tmp_path, tiny_cool, checkm):
+        with pytest.raises(ValueError, match="no contig table was given, so no"):
+            from_cool(tiny_cool, tmp_path / "o.metacool", genomes_table=checkm)
+        with pytest.raises(ValueError, match="would drop every contig"):
+            from_cool(tiny_cool, tmp_path / "o.metacool", drop_unassigned=True)
+
+    def test_contigs_format_without_contigs_is_refused(self, tmp_path, tiny_cool):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "create",
+                "cool",
+                "--cool",
+                str(tiny_cool),
+                "--contigs-format",
+                "metator",
+                "-o",
+                str(tmp_path / "o.metacool"),
+            ],
+        )
+        assert result.exit_code == 2
+        assert "says how to read the --contigs table" in flat(result.output)

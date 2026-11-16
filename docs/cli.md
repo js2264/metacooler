@@ -164,7 +164,7 @@ a contig-to-genome assignment table. **API:** `metacooler.from_pairs`
 (`metacooler.io.create.from_pairs`).
 
 ```console
-metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.metacool [OPTIONS]
+metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT.metacool [OPTIONS]
 ```
 
 | Option | Default | Description |
@@ -172,7 +172,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.m
 | `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`, and its other columns land in `/contigs`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). |
+| `--contigs` | — | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`, and its other columns land in `/contigs`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). Leave it out to build a map with no binning yet. |
 | `--contigs-format` | `contigs` | `CONTIG,GENOME[,noheader]`, each a 1-based position or a header name, or an alias for a binner's table — see [Contig and genome columns](#contigs-format) below. |
 | `--genomes` | — | Optional genome metadata TSV; extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `Name` for CheckM2's `quality_report.tsv`, `user_genome` for GTDB-Tk's summary. |
@@ -202,9 +202,8 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.m
 
 ```bash
 # No binning yet: every contig in __unbinned__, to be binned with reassign later
-cut -f1 assembly.fa.fai > contigs.txt
 metacooler create pairs --pairs contacts.pairs.gz --bins 2000 --fasta assembly.fa \
-    --contigs contigs.txt --contigs-format 1,NA,noheader -o gut_T0.metacool
+    -o gut_T0.metacool
 
 # Fragment-level bins from MetaTOR output
 metacooler create pairs \
@@ -235,6 +234,11 @@ nor only this assembly:
 - **A row naming a contig the assembly does not have** is ignored, with a
   warning naming up to 10 such rows, so one table can serve several
   assemblies.
+- **No table at all** — `--contigs` left out — builds a map with **no binning
+  yet**: the cooler plus the genome layer, with every contig in a single
+  `__unbinned__` genome, to be binned later with [`reassign`](#reassign).
+  `--genomes` and `--drop-unassigned` are refused then — there is no genome to
+  describe, and every contig would be dropped.
 - **A table naming no contig of the assembly at all** — or with no row — is
   **refused**, before anything is binned. Every contig would land in
   `__unbinned__`, and that is never the map you meant: it is the wrong table,
@@ -291,14 +295,14 @@ read with the wrong columns. Aliases cover the tables common binners write:
 | `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |
 | `vamb` | `contigname,clustername` | VAMB's `vae_clusters_unsplit.tsv` / `vae_clusters_split.tsv`. |
 
-- **No binning yet.** `NA` in the genome's place — `1,NA,noheader` for a plain
-  list of contig names, `contig_name,NA` for a table with a header — says the
-  table has no genome column. Every contig then lands in `__unbinned__`, the
-  table's other columns are still stored in `/contigs`, and the contigs can be
-  binned later with [`reassign`](#reassign). It has to be written out: a spec
-  that just leaves the genome column off is an error, so a forgotten column
-  cannot pass for "no binning". `--genomes` and `--drop-unassigned` are refused
-  with it — there is no genome to describe, and every contig would be dropped.
+- **No binning yet, with contig metadata.** Leaving `--contigs` out builds a
+  map with no binning yet; to store a table's columns (depth, GC, …) in it
+  meanwhile, give the table with `NA` in the genome's place — `contig_name,NA`
+  for a table with a header, `1,NA,noheader` for one without. Every contig then
+  lands in `__unbinned__`, as without a table. `NA` has to be written out: a
+  spec that just leaves the genome column off is an error, so a forgotten
+  column cannot pass for "no binning". `--genomes` and `--drop-unassigned` are
+  refused with it, as without a table.
 - **An alias wins** over a header name it happens to equal; give such a column
   by position.
 - **CONCOCT** writes comma-separated tables, which have no alias: convert one
@@ -354,14 +358,14 @@ hierarchy on top of its bins and pixels. **API:** `metacooler.from_cool`
 (`metacooler.io.create.from_cool`).
 
 ```console
-metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
+metacooler create cool --cool IN.cool [--contigs C] -o OUT.metacool [OPTIONS]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--cool` | *required* | Input `.cool` file to convert. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; which columns hold the names is set by `--contigs-format`. Must name at least one contig of the cool file — see below. |
+| `--contigs` | — | Contig-to-genome table; which columns hold the names is set by `--contigs-format`. Must name at least one contig of the cool file — see below. Leave it out to build a map with no binning yet. |
 | `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). |
 | `--genomes` | — | Optional genome metadata TSV. Decorates the genome rows derived from `--contigs`; same semantics and warnings as `create pairs`. |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
@@ -380,7 +384,10 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
 - There is no `--fasta` option: contig lengths always come from the cool file's
   own bins table.
 - `--contig-order cool` is the only ordering that round-trips row order exactly;
-  the default regroups contigs by genome.
+  the default regroups contigs by genome. Without `--contigs`, it gives back the
+  cool file's contigs, bins and pixels unchanged, plus the genome layer with one
+  `__unbinned__` genome — and a later [`reassign`](#reassign) relabels such a
+  map in place instead of rewriting its pixels.
 - The `--contigs` table follows the rule of
   [`create pairs`](#create-contig-table), compared with the contigs of the cool
   file (its `chroms` table): unlisted contigs go to `__unbinned__`, rows naming

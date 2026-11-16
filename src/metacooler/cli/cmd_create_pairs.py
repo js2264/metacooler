@@ -7,7 +7,11 @@ from typing import Literal, cast
 
 import rich_click as click
 
-from metacooler.cli._options import check_output, nproc_option
+from metacooler.cli._options import (
+    check_output,
+    nproc_option,
+    refuse_contigs_format_without_contigs,
+)
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
 from metacooler.ps import DEFAULT_BINS_PER_DECADE
@@ -121,7 +125,7 @@ def cmd_create_pairs(
     output: Path,
     bins: str,
     pairs: tuple[Path, ...],
-    contigs: Path,
+    contigs: Path | None,
     contigs_format: str,
     genomes_table: Path | None,
     genomes_format: str,
@@ -150,6 +154,7 @@ def cmd_create_pairs(
     from metacooler.io.create import from_pairs
 
     setup_logging(verbose, command_name="metacooler create pairs", quiet=quiet)
+    refuse_contigs_format_without_contigs(contigs)
 
     check_output(
         output,

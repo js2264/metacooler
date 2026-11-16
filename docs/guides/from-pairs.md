@@ -139,13 +139,13 @@ is stored in the `/contigs` table. Aliases cover the tables of common binners
 
 === "No binning yet"
 
-    `NA` as the genome column: the table only lists contigs, and every contig
-    lands in `__unbinned__`. Bin them later with
-    [`metacooler reassign`](../cli.md#reassign).
+    Leave `--contigs` out: every contig lands in `__unbinned__`, and the map is
+    the cooler plus the genome layer. Bin it later with
+    [`metacooler reassign`](../cli.md#reassign). To store a table's columns
+    meanwhile, give it with `NA` as the genome column:
 
     ```bash
-    cut -f1 assembly.fa.fai > contigs.txt
-    --contigs contigs.txt --contigs-format 1,NA,noheader
+    --contigs depth.tsv --contigs-format contig_name,NA
     ```
 
 === "Binner aliases"

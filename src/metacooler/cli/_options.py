@@ -181,6 +181,30 @@ def check_output(
         raise click.ClickException(str(exc)) from exc
 
 
+def option_given(name: str) -> bool:
+    """Whether the option whose parameter is *name* was typed on the command line.
+
+    For an option with a default, the value alone cannot tell "given" from
+    "left at its default", and some options only mean something next to
+    another one -- ``--contigs-format`` without ``--contigs``.
+    """
+    from click.core import ParameterSource
+
+    ctx = click.get_current_context()
+    assert ctx is not None  # only ever called from inside a running command
+    return ctx.get_parameter_source(name) is ParameterSource.COMMANDLINE
+
+
+def refuse_contigs_format_without_contigs(contigs: object) -> None:
+    """Refuse a ``--contigs-format`` given without the table it describes."""
+    if contigs is None and option_given("contigs_format"):
+        raise click.UsageError(
+            "--contigs-format says how to read the --contigs table, which was "
+            "not given. Pass the table, or leave both out to build a map with "
+            "no binning yet."
+        )
+
+
 def force_option(f):
     """Attach the standard ``-f/--force`` flag to a command."""
     return click.option(

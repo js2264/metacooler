@@ -40,8 +40,13 @@ def shared_options(f):
         click.option(
             "--contigs",
             type=click.Path(exists=True, path_type=Path),
-            required=True,
-            help="Contig-to-genome assignment table. The expected layout depends on --contigs-format.",
+            default=None,
+            help=(
+                "Contig-to-genome assignment table; which columns hold the "
+                "names is set by [cyan]--contigs-format[/cyan]. Leave it out to "
+                "build a map with no binning yet: every contig in "
+                "__unbinned__, to be binned later with [cyan]reassign[/cyan]."
+            ),
         ),
         contigs_format_option,
         click.option(
