@@ -84,11 +84,15 @@ def metadata_add(
     """Add or update a metadata key-value pair."""
     import h5py
 
-    from metacooler.cli._provenance import read_metadata
+    from metacooler.cli._provenance import (
+        read_metadata,
+        refuse_reserved_metadata_key,
+    )
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.uri import parse_uri
 
     setup_logging(verbose, command_name="metacooler metadata add", quiet=quiet)
+    refuse_reserved_metadata_key(key, "set")
 
     # Try to parse as JSON for structured values
     try:
@@ -113,11 +117,15 @@ def metadata_remove(metacool_path: str, key: str, verbose: bool, quiet: bool) ->
     """Remove a metadata key."""
     import h5py
 
-    from metacooler.cli._provenance import read_metadata
+    from metacooler.cli._provenance import (
+        read_metadata,
+        refuse_reserved_metadata_key,
+    )
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.uri import parse_uri
 
     setup_logging(verbose, command_name="metacooler metadata remove", quiet=quiet)
+    refuse_reserved_metadata_key(key, "remove")
 
     file_path, group_path = parse_uri(metacool_path)
     with h5py.File(file_path, "a") as f:

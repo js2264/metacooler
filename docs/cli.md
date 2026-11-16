@@ -758,10 +758,11 @@ metacooler metadata load   sample_meta.yaml gut_T0.metacool      # INPUT_FILE fi
     `remove`, and `load` used to open the `.mmetacool` root and write there —
     exiting 0 while the value stayed invisible from every entry.
 
-The `commands` key holds metacooler's own provenance record and cannot be
-overwritten, either by `metadata load` or by a `--metadata` file at creation
-time. It is hidden from `metadata list` but readable with
-`metadata get -k commands`.
+Four keys belong to metacooler, which writes them itself: `commands` (the
+provenance record of every command that wrote the map), `qc` (the
+contact-quality block), and `reassign` and `annotate` (those commands'
+histories). `metadata list` and `metadata get` show them, but no `metadata`
+subcommand and no `--metadata` file can set or remove them.
 
 ---
 

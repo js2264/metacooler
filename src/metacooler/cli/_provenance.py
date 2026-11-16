@@ -1,9 +1,12 @@
 """Provenance and metadata helpers shared across metacooler CLI commands.
 
-``commands`` inside a file's ``metadata`` attribute is a reserved provenance
-key: it records every metacooler invocation that produced the file.  Every
-path that ingests a user-supplied metadata file must therefore refuse to let
-that key be overwritten — this module is the single place that enforces it.
+A few keys of a file's ``metadata`` attribute belong to metacooler, which
+writes them itself (:data:`RESERVED_METADATA_KEYS`): ``commands`` records every
+metacooler invocation that produced the file, ``qc`` the contact-quality block,
+``reassign`` and ``annotate`` those commands' histories.  Every user path that
+writes the attribute -- a ``--metadata`` file, ``metadata load``, ``metadata
+add`` and ``metadata remove`` -- must refuse to set or remove them, and this
+module is the single place that enforces it.
 """
 
 from __future__ import annotations
@@ -14,6 +17,16 @@ from pathlib import Path
 from typing import Any
 
 import rich_click as click
+
+#: Keys of the ``metadata`` attribute that metacooler writes itself, with what
+#: each holds.  Anyone may read them (``metadata list``/``get``); no user path
+#: may set or remove them.
+RESERVED_METADATA_KEYS: dict[str, str] = {
+    "commands": "reserved for provenance tracking",
+    "qc": "reserved for the contact-quality statistics metacooler records",
+    "reassign": "reserved for the history 'metacooler reassign' records",
+    "annotate": "reserved for the history 'metacooler annotate' records",
+}
 
 
 def reconstruct_command() -> str:
@@ -124,7 +137,7 @@ def load_metadata_file(path: str | Path | None) -> dict[str, Any]:
 
     Raises:
         click.BadParameter: If the file is not a JSON/YAML object, or contains
-            the reserved ``commands`` provenance key.
+            a key of :data:`RESERVED_METADATA_KEYS`.
     """
     if path is None:
         return {}
@@ -141,16 +154,34 @@ def load_metadata_file(path: str | Path | None) -> dict[str, Any]:
         raise click.BadParameter(
             f"Metadata file {str(path)!r} must contain a JSON/YAML object."
         )
-    if "commands" in meta:
-        raise click.BadParameter(
-            "Metadata file must not contain a 'commands' key — "
-            "that key is reserved for provenance tracking."
-        )
-    if "qc" in meta:
-        # create overwrote it with the contact-quality block without a word,
-        # and qc --store crashed on a non-object value.
-        raise click.BadParameter(
-            "Metadata file must not contain a 'qc' key — that key is reserved "
-            "for the contact-quality statistics metacooler records."
-        )
+    # 'qc' used to be overwritten by create's contact-quality block without a
+    # word, and qc --store crashed on a non-object value.
+    for key, why in RESERVED_METADATA_KEYS.items():
+        if key in meta:
+            raise click.BadParameter(
+                f"Metadata file must not contain a {key!r} key — that key is {why}."
+            )
     return stringify_values(meta)
+
+
+def refuse_reserved_metadata_key(key: str, action: str) -> None:
+    """Refuse to set or remove a key of :data:`RESERVED_METADATA_KEYS`.
+
+    ``metadata add -k commands --value '[]'`` used to wipe the provenance
+    record (and ``metadata remove`` to delete it), although a ``--metadata``
+    file was already refused the same key.
+
+    Args:
+        key: The key the user asked for.
+        action: What was asked, for the message: ``"set"`` or ``"remove"``.
+
+    Raises:
+        click.BadParameter: If *key* is reserved.
+    """
+    why = RESERVED_METADATA_KEYS.get(key)
+    if why is not None:
+        raise click.BadParameter(
+            f"Cannot {action} {key!r}: that key is {why}. Read it with "
+            f"'metacooler metadata get -k {key}'.",
+            param_hint="'-k' / '--key'",
+        )

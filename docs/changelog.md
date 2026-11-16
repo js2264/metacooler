@@ -340,6 +340,12 @@
 
 ### Fixed
 
+- **`metadata add` and `metadata remove` refuse the keys metacooler writes
+  itself** — `commands`, `qc`, and the `reassign` and `annotate` histories.
+  `metadata add -k commands --value '[]'` wiped the provenance record, and
+  `metadata remove -k commands` deleted it, both exiting 0, although a
+  `--metadata` file was already refused `commands` and `qc`. `--metadata` files
+  and `metadata load` now refuse the two history keys as well.
 - **`create pairs --sort-strategy external` works on large inputs with cooler
   < 0.12.** Its pixel chunks reached cooler's unordered writer unsorted, and
   cooler before 0.12 indexes each chunk as if it were sorted. Once the merge
