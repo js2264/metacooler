@@ -167,7 +167,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B --contigs C -o OUT.m
 | `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
+| `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). |
 | `--contigs-format` | `contigs` | `contigs`, `contig_genome`, `metator`, or a column-index spec `I,J[,noheader]`. See [Creating from pairs](guides/from-pairs.md#contig-to-genome-table). |
 | `--genomes` | — | Optional genome metadata TSV (first column `genome_name`); extra columns land in `/genomes`. It only *decorates* the genome rows derived from `--contigs` — it does not decide which genomes exist. A mismatch between the two tables is reported as a warning. See [Genomes metadata table](guides/from-pairs.md#genomes-metadata-table-optional). |
 | `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a `commands` or `qc` key — those names are reserved for the provenance record and the contact-quality block metacooler writes itself. |
@@ -211,6 +211,43 @@ metacooler create pairs \
     --contigs contigs2mag.tsv --contigs-format contig_genome \
     -o gut_T0_2kb.metacool
 ```
+
+#### The contig table { #create-contig-table }
+
+`--contigs` assigns contigs to genomes, and need not cover the whole assembly —
+nor only this assembly:
+
+- **A contig the table does not list** is collected under `__unbinned__`, or
+  dropped with `--drop-unassigned`. So is one listed with an empty or NA-like
+  genome name.
+- **A row naming a contig the assembly does not have** is ignored, with a
+  warning naming up to 10 such rows, so one table can serve several
+  assemblies.
+- **A table naming no contig of the assembly at all** — or with no row — is
+  **refused**, before anything is binned. Every contig would land in
+  `__unbinned__`, and that is never the map you meant: it is the wrong table,
+  or the right one read with the wrong `--contigs-format` — typically a leading
+  ID column read as `1,2`, which takes the IDs for contig names and the contig
+  names for genome names.
+
+```console
+$ metacooler create pairs ... --contigs mags.tsv --contigs-format 1,2
+Error: None of the 44 contig name(s) in the contig table mags.tsv matches a
+contig in the bins file fragments.bed, so no contig would be assigned to a
+genome.
+  table names:      '1', '2', '3', ...
+  assembly contigs: 'contig_1_000', 'contig_1_001', 'contig_1_002', ...
+Check that the table describes this assembly and that --contigs-format (here
+'1,2') selects its contig-name and genome-name columns.
+```
+
+The table is compared with every contig of the assembly — as named by the bins
+file, the FASTA or the pairs `#chromsize:` header, whichever supplies the
+contig lengths — *before* `--drop-unassigned` and `--filter` narrow them. A
+filter that keeps only contigs the table does not list is therefore not a
+refusal: those contigs are unbinned, as asked. `create cool` applies the same
+rule against the cool file's contigs, and [`reassign`](#reassign) refuses such
+a table too.
 
 #### Several libraries { #create-pairs-libraries }
 
@@ -267,7 +304,7 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
 |--------|---------|-------------|
 | `--cool` | *required* | Input `.cool` file to convert. |
 | `-o, --output` | *required* | Output `.metacool` path. |
-| `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. |
+| `--contigs` | *required* | Contig-to-genome table; layout set by `--contigs-format`. Must name at least one contig of the cool file — see below. |
 | `--contigs-format` | `contigs` | Same choices as `create pairs`. |
 | `--genomes` | — | Optional genome metadata TSV. Decorates the genome rows derived from `--contigs`; same semantics and warnings as `create pairs`. |
 | `--metadata` | — | JSON or YAML metadata file (no `commands` or `qc` key — see `create pairs`). |
@@ -286,6 +323,12 @@ metacooler create cool --cool IN.cool --contigs C -o OUT.metacool [OPTIONS]
   own bins table.
 - `--contig-order cool` is the only ordering that round-trips row order exactly;
   the default regroups contigs by genome.
+- The `--contigs` table follows the rule of
+  [`create pairs`](#create-contig-table), compared with the contigs of the cool
+  file (its `chroms` table): unlisted contigs go to `__unbinned__`, rows naming
+  a contig the cool file does not have are ignored with a warning, and a table
+  naming none of its contigs is refused before a single pixel is read — before
+  `--drop-unassigned` and `--filter` narrow anything.
 
 ```bash
 metacooler create cool \
@@ -529,8 +572,9 @@ moving a pixel.
 !!! note "`reassign` never adds or removes a contig"
     A name in the table that is not a contig of the file is ignored with a
     warning (and a table matching *no* contig at all is refused — that is a
-    wrong table, or a wrong `--contigs-format`). To *drop* contigs, and the
-    pixels that touch them, use [`extract`](#extract).
+    wrong table, or a wrong `--contigs-format` — as it is by
+    [`create`](#create-contig-table)). To *drop* contigs, and the pixels that
+    touch them, use [`extract`](#extract).
 
 ```bash
 # Incremental: move two contigs into MAG_07, leave everything else alone

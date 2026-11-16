@@ -252,6 +252,11 @@ By default, contigs absent from the contig table are assigned to a special
 metacooler create pairs ... --drop-unassigned
 ```
 
+A table that names *no* contig of the assembly is refused rather than sending
+every contig to `__unbinned__`: that is the wrong table, or the wrong
+`--contigs-format`. Rows naming contigs the assembly does not have are ignored
+with a warning. See [The contig table](../cli.md#create-contig-table).
+
 ## Large files
 
 Creation streams the pairs file in chunks, so memory stays bounded regardless of

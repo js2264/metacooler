@@ -99,6 +99,15 @@
 - **Zero-width bins in `--bins`, and a `--drop-unassigned` that removes every
   contig, are refused before binning** rather than failing after the whole
   pairs pass.
+- **`create pairs` and `create cool` refuse a `--contigs` table that names no
+  contig of the assembly**, or has no row, before anything is binned. Every
+  contig used to land in `__unbinned__`, and the command exited 0 with nothing
+  logged above INFO — the signature of the wrong table, or of the wrong
+  `--contigs-format` (a leading ID column read as `1,2` takes the IDs for
+  contig names). The error shows a few names from each side and points at
+  `--contigs-format`. A table naming contigs the assembly does not have is
+  still accepted, now with a warning naming up to 10 of them. See
+  [The contig table](cli.md#create-contig-table).
 - **`--metadata` files may not contain a `qc` key**, which `create` overwrote.
 - **`validate()` is stricter:** it refuses a repeated `(bin1_id, bin2_id)`
   pixel, a `/chroms` link that does not resolve to the map's own `/contigs`,

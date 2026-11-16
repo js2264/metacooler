@@ -520,14 +520,20 @@ class TestEarlyRefusals:
     def test_drop_unassigned_that_empties_the_map(
         self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path
     ):
-        """Failed only after the whole pairs pass, inside cooler."""
+        """Failed only after the whole pairs pass, inside cooler.
+
+        The table names a contig of the assembly -- one naming none is refused
+        earlier, as a wrong table -- but leaves it unassigned.
+        """
         table = tmp_path / "c.tsv"
-        table.write_text("contig_name\tgenome_name\nnot_a_contig\tMAG_1\n")
+        table.write_text("contig_name\tgenome_name\ncontig_A\tNA\n")
         result, out = _create(
             tmp_path, table, tiny_pairs, tiny_bins_bed, "--drop-unassigned"
         )
         assert result.exit_code != 0
         assert "removed all 4 contig(s)" in _flat(result.output)
+        assert "assigns none of them to a genome" in _flat(result.output)
+        assert not out.exists()
 
 
 class TestFromCoolAssembly:
