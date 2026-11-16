@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat
 from click.testing import CliRunner
 
 from metacooler.api import MetaCooler
@@ -34,11 +35,6 @@ def contigs_of(uri: str | Path) -> pd.DataFrame:
 
 def history(uri: str | Path) -> list[dict]:
     return MetaCooler(uri).metadata.get("annotate", [])
-
-
-def flat(output: str) -> str:
-    """A CLI error message with rich's box drawing and line wrapping undone."""
-    return " ".join(output.replace("│", " ").split())
 
 
 @pytest.fixture

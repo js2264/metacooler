@@ -172,9 +172,11 @@ class TestCreateCLI:
         )
         assert r.exit_code != 0
 
-    def test_create_pairs_missing_contigs_fails(
+    def test_create_pairs_contigs_format_without_contigs_fails(
         self, tiny_bins_bed, tiny_pairs, tmp_path
     ):
+        # --contigs itself is optional (a map with no binning yet); a format
+        # for a table that was never given is not.
         out = tmp_path / "out.metacool"
         r = _run(
             [
@@ -186,9 +188,13 @@ class TestCreateCLI:
                 str(tiny_bins_bed),
                 "--pairs",
                 str(tiny_pairs),
+                "--contigs-format",
+                "metator",
             ]
         )
-        assert r.exit_code != 0
+        assert r.exit_code == 2
+        assert "says how to read the --contigs table" in _flat(r.output)
+        assert not out.exists()
 
     # --- non-existent input paths ---
 

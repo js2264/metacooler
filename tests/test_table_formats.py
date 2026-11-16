@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _cli_output import flat
 from _cools import BSUB, ECOLI, make_cool
 from click.testing import CliRunner
 
@@ -18,11 +19,6 @@ from metacooler.io.reassign import reassign
 def write(path: Path, text: str) -> Path:
     path.write_text(text)
     return path
-
-
-def flat(output: str) -> str:
-    """A CLI error message with rich's box drawing and line wrapping undone."""
-    return " ".join(output.replace("│", " ").split())
 
 
 @pytest.fixture

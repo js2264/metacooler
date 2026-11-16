@@ -7,16 +7,12 @@ from pathlib import Path
 
 import h5py
 import pytest
+from _cli_output import flat
 from click.testing import CliRunner
 
 from metacooler.api import MetaCooler
 from metacooler.cli._provenance import RESERVED_METADATA_KEYS
 from metacooler.cli.main import cli
-
-
-def flat(output: str) -> str:
-    """A CLI error message with rich's box drawing and line wrapping undone."""
-    return " ".join(output.replace("│", " ").split())
 
 
 @pytest.fixture
