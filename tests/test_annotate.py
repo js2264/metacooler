@@ -381,6 +381,120 @@ class TestContigTableChecks:
         assert history(mc) == []
 
 
+# Worded for both callers: the API's unmatched="error" and the CLI's flag.
+REFUSED = "(?s){name}.*unmatched='error' \\(--unmatched error\\)"
+
+
+class TestUnmatchedRows:
+    """Rows naming nothing in the map: warned about, ignored quietly, or refused."""
+
+    @pytest.fixture
+    def stray_depth(self, tmp_path: Path) -> Path:
+        return write(
+            tmp_path / "stray_depth.tsv",
+            "contigName\ttotalAvgDepth\ncontig_A\t12.5\ncontig_Z\t3\n",
+        )
+
+    def _annotate(self, mc, checkm, stray_depth, **kwargs):
+        annotate(
+            mc,
+            genomes_table=checkm,
+            genomes_table_format="Name",
+            contigs_table=stray_depth,
+            contigs_table_format="contigName",
+            **kwargs,
+        )
+
+    @staticmethod
+    def _unmatched_records(caplog) -> list:
+        return [r for r in caplog.records if "and are ignored" in r.getMessage()]
+
+    def test_warn_is_the_default(self, mc, checkm, stray_depth, caplog):
+        """Guard: the default is the warning annotate always gave."""
+        self._annotate(mc, checkm, stray_depth, inplace=True)
+        records = self._unmatched_records(caplog)
+        assert {r.levelname for r in records} == {"WARNING"}
+        messages = " ".join(r.getMessage() for r in records)
+        assert "1 row(s) of the genomes table name no genome of the map" in messages
+        assert "1 of 2 row(s) match no contig of the map" in messages
+
+    def test_ignore_logs_at_debug_only(self, mc, checkm, stray_depth, caplog):
+        caplog.set_level("DEBUG", logger="metacooler")
+        self._annotate(mc, checkm, stray_depth, inplace=True, unmatched="ignore")
+        records = self._unmatched_records(caplog)
+        assert len(records) == 2
+        assert {r.levelname for r in records} == {"DEBUG"}
+        # The matching rows are applied as ever.
+        assert genomes_of(mc).loc["MAG_1", "Completeness"] == 91.5
+        assert contigs_of(mc).loc["contig_A", "totalAvgDepth"] == 12.5
+
+    def test_error_refuses_a_genome_row_before_writing(self, mc, checkm):
+        before = mc.read_bytes()
+        with pytest.raises(ValueError, match=REFUSED.format(name="MAG_99")):
+            annotate(
+                mc,
+                inplace=True,
+                genomes_table=checkm,
+                genomes_table_format="Name",
+                unmatched="error",
+            )
+        assert mc.read_bytes() == before
+
+    def test_error_refuses_a_contig_row_before_writing(self, mc, stray_depth):
+        before = mc.read_bytes()
+        with pytest.raises(ValueError, match=REFUSED.format(name="contig_Z")):
+            annotate(
+                mc,
+                inplace=True,
+                contigs_table=stray_depth,
+                contigs_table_format="contigName",
+                unmatched="error",
+            )
+        assert mc.read_bytes() == before
+
+    def test_error_accepts_a_table_that_matches_everywhere(self, mc, depth):
+        annotate(
+            mc,
+            inplace=True,
+            contigs_table=depth,
+            contigs_table_format="contigName",
+            unmatched="error",
+        )
+        assert contigs_of(mc).loc["contig_C", "totalAvgDepth"] == 3.0
+
+    @pytest.mark.parametrize("unmatched", ["ignore", "error"])
+    def test_a_table_matching_nothing_gets_its_own_refusal(
+        self, mc, tmp_path, unmatched
+    ):
+        """Not a row-by-row refusal: the table is wrong, or so is its format."""
+        genomes = write(tmp_path / "g.tsv", "genome_name\tX\nfoo\t1\n")
+        with pytest.raises(ValueError, match="matches no genome") as error:
+            annotate(mc, inplace=True, genomes_table=genomes, unmatched=unmatched)
+        assert "Refused under" not in str(error.value)
+
+    def test_a_refusal_with_nowhere_to_wait_is_raised_at_once(self):
+        from metacooler.io._utils import report_unmatched_rows
+
+        with pytest.raises(ValueError, match=REFUSED.format(name="'X'")):
+            report_unmatched_rows("error", "T: 1 row(s) match nothing", "'X'")
+
+    def test_bad_value(self, mc, checkm):
+        with pytest.raises(ValueError, match="unmatched must be"):
+            annotate(mc, inplace=True, genomes_table=checkm, unmatched="drop")  # ty: ignore[invalid-argument-type]
+
+    def test_cli(self, mc, checkm, stray_depth, tmp_path):
+        args = ["annotate", str(mc), "--genomes", str(checkm)]
+        args += ["--genomes-format", "Name", "--unmatched"]
+        refused = CliRunner().invoke(cli, [*args, "error", "--inplace"])
+        assert refused.exit_code != 0
+        assert "MAG_99" in flat(refused.output)
+        out = tmp_path / "out.metacool"
+        result = CliRunner().invoke(cli, [*args, "ignore", "-o", str(out)])
+        assert result.exit_code == 0, result.output
+        assert "are ignored" not in flat(result.output)
+        assert genomes_of(out).loc["MAG_1", "Completeness"] == 91.5
+
+
 class TestTargets:
     def test_output_copy_leaves_the_input_alone(self, mc, checkm, tmp_path):
         out = tmp_path / "out.metacool"

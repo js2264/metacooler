@@ -43,6 +43,7 @@ from metacooler.io._utils import (
     chrom_codes,
     read_user_table,
     rename_key_columns,
+    report_unmatched_rows,
     resolve_count_dtype,
     store_qc,
     to_upper_triangle,
@@ -85,6 +86,8 @@ from metacooler.uri import parse_uri
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
     from typing import Literal
+
+    from metacooler.io._utils import Unmatched
 
     CollectOrdering = Literal["cool", "genome-then-length", "genome-then-alpha"]
 
@@ -618,6 +621,8 @@ def _resolve_contig_metadata(
     path: str | Path,
     *,
     command: Literal["collect", "annotate"] = "collect",
+    unmatched: Unmatched = "warn",
+    deferred: list[str] | None = None,
 ) -> pd.DataFrame | None:
     """Resolve the rows of a per-contig metadata table to known contigs.
 
@@ -639,6 +644,10 @@ def _resolve_contig_metadata(
             messages).
         path: The table, for messages.
         command: Which command is asking, for the wording of the messages.
+        unmatched: What to do with rows that name no known contig (see
+            :func:`metacooler.io._utils.report_unmatched_rows`).
+        deferred: Where to collect, rather than raise, an ``"error"``
+            refusal (see the same function).
 
     Returns:
         A frame shaped like :func:`metacooler.io.contigs.parse_contigs_table`'s:
@@ -647,8 +656,9 @@ def _resolve_contig_metadata(
         table has no metadata column.
 
     Raises:
-        ValueError: If a row names a contig ambiguously, or contradicts the
-            genome a contig comes from.
+        ValueError: If a row names a contig ambiguously, contradicts the
+            genome a contig comes from, or (under ``unmatched="error"``) names
+            no known contig.
     """
     wording = _CONTIG_METADATA_WORDING[command]
     names = table["contig_name"]
@@ -717,16 +727,14 @@ def _resolve_contig_metadata(
 
     matched = resolved.notna()
     if not matched.all():
-        logger.warning(
-            "Contigs table (%s): %d of %d row(s) match no %s and are ignored, "
-            "e.g. %s. %s%s.",
-            path,
-            int((~matched).sum()),
-            len(table),
-            wording["target"],
+        in_genome = ", in the genome its genome_name column gives" if has_genome else ""
+        report_unmatched_rows(
+            unmatched,
+            f"Contigs table ({path}): {int((~matched).sum())} of {len(table)} "
+            f"row(s) match no {wording['target']}",
             _examples(pd.unique(names[~matched])),
-            wording["naming"],
-            ", in the genome its genome_name column gives" if has_genome else "",
+            f" {wording['naming']}{in_genome}.",
+            deferred=deferred,
         )
     repeated = resolved[matched].duplicated(keep=False)
     if repeated.any():

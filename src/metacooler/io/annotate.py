@@ -40,7 +40,14 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from metacooler.io._utils import check_output_path, write_column
+from metacooler.io._utils import (
+    UNMATCHED_CHOICES,
+    Unmatched,
+    check_output_path,
+    report_unmatched_rows,
+    unmatched_rows_error,
+    write_column,
+)
 from metacooler.io.colspec import CONTIG_METADATA_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
 from metacooler.qc import is_qc_column
 from metacooler.schema import (
@@ -139,6 +146,7 @@ def annotate(
     drop: Sequence[str] | None = None,
     replace: bool = False,
     missing: Missing = "keep",
+    unmatched: Unmatched = "warn",
     inplace: bool = False,
     metadata: dict | None = None,
     force: bool = False,
@@ -173,6 +181,11 @@ def annotate(
             get: ``"keep"`` (their current value: the table is a patch) or
             ``"na"`` (an empty value: the table is authoritative).  New
             columns always leave unlisted rows empty.
+        unmatched: What to do with the rows of a table that name no genome
+            (contig) of a map: ``"warn"`` (default) ignores them with a
+            WARNING, ``"ignore"`` without one (DEBUG only), ``"error"``
+            refuses the tables before anything is written.  A table that
+            matches nothing at all is refused whatever this says.
         inplace: Edit *uri* itself instead of writing *output*.
         metadata: Keys merged into each edited map's ``metadata`` attribute; a
             ``commands`` list is appended to the provenance already there.
@@ -180,9 +193,10 @@ def annotate(
             validates).
 
     Raises:
-        ValueError: On inconsistent arguments, a table that matches nothing, a
-            column the tables would change without *replace*, a derived column
-            in *drop*, or a contig table contradicting the genome assignment.
+        ValueError: On inconsistent arguments, a table that matches nothing (or,
+            under ``unmatched="error"``, a row that does), a column the tables
+            would change without *replace*, a derived column in *drop*, or a
+            contig table contradicting the genome assignment.
         MetaCoolerFormatError: If a ``/contigs`` column would hold non-ASCII
             text (cooler could no longer open the map).
         FileNotFoundError: If the map or a table does not exist.
@@ -201,6 +215,10 @@ def annotate(
         )
     if missing not in ("keep", "na"):
         raise ValueError(f"missing must be 'keep' or 'na', got {missing!r}.")
+    if unmatched not in UNMATCHED_CHOICES:
+        raise ValueError(
+            f"unmatched must be 'warn', 'ignore' or 'error', got {unmatched!r}."
+        )
     wanted = _qualified_names(columns, "columns")
     dropping = _qualified_names(drop, "drop")
     if genomes_table is None and contigs_table is None and not dropping:
@@ -238,6 +256,9 @@ def annotate(
     file_path, group_path = parse_uri(str(uri))
     groups = _map_groups(file_path, group_path)
     edits = []
+    # Rows refused under unmatched="error", raised once every map is planned:
+    # a table that matches nothing at all gets its own, clearer refusal first.
+    unmatched_rows: list[str] = []
     for group in groups:
         map_uri = f"{file_path}::{group}"
         if len(groups) > 1:
@@ -252,9 +273,11 @@ def annotate(
                 dropping,
                 replace=replace,
                 missing=missing,
+                unmatched=unmatched,
+                unmatched_rows=unmatched_rows,
             )
         )
-    _check_plans(edits, genomes_table, contigs_table, dropping)
+    _check_plans(edits, genomes_table, contigs_table, dropping, unmatched_rows)
 
     history = {
         "genomes_table": None if genomes_table is None else str(genomes_table),
@@ -441,6 +464,8 @@ def _plan_map(
     *,
     replace: bool,
     missing: Missing,
+    unmatched: Unmatched,
+    unmatched_rows: list[str],
 ) -> _MapEdit:
     """Work out, without writing, what annotating does to one map."""
     from metacooler.io.collect import _resolve_contig_metadata
@@ -456,7 +481,7 @@ def _plan_map(
         listed = set(keys)
         absent = [g for g in genome_names if g not in listed and g != "__unbinned__"]
         unknown = sorted(listed - set(genome_names))
-        _report_genomes(mc, absent, unknown)
+        _report_genomes(mc, absent, unknown, unmatched, unmatched_rows)
         genome_values = {
             column: pd.Series(genomes_extra[column].to_numpy(), index=keys.to_numpy())
             for column in genomes_extra.columns
@@ -484,6 +509,8 @@ def _plan_map(
             _catalog(mc, contigs, genome_names),
             contigs_path,
             command="annotate",
+            unmatched=unmatched,
+            deferred=unmatched_rows,
         )
         names = contigs["name"].astype(str).to_numpy()
         values: dict[str, pd.Series] = {}
@@ -530,13 +557,18 @@ def _plan_map(
 
 
 def _report_genomes(
-    mc: MetaCooler, absent: Sequence[str], unknown: Sequence[str]
+    mc: MetaCooler,
+    absent: Sequence[str],
+    unknown: Sequence[str],
+    unmatched: Unmatched = "warn",
+    unmatched_rows: list[str] | None = None,
 ) -> None:
     """Report names the genomes table and the map disagree on.
 
     A genome the table leaves out is normal -- a patch, a QC run over the
     high-quality bins only -- so it is only logged; a table row naming no
-    genome of the map is more often a typo or a renamed bin, so it warns.
+    genome of the map is more often a typo or a renamed bin, so it warns,
+    unless *unmatched* says otherwise.
     """
     if absent:
         logger.info(
@@ -547,12 +579,12 @@ def _report_genomes(
             _quote(absent),
         )
     if unknown:
-        logger.warning(
-            "%s: %d row(s) of the genomes table name no genome of the map and "
-            "are ignored, e.g. %s.",
-            mc.uri,
-            len(unknown),
+        report_unmatched_rows(
+            unmatched,
+            f"{mc.uri}: {len(unknown)} row(s) of the genomes table name no "
+            "genome of the map",
             _quote(unknown),
+            deferred=unmatched_rows,
         )
 
 
@@ -668,8 +700,13 @@ def _check_plans(
     genomes_table: str | Path | None,
     contigs_table: str | Path | None,
     dropping: dict[str, list[str]],
+    unmatched_rows: Sequence[str] = (),
 ) -> None:
-    """Refuse what would be wrong in every map, before any is written."""
+    """Refuse what would be wrong in every map, before any is written.
+
+    *unmatched_rows* are the rows refused under ``unmatched="error"``, which
+    only come after a table that matches nothing at all.
+    """
     for table, path in (("genomes", genomes_table), ("contigs", contigs_table)):
         if path is None:
             continue
@@ -680,6 +717,8 @@ def _check_plans(
                 f"{where}: it is the wrong table, or --{table}-format points at "
                 "the wrong column."
             )
+    if unmatched_rows:
+        raise ValueError(unmatched_rows_error(unmatched_rows))
     conflicts = {
         f"{name} ({edit.uri})" if len(edits) > 1 else name: detail
         for edit in edits

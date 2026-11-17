@@ -19,6 +19,12 @@
   `ContactQC.set_intra_contig()`, `metacooler.ops.qc.tally_map()` (the pixel
   pass of `qc`, with the bins' genomes as an option), and a `per_contig`
   argument to `store_qc`.
+- **`annotate --unmatched warn|ignore|error`** (API: `annotate(...,
+  unmatched=)`): what to do with the rows of a genomes or contigs table that
+  name no genome or contig of the map. `warn`, the default, keeps the warning
+  `annotate` always gave; `ignore` says nothing about them (a debug line);
+  `error` refuses the tables before anything is written. A table that matches
+  nothing at all is still refused in every case.
 
 ### Changed
 

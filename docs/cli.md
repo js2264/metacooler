@@ -730,6 +730,7 @@ metacooler annotate METACOOL_PATH [--genomes T] [--contigs T] [OPTIONS] (-o OUT 
 | `--drop` | — | Remove these metadata columns, as `genomes.<name>` / `contigs.<name>`. |
 | `--replace` | off | Allow changing the values of a column the map already has. |
 | `--missing` | `keep` | For a replaced column, what the rows the table does not list get. `keep`: their current value, so a short table is a patch. `na`: an empty value, so the table is authoritative. |
+| `--unmatched` | `warn` | What to do with the rows of a table that name no genome or contig of the map. `warn`: ignore them with a warning. `ignore`: ignore them silently (logged at debug level). `error`: refuse the tables before anything is written. A table that matches nothing at all is refused whatever this says. |
 | `-o, --output` | — | Write an annotated copy here. Required unless `--inplace`. |
 | `--inplace` | off | Edit `METACOOL_PATH` itself. |
 | `-f, --force` | off | Overwrite the output if it already exists (only once the new file validates). An input is never overwritten. |
@@ -769,8 +770,10 @@ How rows and columns are matched:
 - **Names, not positions.** A table may list its rows in any order and cover
   any subset of the map. A genome or contig it does not list gets an empty
   value in a new column; a table row naming nothing in the map is ignored with
-  a warning; a table that matches *nothing* is refused — it is the wrong table,
-  or the format points at the wrong column. Rows are never added or removed.
+  a warning (`--unmatched ignore` drops the warning, `--unmatched error`
+  refuses such a row instead); a table that matches *nothing* is refused — it
+  is the wrong table, or the format points at the wrong column. Rows are never
+  added or removed.
 - **Existing columns.** Giving a column the values it already holds is not a
   change, so re-running a command is harmless. A table that would change an
   existing column is refused unless `--replace`, with the number of rows that
