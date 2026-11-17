@@ -77,6 +77,7 @@ link `/chroms → /contigs` makes it transparent to the cooler ecosystem.
 | `name` | `S<n>` (fixed bytes) | Contig name, unique within the file, ASCII only (see [Names must be ASCII](#names-must-be-ascii)). |
 | `length` | `int32` | Contig length in bp. |
 | `genome_id` | `int32` | Zero-based index into `/genomes`. |
+| `qc_intra_contig_short`, `qc_intra_contig_long` | `int64` / `float64` | Optional per-contig contact-quality columns (see [Contact-quality block](#qc-block)), present whenever the `metadata["qc"]` block was stored with them. |
 | *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`), at creation or later with `metacooler annotate`. ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. |
 
 Row order is determined by the `--contig-order` strategy chosen at creation time
@@ -230,8 +231,8 @@ grouping its rows no longer have.
 ## Contact-quality block { #qc-block }
 
 `create` records where the library's contacts landed, and `metacooler qc`
-recomputes it on demand. It occupies two places in the file, both optional —
-a file written with `--no-qc` has neither.
+recomputes it on demand. It occupies three places in the file, all optional —
+a file written with `--no-qc` has none of them.
 
 **`metadata["qc"]`**, a JSON object inside the root `metadata` attribute,
 alongside the `commands` provenance list:
@@ -256,10 +257,35 @@ alongside the `commands` provenance list:
 inter-genome contact is credited to both genomes involved, so these columns sum
 to more than the file-level totals.
 
-Both are statements about one specific pixel table, so `binnify` and `merge`
-drop them from their output instead of carrying them forward, and `merge`
-ignores `qc_*` columns when it compares the inputs' `/genomes` tables for
-compatibility — two libraries over one assembly legitimately differ there.
+**`/contigs` columns**, one row per contig: `qc_intra_contig_short` and
+`qc_intra_contig_long` (`int64`; `float64` on a map with float counts), the
+same split contig by contig. A contig's contacts with itself are credited to
+its genome, so each `/genomes` column of that name is the sum of this one over
+the genome's contigs, and the column totals are the block's
+`intra_contig_short` and `intra_contig_long`. Written with the block by every
+command that stores one (`create`, `collect`, `qc --store`, `reassign`); maps
+written by metacooler 0.2.0 and earlier do not have them. These two are the
+only `qc_*` columns metacooler writes to `/contigs`: any other (`qc_pass`, from
+a `--contigs` table) is user metadata — every writer keeps it, `annotate` can
+drop it, and `merge` compares it like any metadata column.
+
+These two categories are the only ones that do not depend on the
+contig-to-genome assignment, which is why they are kept per contig:
+[`reassign`](cli.md#reassign) carries them over, sums them per new genome and
+re-measures only the two inter-contig categories from the pixels — exactly, at
+any bin size — so a `source="pairs"` block keeps its split measured on read
+positions, and every other key of the block (`source`, `distance_threshold`,
+`binsize`, `n_pairs_read`, `n_pairs_discarded`) is kept as it was. A source
+without these columns (or whose columns no longer add up to its block) has
+its block recomputed from the pixels instead, and loses the split measured on
+read positions.
+
+All three are statements about one specific pixel table, so `binnify` and
+`merge` drop them from their output instead of carrying them forward, and
+`merge` ignores `qc_*` columns when it compares the inputs' `/genomes` and
+`/contigs` tables for compatibility — two libraries over one assembly
+legitimately differ there. The names are reserved: a user table column called
+`qc_intra_contig_short`, say, is stored as `user_qc_intra_contig_short`.
 
 !!! note "P(s) is a companion file, not part of the format"
     `create pairs` also writes a per-MAG P(s) curve, but as a plain TSV beside

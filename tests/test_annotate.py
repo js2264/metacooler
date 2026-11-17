@@ -280,8 +280,23 @@ class TestDrop:
         ]
         validate(mc)
 
+    def test_a_user_qc_column_of_contigs_can_be_dropped(self, mc, tmp_path):
+        """In /contigs only the two QC columns are derived; qc_pass is metadata."""
+        table = write(tmp_path / "qc_pass.tsv", "contig_name\tqc_pass\ncontig_A\t1\n")
+        annotate(mc, inplace=True, contigs_table=table)
+        assert "qc_pass" in contigs_of(mc).columns
+        annotate(mc, inplace=True, drop=["contigs.qc_pass"])
+        assert "qc_pass" not in contigs_of(mc).columns
+        validate(mc)
+
     @pytest.mark.parametrize(
-        "column", ["genomes.n_bins", "contigs.genome_id", "genomes.qc_inter_genome"]
+        "column",
+        [
+            "genomes.n_bins",
+            "contigs.genome_id",
+            "genomes.qc_inter_genome",
+            "contigs.qc_intra_contig_short",
+        ],
     )
     def test_derived_columns_cannot_be_dropped(self, mc, column):
         with pytest.raises(ValueError, match="metacooler derives these columns"):

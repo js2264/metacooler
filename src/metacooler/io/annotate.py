@@ -42,7 +42,7 @@ import pandas as pd
 
 from metacooler.io._utils import check_output_path, write_column
 from metacooler.io.colspec import CONTIG_METADATA_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
-from metacooler.qc import QC_COLUMN_PREFIX
+from metacooler.qc import is_qc_column
 from metacooler.schema import (
     MetaCoolerFormatError,
     format_ascii_violations,
@@ -315,9 +315,7 @@ def _check_drops(dropping: dict[str, list[str]], wanted: dict[str, list[str]]) -
         "contigs": _CONTIGS_RESERVED_COLUMNS,
     }
     for table, names in dropping.items():
-        derived = [
-            n for n in names if n in protected[table] or n.startswith(QC_COLUMN_PREFIX)
-        ]
+        derived = [n for n in names if n in protected[table] or is_qc_column(table, n)]
         if derived:
             raise ValueError(
                 f"Cannot drop {', '.join(f'{table}.{n}' for n in derived)}: "

@@ -726,6 +726,8 @@ def test_qc_is_recomputed_for_the_new_assignment(tmp_path: Path, tiny_metacooler
 
 
 def test_no_qc_drops_the_stale_block(tmp_path: Path, tiny_metacooler: Path):
+    """Relabelled, the source's /contigs qc_* columns used to stay behind."""
+    assert "qc_intra_contig_short" in MetaCooler(tiny_metacooler).contigs.columns
     out = tmp_path / "out.metacool"
     reassign(
         tiny_metacooler,
@@ -737,6 +739,93 @@ def test_no_qc_drops_the_stale_block(tmp_path: Path, tiny_metacooler: Path):
     result = MetaCooler(out)
     assert "qc" not in result.metadata
     assert not [c for c in result.genomes.columns if str(c).startswith("qc_")]
+    assert not [c for c in result.contigs.columns if str(c).startswith("qc_")]
+    validate(out)
+
+
+def test_qc_columns_are_not_carried_as_contig_metadata(
+    tmp_path: Path, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
+):
+    """Carried as user metadata, the reserved names came back as user_qc_*."""
+    out = tmp_path / "out.metacool"
+    # contig_A joins MAG_2, which re-groups the contigs.
+    reassign(tiny_metacooler, _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"}), out)
+
+    result = MetaCooler(out)
+    assert result.contigs["name"].tolist() != SOURCE_ORDER
+    assert not [c for c in result.contigs.columns if str(c).startswith("user_")]
+    assert "reserved column names" not in caplog.text
+
+
+@pytest.fixture
+def map_with_a_user_qc_column(
+    tmp_path: Path, tiny_fasta: Path, tiny_bins_bed: Path, tiny_pairs: Path
+) -> Path:
+    """The tiny map, with a user /contigs column that merely starts with qc_."""
+    from metacooler.io.create import from_pairs
+
+    table = tmp_path / "with_qc_pass.tsv"
+    table.write_text(
+        "contig_name\tgenome_name\tqc_pass\n"
+        "contig_A\tMAG_1\t1\ncontig_B\tMAG_1\t0\ncontig_C\tMAG_2\t1\n"
+    )
+    out = tmp_path / "with_qc_pass.metacool"
+    from_pairs(
+        uri=out,
+        bins=tiny_bins_bed,
+        pairs=tiny_pairs,
+        contig_genome_map=table,
+        fasta=tiny_fasta,
+        contig_ordering="genome-then-alpha",
+    )
+    return out
+
+
+@pytest.mark.parametrize("qc", [True, False])
+@pytest.mark.parametrize("layout", ["keep", "genome-then-length", "in place"])
+def test_a_user_qc_column_is_kept_as_contig_metadata(
+    tmp_path: Path, map_with_a_user_qc_column: Path, layout: str, qc: bool
+):
+    """Only the two per-contig QC columns go with the block; qc_pass is metadata."""
+    source_order = MetaCooler(map_with_a_user_qc_column).contigs["name"].tolist()
+    out = tmp_path / "out.metacool"
+    # contig_A joins MAG_2, which a genome-grouped layout has to re-group.
+    table = _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"})
+    if layout == "in place":
+        reassign(map_with_a_user_qc_column, table, inplace=True, layout="keep", qc=qc)
+        out = map_with_a_user_qc_column
+    else:
+        reassign(
+            map_with_a_user_qc_column,
+            table,
+            out,
+            layout="keep" if layout == "keep" else "genome-then-length",
+            qc=qc,
+        )
+
+    order = MetaCooler(out).contigs["name"].tolist()
+    assert (order != source_order) is (layout == "genome-then-length")
+    contigs = MetaCooler(out).contigs.set_index("name")
+    assert contigs["qc_pass"].dropna().to_dict() == {
+        "contig_A": 1,
+        "contig_B": 0,
+        "contig_C": 1,
+    }
+    validate(out)
+
+
+def test_no_qc_in_place_drops_the_stale_block(tmp_path: Path, tiny_metacooler: Path):
+    reassign(
+        tiny_metacooler,
+        _table(tmp_path / "t.tsv", {"contig_C": "MAG_1"}),
+        inplace=True,
+        qc=False,
+    )
+
+    result = MetaCooler(tiny_metacooler)
+    assert "qc" not in result.metadata
+    assert not [c for c in result.contigs.columns if str(c).startswith("qc_")]
+    validate(tiny_metacooler)
 
 
 # ---------------------------------------------------------------------------

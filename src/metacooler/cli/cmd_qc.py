@@ -71,7 +71,8 @@ _TABLE_ROWS = (
     is_flag=True,
     help=(
         "Write the result back into the file: [cyan]metadata.qc[/cyan] plus the "
-        "per-genome [cyan]qc_*[/cyan] columns of [cyan]/genomes[/cyan]."
+        "per-genome [cyan]qc_*[/cyan] columns of [cyan]/genomes[/cyan] and the "
+        "per-contig ones of [cyan]/contigs[/cyan]."
     ),
 )
 @click.option(

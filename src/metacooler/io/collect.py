@@ -1079,9 +1079,9 @@ def collect(
         chunksize: Pixels read per chunk, and the minimum size of a chunk
             handed to cooler.
         qc: Tally contact-quality statistics off the pixel stream and store
-            them in ``metadata["qc"]`` and the ``/genomes`` ``qc_*`` columns,
-            as ``create cool`` does (``source="pixels"``).  The
-            ``inter_genome`` category is 0 by construction.
+            them in ``metadata["qc"]`` and the ``qc_*`` columns of ``/genomes``
+            and ``/contigs``, as ``create cool`` does (``source="pixels"``).
+            The ``inter_genome`` category is 0 by construction.
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
@@ -1225,7 +1225,12 @@ def collect(
 
     pixel_source: Iterable[pd.DataFrame] = _coalesce(_pixels(), chunksize)
     qc_tally = (
-        ContactQC(len(genomes_df), qc_distance_threshold, source="pixels")
+        ContactQC(
+            len(genomes_df),
+            qc_distance_threshold,
+            source="pixels",
+            n_contigs=len(contigs_df),
+        )
         if qc
         else None
     )
@@ -1266,6 +1271,7 @@ def collect(
                 staged,
                 qc_tally.summary(binsize=binsize),
                 qc_tally.genome_table(genomes_df["name"].to_numpy()),
+                qc_tally.contig_table(contigs_df["name"].to_numpy()),
             )
 
         logger.info("Validating collected metacool file")

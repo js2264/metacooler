@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,6 +18,7 @@ from metacooler.io.create import from_cool, from_pairs
 from metacooler.ops.qc import qc
 from metacooler.qc import (
     QC_CATEGORIES,
+    QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
     QC_METADATA_KEY,
     BinMaps,
@@ -23,6 +26,23 @@ from metacooler.qc import (
     strip_qc_columns,
     strip_qc_metadata,
 )
+
+
+def _assert_contig_columns_add_up(path: Path | str) -> None:
+    """The /contigs QC columns are the block's intra-contig totals, per contig."""
+    mc = MetaCooler(path)
+    block = mc.metadata[QC_METADATA_KEY]
+    contigs = mc.contigs
+    genomes = mc.genomes
+    for column, key in zip(
+        QC_CONTIG_COLUMNS, ("intra_contig_short", "intra_contig_long"), strict=True
+    ):
+        assert contigs[column].dtype == np.int64
+        assert int(contigs[column].sum()) == block[key], column
+        per_genome = np.bincount(
+            contigs["genome_id"], weights=contigs[column], minlength=len(genomes)
+        )
+        np.testing.assert_array_equal(genomes[column].to_numpy(), per_genome)
 
 
 # ----------------------------------------------------------------------
@@ -295,6 +315,153 @@ class TestBlockedTally:
 
 
 # ----------------------------------------------------------------------
+# Per contig: the two categories a reassignment cannot change
+# ----------------------------------------------------------------------
+def _per_contig_by_definition(contig1, contig2, distance, weights, n_contigs):
+    """Short/long intra-contig counts per contig, one masked selection each."""
+    w = np.ones(len(contig1)) if weights is None else weights.astype(float)
+    same = contig1 == contig2
+    long_range = distance >= 1000
+    return np.column_stack(
+        [
+            np.bincount(contig1[m], weights=w[m], minlength=n_contigs)
+            for m in (same & ~long_range, same & long_range)
+        ]
+    )
+
+
+class TestPerContigTally:
+    @pytest.mark.parametrize("block", [1, 7, 1 << 18])
+    @pytest.mark.parametrize("weights", [None, "int32", "float64"])
+    def test_matches_the_definition(self, monkeypatch, block, weights):
+        monkeypatch.setattr(qc_engine, "_TALLY_BLOCK", block)
+        rng = np.random.default_rng(block)
+        contacts = _random_contacts(rng, 2_000)
+        w = None
+        if weights == "float64":
+            w = rng.random(2_000) * 9
+        elif weights is not None:
+            w = rng.integers(1, 1_000, 2_000).astype(weights)
+        tally = ContactQC(6, distance_threshold=1000, n_contigs=30)
+        tally.tally(*contacts, weights=w)
+
+        expected = _per_contig_by_definition(
+            contacts[0], contacts[1], contacts[4], w, 30
+        )
+        per_contig = tally.per_contig
+        assert per_contig is not None
+        if weights == "float64":
+            np.testing.assert_allclose(per_contig, expected, rtol=1e-12)
+        else:
+            assert per_contig.dtype == np.int64
+            np.testing.assert_array_equal(per_contig, expected)
+        # The per-genome cells of both categories are the per-contig counts,
+        # summed over each genome's contigs.
+        genome_of = np.zeros(30, dtype=np.int64)
+        genome_of[contacts[0]] = contacts[2]
+        for k in range(2):
+            np.testing.assert_allclose(
+                tally.per_genome[:, k],
+                np.bincount(genome_of, weights=per_contig[:, k], minlength=6),
+            )
+
+    def test_the_queue_is_summed_in_batches(self, monkeypatch):
+        """Queued records never outgrow the table by more than one block."""
+        monkeypatch.setattr(qc_engine, "_TALLY_BLOCK", 4)
+        rng = np.random.default_rng(5)
+        tally = ContactQC(6, distance_threshold=1000, n_contigs=30)
+        tally.tally(*_random_contacts(rng, 2_000))
+        assert 0 < tally._contig_queued < 60
+        assert tally.per_contig is not None
+        assert tally._contig_queued == 0
+
+    def test_a_float_chunk_widens_the_table(self):
+        rng = np.random.default_rng(6)
+        chunks = [
+            (_random_contacts(rng, 500), rng.integers(1, 9, 500)),
+            (_random_contacts(rng, 500), rng.random(500) * 3),
+        ]
+        tally = ContactQC(6, distance_threshold=1000, n_contigs=30)
+        expected = np.zeros((30, 2))
+        for contacts, w in chunks:
+            tally.tally(*contacts, weights=w)
+            expected += _per_contig_by_definition(
+                contacts[0], contacts[1], contacts[4], w, 30
+            )
+        assert tally.per_contig is not None
+        assert tally.per_contig.dtype == np.float64
+        np.testing.assert_allclose(tally.per_contig, expected, rtol=1e-12)
+
+    def test_without_n_contigs_nothing_is_counted_per_contig(self):
+        tally = ContactQC(6, distance_threshold=1000)
+        tally.tally(*_random_contacts(np.random.default_rng(7), 100))
+        assert tally.per_contig is None
+        with pytest.raises(ValueError, match="does not count per contig"):
+            tally.contig_table(["a"])
+
+    def test_contig_table(self):
+        tally = ContactQC(1, distance_threshold=1000, n_contigs=2)
+        tally.tally(
+            np.array([0, 0, 1]),
+            np.array([0, 0, 0]),
+            np.zeros(3, dtype=np.int64),
+            np.zeros(3, dtype=np.int64),
+            np.array([10, 5000, 0]),
+        )
+        table = tally.contig_table(["c1", "c2"])
+        assert list(table.columns) == ["name", *QC_CONTIG_COLUMNS]
+        assert table[list(QC_CONTIG_COLUMNS)].to_numpy().tolist() == [[1, 1], [0, 0]]
+        with pytest.raises(ValueError, match="expected 2 contig name"):
+            tally.contig_table(["c1"])
+
+    def test_set_intra_contig_rebuilds_both_categories(self):
+        tally = ContactQC(3, distance_threshold=1000, unbinned_genome=0)
+        # Two inter-contig contacts, and one intra-contig one to be replaced.
+        tally.tally(
+            np.array([0, 1, 3]),
+            np.array([2, 2, 3]),
+            np.array([0, 0, 1]),
+            np.array([2, 2, 1]),
+            np.array([0, 0, 0]),
+        )
+        inter = tally.per_genome[:, 2:].copy()
+        per_contig = np.array([[5, 1], [0, 2], [3, 0], [1, 1]])
+        tally.set_intra_contig(per_contig, np.array([0, 0, 2, 1]))
+
+        summary = tally.summary()
+        assert summary["intra_contig_short"] == 9
+        assert summary["intra_contig_long"] == 4
+        assert summary["inter_genome"] == 2
+        assert summary["n_contacts"] == 15
+        assert tally.per_genome[:, 0].tolist() == [5, 1, 3]
+        assert tally.per_genome[:, 1].tolist() == [3, 1, 0]
+        np.testing.assert_array_equal(tally.per_genome[:, 2:], inter)
+        assert tally.per_contig is not None
+        np.testing.assert_array_equal(tally.per_contig, per_contig)
+        assert tally.per_genome.dtype == np.int64
+
+    def test_set_intra_contig_takes_float_counts(self):
+        tally = ContactQC(2, distance_threshold=1000)
+        tally.set_intra_contig(np.array([[0.5, 1.0], [2.0, 0.25]]), np.array([1, 1]))
+        assert tally.counts.dtype == np.float64
+        assert tally.per_genome[:, :2].tolist() == [[0.0, 0.0], [2.5, 1.25]]
+
+    @pytest.mark.parametrize(
+        ("per_contig", "genome", "match"),
+        [
+            (np.zeros((3, 2)), np.zeros(2, dtype=np.int64), "one \\(short, long\\)"),
+            (np.zeros((2, 3)), np.zeros(2, dtype=np.int64), "one \\(short, long\\)"),
+            (np.zeros((2, 2)), np.array([0, 2]), "genome ids must lie in"),
+            (np.zeros((2, 2)), np.array([-1, 0]), "genome ids must lie in"),
+        ],
+    )
+    def test_set_intra_contig_refuses_misaligned_input(self, per_contig, genome, match):
+        tally = ContactQC(2, distance_threshold=1000)
+        with pytest.raises(ValueError, match=match):
+            tally.set_intra_contig(per_contig, genome)
+
+
+# ----------------------------------------------------------------------
 # create pairs: the exact, position-based tally
 # ----------------------------------------------------------------------
 def test_from_pairs_counts_match_hand_count(known_metacool):
@@ -326,6 +493,43 @@ def test_from_pairs_writes_genome_columns(known_metacool):
     assert row.at["MAG_1", "qc_intra_genome_ratio"] == pytest.approx(5 / 8)
 
 
+def test_from_pairs_writes_contig_columns(known_metacool):
+    """Counted on read positions, contig by contig (see the fixture)."""
+    path, _ = known_metacool
+    contigs = MetaCooler(path).contigs.set_index("name")[list(QC_CONTIG_COLUMNS)]
+    # c1: 500 and 400 bp apart; c2: 8000 bp apart; c3 and c4: none.
+    assert contigs.loc[["c1", "c2", "c3", "c4"]].to_numpy().tolist() == [
+        [2, 0],
+        [0, 1],
+        [0, 0],
+        [0, 0],
+    ]
+    _assert_contig_columns_add_up(path)
+
+
+def test_a_user_column_named_like_a_qc_column_is_renamed(tmp_path: Path, known_pairs):
+    """Reserved, as the /genomes ones are, so store_qc cannot overwrite it."""
+    pairs, bins, _, _ = known_pairs
+    contigs = tmp_path / "contigs_with_qc.tsv"
+    contigs.write_text(
+        "contig_name\tgenome_name\tqc_intra_contig_short\n"
+        "c1\tMAG_1\t99\nc2\tMAG_1\t98\nc3\tMAG_2\t97\n"
+    )
+    out = tmp_path / "renamed.metacool"
+    from_pairs(
+        uri=out,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=contigs,
+        contig_ordering="genome-then-alpha",
+        qc_distance_threshold=1000,
+    )
+    table = MetaCooler(out).contigs.set_index("name")
+    assert int(table.at["c1", "user_qc_intra_contig_short"]) == 99
+    assert int(table.at["c1", "qc_intra_contig_short"]) == 2
+    _assert_contig_columns_add_up(out)
+
+
 def test_qc_can_be_disabled(tmp_path: Path, known_pairs):
     pairs, bins, contigs, _ = known_pairs
     out = tmp_path / "noqc.metacool"
@@ -340,6 +544,7 @@ def test_qc_can_be_disabled(tmp_path: Path, known_pairs):
     mc = MetaCooler(out)
     assert QC_METADATA_KEY not in mc.metadata
     assert not [c for c in mc.genomes.columns if c.startswith("qc_")]
+    assert not [c for c in mc.contigs.columns if c.startswith("qc_")]
 
 
 def test_qc_block_does_not_displace_user_metadata(tmp_path: Path, known_pairs):
@@ -368,6 +573,25 @@ def test_from_cool_tallies_from_pixels(tmp_path: Path, tiny_cool, tiny_contigs_t
     block = MetaCooler(out).metadata[QC_METADATA_KEY]
     assert block["source"] == "pixels"
     assert block["n_contacts"] == MetaCooler(out).info["sum"]
+    _assert_contig_columns_add_up(out)
+
+
+def test_collect_writes_contig_columns(tmp_path: Path):
+    from _cools import BSUB, ECOLI, make_cool
+
+    from metacooler.io.collect import collect
+
+    out = tmp_path / "collected.metacool"
+    collect(
+        [
+            make_cool(tmp_path / "E_coli.cool", ECOLI, seed=1),
+            make_cool(tmp_path / "B_subtilis.cool", BSUB, seed=2),
+        ],
+        out,
+        qc_distance_threshold=250,
+    )
+    assert MetaCooler(out).metadata[QC_METADATA_KEY]["intra_contig_long"] > 0
+    _assert_contig_columns_add_up(out)
 
 
 def test_pixel_and_pairs_tallies_agree_except_on_short_range(known_metacool):
@@ -445,6 +669,32 @@ def test_qc_store_round_trip(tiny_metacooler):
     )
 
 
+def test_qc_store_writes_contig_columns(tiny_metacooler):
+    with h5py.File(tiny_metacooler, "r+") as f:
+        for column in QC_CONTIG_COLUMNS:
+            del f["contigs"][column]
+    qc(tiny_metacooler, distance_threshold=250)
+    assert not set(QC_CONTIG_COLUMNS) & set(MetaCooler(tiny_metacooler).contigs)
+
+    qc(tiny_metacooler, distance_threshold=250, store=True)
+    _assert_contig_columns_add_up(tiny_metacooler)
+
+
+def test_store_qc_refuses_a_misaligned_contig_table(tiny_metacooler):
+    """Both tables are checked before anything is written."""
+    from metacooler.io._utils import store_qc
+
+    before = MetaCooler(tiny_metacooler).metadata
+    with pytest.raises(ValueError, match="/contigs has"):
+        store_qc(
+            tiny_metacooler,
+            {"source": "pixels"},
+            None,
+            pd.DataFrame({column: [1] for column in QC_CONTIG_COLUMNS}),
+        )
+    assert MetaCooler(tiny_metacooler).metadata == before
+
+
 def test_qc_store_twice_does_not_duplicate_columns(tiny_metacooler):
     qc(tiny_metacooler, store=True)
     qc(tiny_metacooler, distance_threshold=5000, store=True)
@@ -493,15 +743,32 @@ def test_strip_helpers():
     assert strip_qc_metadata({"qc": {}, "operator": "mm"}) == {"operator": "mm"}
 
 
-def test_binnify_drops_stale_qc(tmp_path: Path, tiny_metacooler):
+def test_which_columns_are_qc():
+    """In /contigs only the two QC names are; in /genomes every qc_* is."""
+    from metacooler.qc import is_qc_column
+
+    assert is_qc_column("contigs", "qc_intra_contig_short")
+    assert not is_qc_column("contigs", "qc_pass")
+    assert is_qc_column("genomes", "qc_pass")
+    assert not is_qc_column("genomes", "completeness")
+    with pytest.raises(ValueError, match="'genomes' or 'contigs'"):
+        is_qc_column("bins", "qc_pass")
+
+
+@pytest.mark.parametrize("level", ["contig", "genome"])
+def test_binnify_drops_stale_qc(
+    tmp_path: Path, tiny_metacooler, level: Literal["contig", "genome"]
+):
+    """Genome level, /contigs holds the ligated genomes: no QC column of theirs."""
     from metacooler.ops.binnify import binnify
 
     qc(tiny_metacooler, store=True)
     out = tmp_path / "rebinned.metacool"
-    binnify(uri=tiny_metacooler, output=out, binsize=200)
+    binnify(uri=tiny_metacooler, output=out, binsize=200, level=level)
     mc = MetaCooler(out)
     assert QC_METADATA_KEY not in mc.metadata
     assert not [c for c in mc.genomes.columns if c.startswith("qc_")]
+    assert not [c for c in mc.contigs.columns if c.startswith("qc_")]
 
 
 def test_merge_ignores_qc_columns_when_comparing_genomes(tmp_path: Path, known_pairs):
@@ -535,7 +802,57 @@ def test_merge_ignores_qc_columns_when_comparing_genomes(tmp_path: Path, known_p
     mc = MetaCooler(out)
     assert QC_METADATA_KEY not in mc.metadata
     assert not [c for c in mc.genomes.columns if c.startswith("qc_")]
+    assert not [c for c in mc.contigs.columns if c.startswith("qc_")]
     assert mc.info["sum"] == 2 * MetaCooler(first).info["sum"]
+
+
+class TestAUserQcColumn:
+    """A user /contigs column that merely starts with ``qc_`` is metadata.
+
+    Only the two per-contig QC columns are metacooler's; ``qc_pass`` from a
+    ``--contigs`` table still describes its contig in every derived file.
+    """
+
+    @pytest.fixture
+    def source(self, tmp_path: Path, known_pairs) -> Path:
+        pairs, bins, _, _ = known_pairs
+        contigs = tmp_path / "contigs_with_qc_pass.tsv"
+        contigs.write_text(
+            "contig_name\tgenome_name\tqc_pass\n"
+            "c1\tMAG_1\t1\nc2\tMAG_1\t0\nc3\tMAG_2\t1\n"
+        )
+        out = tmp_path / "qc_pass.metacool"
+        from_pairs(
+            uri=out,
+            bins=bins,
+            pairs=pairs,
+            contig_genome_map=contigs,
+            contig_ordering="genome-then-alpha",
+            qc_distance_threshold=1000,
+        )
+        return out
+
+    @staticmethod
+    def _assert_kept(path: Path) -> None:
+        contigs = MetaCooler(path).contigs.set_index("name")
+        assert contigs["qc_pass"].dropna().to_dict() == {"c1": 1, "c2": 0, "c3": 1}
+        assert not set(QC_CONTIG_COLUMNS) & set(contigs.columns)
+
+    def test_merge_keeps_it(self, tmp_path: Path, source: Path):
+        from metacooler.io.merge import merge
+
+        copy = tmp_path / "copy.metacool"
+        copy.write_bytes(source.read_bytes())
+        out = tmp_path / "merged.metacool"
+        merge([source, copy], out)
+        self._assert_kept(out)
+
+    def test_binnify_keeps_it(self, tmp_path: Path, source: Path):
+        from metacooler.ops.binnify import binnify
+
+        out = tmp_path / "rebinned.metacool"
+        binnify(uri=source, output=out, binsize=2000)
+        self._assert_kept(out)
 
 
 # ----------------------------------------------------------------------

@@ -20,6 +20,7 @@ from metacooler.api import MetaCooler
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
     QC_METADATA_KEY,
+    BinMaps,
     ContactQC,
     bin_maps,
     unbinned_genome_id,
@@ -59,7 +60,7 @@ def qc(
         chunksize: Pixels read per iteration.
         store: If ``True``, write the result back into the file —
             ``metadata["qc"]`` plus the per-genome ``qc_*`` columns of
-            ``/genomes``.
+            ``/genomes`` and the per-contig ones of ``/contigs``.
 
     Returns:
         A :class:`QCResult`.
@@ -70,13 +71,14 @@ def qc(
     """
     mc = MetaCooler(uri)
     genomes = mc.genomes
+    contigs = mc.contigs
     tally = ContactQC(
         n_genomes=len(genomes),
         distance_threshold=distance_threshold,
         source="pixels",
         unbinned_genome=unbinned_genome_id(genomes["name"]),
+        n_contigs=len(contigs) if store else None,
     )
-    maps = bin_maps(mc.bins(), mc.contigs)
 
     # cooler hands `binsize` back as whatever the attribute holds — a NumPy
     # integer normally, but a string on a file another tool wrote — and this is
@@ -94,16 +96,7 @@ def qc(
             tally.distance_threshold,
         )
 
-    pixels = mc._clr.pixels()
-    n_pixels = len(pixels)
-    for lo in range(0, n_pixels, chunksize):
-        chunk = pixels[lo : lo + chunksize]
-        tally.tally_pixels(
-            chunk["bin1_id"].to_numpy(),
-            chunk["bin2_id"].to_numpy(),
-            chunk["count"].to_numpy(),
-            maps,
-        )
+    n_pixels = tally_map(mc, tally, chunksize=chunksize)
 
     summary = tally.summary(binsize=binsize)
     per_genome = tally.genome_table(genomes["name"].to_numpy())
@@ -124,6 +117,50 @@ def qc(
                 "between bin midpoints: the intra-contig short/long split will "
                 "be coarser than the one 'create pairs' recorded.",
             )
-        store_qc(mc.store, summary, per_genome, group_path=mc._group_path)
-        logger.info("Stored QC block and per-genome columns in %s", mc.uri)
+        store_qc(
+            mc.store,
+            summary,
+            per_genome,
+            tally.contig_table(contigs["name"].to_numpy()),
+            group_path=mc._group_path,
+        )
+        logger.info(
+            "Stored QC block and per-genome and per-contig columns in %s", mc.uri
+        )
     return QCResult(summary, per_genome)
+
+
+def tally_map(
+    mc: MetaCooler,
+    tally: ContactQC,
+    *,
+    chunksize: int = DEFAULT_CHUNKSIZE,
+    maps: BinMaps | None = None,
+) -> int:
+    """Feed every pixel of an open map to a tally, chunk by chunk.
+
+    Args:
+        mc: The open map, whose pixels are read through cooler's selector.
+        tally: Accumulator to update.
+        chunksize: Pixels read per iteration.
+        maps: The contig, genome and midpoint of every bin, which classify the
+            pixels.  Defaults to the map's own (:func:`bin_maps` of its bins
+            and ``/contigs``); ``reassign`` passes the genomes of a new
+            assignment.
+
+    Returns:
+        The number of pixels read.
+    """
+    if maps is None:
+        maps = bin_maps(mc.bins(), mc.contigs)
+    pixels = mc._clr.pixels()
+    n_pixels = len(pixels)
+    for lo in range(0, n_pixels, chunksize):
+        chunk = pixels[lo : lo + chunksize]
+        tally.tally_pixels(
+            chunk["bin1_id"].to_numpy(),
+            chunk["bin2_id"].to_numpy(),
+            chunk["count"].to_numpy(),
+            maps,
+        )
+    return n_pixels

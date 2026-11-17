@@ -32,6 +32,14 @@ genome-grouped file is regrouped so it stays one, and a file that never grouped
 its contigs (``fasta``/``alpha``/``cool``) is only relabelled, since there is no
 invariant left to preserve.  Either way the *contacts* are untouched: reassign
 never changes a count, only which genome a contig is credited to.
+
+The contact-quality block follows the assignment too, but only half of it
+depends on it.  The two intra-contig categories are stored per contig
+(``/contigs`` ``qc_intra_contig_short``/``qc_intra_contig_long``) and carried
+over -- so a ``create pairs`` map keeps its split measured on read positions --
+while the two inter-contig categories are re-measured from the pixels, which
+classify them exactly at any bin size (:func:`_measure_qc`).  A source written
+before those columns existed has its block recomputed from the pixels.
 """
 
 from __future__ import annotations
@@ -68,9 +76,15 @@ from metacooler.io.create import (
     _stream_remapped_pixels,
 )
 from metacooler.qc import (
+    QC_CONTIG_COLUMNS,
+    QC_GENOME_COLUMNS,
     QC_METADATA_KEY,
+    QC_VERSION,
+    ContactQC,
+    strip_contig_qc_columns,
     strip_qc_columns,
     strip_qc_metadata,
+    unbinned_genome_id,
 )
 from metacooler.schema import (
     CUSTOM_ORDERING,
@@ -97,6 +111,11 @@ _ASSIGNMENT_INDEPENDENT_ORDERINGS = frozenset(
 
 # How many names to spell out in a warning before truncating.
 _MAX_REPORTED_NAMES = 10
+
+# The keys ContactQC.summary() computes itself.  Every other key of a source QC
+# block (binsize, n_pairs_read, n_pairs_discarded, ...) records how its counts
+# were measured, which a reassignment does not change, so it is carried as is.
+_DERIVED_QC_KEYS = frozenset(ContactQC(0).summary())
 
 
 class ReassignReport(NamedTuple):
@@ -393,7 +412,9 @@ def _carry_contig_metadata(
 
     Contigs themselves are untouched by a reassignment — same names, same
     lengths, same bins — so every extra column stays valid and is carried
-    verbatim.
+    verbatim.  The two per-contig QC columns are the exception: they belong to
+    the QC block, which :func:`reassign` carries (or drops) as a whole.  A
+    user's own ``qc_*`` column is metadata like any other.
 
     Args:
         old_contigs: The source file's ``/contigs`` table.
@@ -405,7 +426,9 @@ def _carry_contig_metadata(
         ``None`` when the source carried no extra column.
     """
     derived = {"name", "length", "genome_id"}
-    extra = [c for c in old_contigs.columns if c not in derived]
+    extra = [
+        c for c in strip_contig_qc_columns(old_contigs).columns if c not in derived
+    ]
     if not extra:
         return None
     names = old_contigs["name"].astype(str)
@@ -431,9 +454,10 @@ def _build_metadata(
 ) -> tuple[dict, bool]:
     """Assemble the output's ``metadata`` attribute.
 
-    The source metadata is carried over minus its QC block: three of the four
-    QC categories are defined by the contig→genome assignment, so a reassignment
-    invalidates the block as a whole rather than only its per-genome columns.
+    The source metadata is carried over minus its QC block: two of its four
+    categories, and every per-genome count, are defined by the contig→genome
+    assignment, so the caller measures the output's block (see
+    :func:`_measure_qc`) rather than copy the source's here.
 
     Args:
         source_metadata: The source file's ``metadata`` attribute.
@@ -518,7 +542,10 @@ def _write_relabelled(
     ``chrom_offset``, ``bin1_offset``, every extra ``/contigs`` column — is left
     exactly where it is, because the contig rows keep their positions.  Only
     ``/genomes`` (whose rows are derived), ``/contigs/genome_id``,
-    ``indexes/genome_offset`` and the affected attributes are written.
+    ``indexes/genome_offset`` and the affected attributes are written, and the
+    per-contig QC columns are made to match *contigs*: written where it has
+    them and the file's differ, removed where it has none.  So the table on
+    disk is the one the regroup path would write.
 
     Args:
         path: File to modify.
@@ -559,6 +586,16 @@ def _write_relabelled(
         write_column(
             grp["contigs"], "genome_id", contigs["genome_id"].to_numpy(np.int32)
         )
+        for column in QC_CONTIG_COLUMNS:
+            stored = grp["contigs"].get(column)
+            wanted = contigs[column].to_numpy() if column in contigs else None
+            if stored is not None and (
+                wanted is None or not np.array_equal(stored[()], wanted)
+            ):
+                del grp["contigs"][column]
+                stored = None
+            if stored is None and wanted is not None:
+                write_column(grp["contigs"], column, wanted)
 
         indexes = grp["indexes"]
         if "genome_offset" in indexes:
@@ -643,26 +680,200 @@ def _rewrite_regrouped(
     )
 
 
-def _recompute_qc(uri: str, source_metadata: dict) -> None:
-    """Recompute the contact-quality block of a file whose genomes just changed.
+def _carried_contig_qc(block: object, old_contigs: pd.DataFrame) -> pd.DataFrame | None:
+    """Return the source's per-contig QC counts, if its block can be carried.
+
+    The block is carried when the per-contig columns it was stored with are
+    there and still describe it: same block version, and per-contig counts
+    adding up to the block's intra-contig totals (a ``qc --store`` from a
+    release without per-contig columns rewrites the block and leaves older
+    columns behind).  Otherwise the caller recomputes the block from the pixels,
+    as before those columns existed, and this says why.
 
     Args:
-        uri: The reassigned map to annotate, in place.
-        source_metadata: The *source* file's metadata, read for the distance
-            threshold its block was measured at, so the new numbers stay
-            comparable with the old ones.
-    """
-    from metacooler.ops.qc import qc as compute_qc
-    from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD
+        block: The source's ``metadata["qc"]`` value.
+        old_contigs: The source's ``/contigs`` table.
 
-    block = source_metadata.get(QC_METADATA_KEY) or {}
-    threshold = block.get("distance_threshold", DEFAULT_DISTANCE_THRESHOLD)
-    try:
-        threshold = int(threshold)
-    except (TypeError, ValueError):
-        threshold = DEFAULT_DISTANCE_THRESHOLD
-    logger.info("Recomputing the QC block for the new genome assignment")
-    compute_qc(uri, distance_threshold=threshold, store=True)
+    Returns:
+        The :data:`metacooler.qc.QC_CONTIG_COLUMNS` of *old_contigs*, indexed
+        by contig name, or ``None`` when the block must be recomputed.
+    """
+    missing = [c for c in QC_CONTIG_COLUMNS if c not in old_contigs.columns]
+    counts = None
+    if not isinstance(block, dict):
+        reason = "it is not a JSON object"
+    elif missing:
+        reason = (
+            f"the source has no per-contig counts ({', '.join(missing)} in "
+            "/contigs; maps written by metacooler 0.2.0 and earlier lack them)"
+        )
+    elif block.get("version") != QC_VERSION:
+        reason = f"it is a version {block.get('version')!r} block, not {QC_VERSION}"
+    elif not isinstance(block.get("distance_threshold"), int):
+        reason = "it records no integer distance threshold"
+    else:
+        counts = old_contigs[list(QC_CONTIG_COLUMNS)]
+        totals = counts.sum().to_numpy()
+        expected = [block.get("intra_contig_short"), block.get("intra_contig_long")]
+        try:
+            agrees = (
+                np.allclose(totals, expected, rtol=1e-9, atol=0)
+                if totals.dtype.kind == "f"
+                else np.array_equal(totals, np.asarray(expected, dtype=totals.dtype))
+            )
+        except (TypeError, ValueError):  # a total that is missing or not a number
+            agrees = False
+        reason = (
+            None
+            if agrees
+            else "its per-contig counts do not add up to its intra-contig "
+            "totals (they were stored by another run)"
+        )
+    if reason is None:
+        assert counts is not None
+        return counts.set_axis(old_contigs["name"].astype(str).to_numpy())
+    if isinstance(block, dict) and block.get("source") == "pairs":
+        logger.warning(
+            "Recomputing the source's QC block from the pixels, since %s. It "
+            "was measured on read positions (source='pairs'), and what only "
+            "they can give is lost: the short/long intra-contig split is now "
+            "measured between bin midpoints -- at one bin per contig every "
+            "intra-contig contact becomes intra_contig_short and "
+            "intra_contig_long drops to 0 -- and n_pairs_read and "
+            "n_pairs_discarded go.",
+            reason,
+        )
+    else:
+        logger.info(
+            "Recomputing the source's QC block from the pixels, since %s.", reason
+        )
+    return None
+
+
+class _NewQC(NamedTuple):
+    """The reassigned map's QC block, measured before anything is written.
+
+    Attributes:
+        summary: The ``metadata["qc"]`` block.
+        per_genome: The ``/genomes`` ``qc_*`` columns, in the new genome order.
+        per_contig: The ``/contigs`` ``qc_*`` columns, in the output's contig
+            order.
+        carried: Whether the intra-contig counts were carried over from the
+            source; ``False`` when the whole block was recomputed from the
+            pixels.
+    """
+
+    summary: dict
+    per_genome: pd.DataFrame
+    per_contig: pd.DataFrame
+    carried: bool
+
+
+def _measure_qc(
+    mc: MetaCooler,
+    genomes: pd.DataFrame,
+    contigs: pd.DataFrame,
+    block: object,
+    carried: pd.DataFrame | None,
+    chunksize: int,
+) -> _NewQC:
+    """Measure the reassigned map's QC block from the *source's* pixels.
+
+    Done before anything is written: this pass over the pixels is the one long
+    step, and a run stopped during it -- in place included -- then leaves the
+    source's block and per-contig counts as they were, never none.  The
+    source's pixels measure the output exactly: a pixel is classified by the
+    contig and the (new) genome of each of its bins, and a re-grouping only
+    renumbers the bins.
+
+    With *carried*, the two intra-contig categories are the source's per-contig
+    counts, summed per new genome, and every key of the source block that
+    ``summary()`` does not compute (``source``, ``distance_threshold``,
+    ``binsize``, ``n_pairs_read``, ...) is kept, so a ``create pairs`` block
+    stays one; only the two inter-contig categories come from the pixels.
+    Without it, the whole block is measured from the pixels, as ``qc --store``
+    would, at the source's distance threshold.
+
+    Args:
+        mc: The open source map.
+        genomes: The output's ``/genomes`` table.
+        contigs: The output's ``/contigs`` table, with the new ``genome_id``.
+        block: The source's ``metadata["qc"]`` value.
+        carried: The source's per-contig counts (:func:`_carried_contig_qc`),
+            or ``None`` to recompute the whole block.
+        chunksize: Pixels read per iteration.
+
+    Returns:
+        A :class:`_NewQC`.
+    """
+    from metacooler.ops.qc import tally_map
+    from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD, bin_maps
+
+    old_contigs = mc.contigs
+    source_names = old_contigs["name"].astype(str).to_numpy()
+    output_names = contigs["name"].astype(str).to_numpy()
+    # A reassignment never adds or removes a contig, only moves it.
+    rows = pd.Index(source_names).get_indexer(output_names)
+    assert (rows >= 0).all(), "the reassigned map has contigs the source lacks"
+    new_genome = np.empty(len(source_names), dtype=np.int64)
+    new_genome[rows] = contigs["genome_id"].to_numpy(np.int64)
+    if carried is not None:
+        assert isinstance(block, dict)
+        threshold = int(block["distance_threshold"])
+        source = cast("Literal['pairs', 'pixels']", block.get("source", "pixels"))
+    else:
+        threshold = (
+            block.get("distance_threshold", DEFAULT_DISTANCE_THRESHOLD)
+            if isinstance(block, dict)
+            else DEFAULT_DISTANCE_THRESHOLD
+        )
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = DEFAULT_DISTANCE_THRESHOLD
+        source = "pixels"
+    tally = ContactQC(
+        len(genomes),
+        threshold,
+        source=source,
+        unbinned_genome=unbinned_genome_id(genomes["name"]),
+        n_contigs=None if carried is not None else len(source_names),
+    )
+    tally_map(
+        mc,
+        tally,
+        chunksize=chunksize,
+        maps=bin_maps(mc.bins(), old_contigs.assign(genome_id=new_genome)),
+    )
+    if carried is not None:
+        assert isinstance(block, dict)
+        tally.set_intra_contig(carried.to_numpy(), new_genome)
+        summary = tally.summary(
+            **{k: v for k, v in block.items() if k not in _DERIVED_QC_KEYS}
+        )
+        logger.info(
+            "Carried the source's intra-contig QC counts (source=%r) over to the "
+            "new assignment and re-measured its inter-contig ones from the pixels.",
+            source,
+        )
+    else:
+        binsize = mc.binsize
+        summary = tally.summary(binsize=None if binsize is None else int(binsize))
+        logger.info("Recomputed the QC block for the new genome assignment")
+    per_contig = tally.contig_table(source_names).iloc[rows].reset_index(drop=True)
+    return _NewQC(
+        summary,
+        tally.genome_table(genomes["name"].to_numpy()),
+        per_contig,
+        carried is not None,
+    )
+
+
+def _with_columns(
+    frame: pd.DataFrame, table: pd.DataFrame, columns: tuple[str, ...]
+) -> pd.DataFrame:
+    """*frame* with *columns* of *table* (same rows, same order) appended."""
+    return frame.assign(**{column: table[column].to_numpy() for column in columns})
 
 
 def reassign(
@@ -727,10 +938,15 @@ def reassign(
         metadata: Extra keys to merge into the output's ``metadata`` attribute.
             A ``commands`` list is appended to the carried provenance rather
             than replacing it.
-        qc: Recompute the contact-quality block when the source carries one.
-            With ``False`` the stale block is dropped and not replaced.
-        chunksize: Source pixels read and remapped per chunk, on the re-ordering
-            path only.
+        qc: Keep the contact-quality block when the source carries one, for
+            the new genomes: the per-contig intra-contig counts are carried
+            (so a ``create pairs`` split measured on read positions survives)
+            and the inter-contig categories are re-measured from the pixels.
+            A source without per-contig counts (written by metacooler 0.2.0 or
+            earlier) has its whole block recomputed from the pixels.  With
+            ``False`` the block is dropped and not replaced.
+        chunksize: Pixels read per chunk: remapped on the re-ordering path, and
+            classified when the QC block is stored.
         force: Replace *output* if it exists.  The existing file is only
             replaced once the new one has been written and validated, so a
             failed run leaves it untouched.
@@ -863,7 +1079,7 @@ def reassign(
         contig_df=_carry_contig_metadata(old_contigs, assignment),
     )
     genomes = strip_qc_columns(genomes)
-    contigs = strip_qc_columns(contigs)
+    contigs = strip_contig_qc_columns(contigs)
     if not reorder:
         # The re-ordering path gets n_bins from _compute_all_offsets, which needs
         # the bins table; here the bins have not moved, so the per-contig counts
@@ -879,10 +1095,26 @@ def reassign(
         layout=strategy,
         n_moved=len(report.moved),
     )
+    if had_qc and qc:
+        # Measured before anything is written, and written with the rest of
+        # the map: a run stopped meanwhile leaves the source's block intact.
+        block = source_metadata[QC_METADATA_KEY]
+        new_qc = _measure_qc(
+            mc,
+            genomes,
+            contigs,
+            block,
+            _carried_contig_qc(block, old_contigs),
+            chunksize,
+        )
+        output_metadata[QC_METADATA_KEY] = new_qc.summary
+        genomes = _with_columns(genomes, new_qc.per_genome, QC_GENOME_COLUMNS)
+        contigs = _with_columns(contigs, new_qc.per_contig, QC_CONTIG_COLUMNS)
 
     if inplace:
         _relabel_in_place(mc, genomes, contigs, ordering, output_metadata)
         target_uri = mc.uri
+        validate(target_uri)
     else:
         assert output is not None  # guaranteed by the argument check above
         target = Path(output)
@@ -919,20 +1151,13 @@ def reassign(
             validate(staged)
         target_uri = str(target)
 
-    if had_qc:
-        # Three of the block's four categories (inter-contig/intra-genome,
-        # inter-genome, and every per-genome qc_* column) are defined by the
-        # assignment this command just changed, so the source block cannot be
-        # carried over whatever the caller chooses here.
-        if qc:
-            _recompute_qc(target_uri, source_metadata)
-        else:
-            logger.warning(
-                "The source's QC block describes the old genome assignment and "
-                "was dropped; run 'metacooler qc --store %s' to measure the new "
-                "one.",
-                target_uri,
-            )
+    if had_qc and not qc:
+        logger.warning(
+            "The source's QC block describes the old genome assignment and "
+            "was dropped; run 'metacooler qc --store %s' to measure the new "
+            "one.",
+            target_uri,
+        )
 
     logger.info(
         "Reassigned %d contig(s) across %d genome(s) → %s",
@@ -989,7 +1214,9 @@ def _relabel_in_place(
     ordering: str,
     metadata: dict,
 ) -> None:
-    """Apply a relabelling to the source file itself, then re-validate it.
+    """Apply a relabelling to the source file itself.
+
+    The caller re-validates the file.
 
     Args:
         mc: The open source file.
@@ -1008,4 +1235,3 @@ def _relabel_in_place(
         ordering,
         metadata,
     )
-    validate(mc.uri)

@@ -108,9 +108,12 @@ if TYPE_CHECKING:
     default=True,
     show_default=True,
     help=(
-        "Recompute the contact-quality block when the source carries one — the "
-        "reassignment invalidates it. With [cyan]--no-qc[/cyan] the stale block "
-        "is dropped and not replaced."
+        "Keep the contact-quality block when the source carries one, for the "
+        "new genomes: the per-contig intra-contig counts are carried (a "
+        "[cyan]create pairs[/cyan] split measured on read positions survives) "
+        "and the inter-contig ones re-measured from the pixels. A source "
+        "without per-contig counts has its block recomputed from the pixels. "
+        "With [cyan]--no-qc[/cyan] the block is dropped and not replaced."
     ),
 )
 @click.option(
@@ -119,8 +122,9 @@ if TYPE_CHECKING:
     default=DEFAULT_CHUNKSIZE,
     show_default=True,
     help=(
-        "Source pixels read and remapped per chunk, on the re-ordering path "
-        "only. Each chunk costs one [cyan]cooler.create[/cyan] call whose price "
+        "Pixels read per chunk: remapped on the re-ordering path, and "
+        "classified when the QC block is stored. On the re-ordering path each "
+        "chunk costs one [cyan]cooler.create[/cyan] call whose price "
         "scales with contig count, so smaller chunks cost disproportionately "
         "more; the trade-off is ~24 bytes of peak memory per buffered pixel."
     ),
