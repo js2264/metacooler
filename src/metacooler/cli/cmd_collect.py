@@ -197,7 +197,15 @@ def cmd_collect(
         check_output_not_an_input(output, cool_paths)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="'-o' / '--output'") from exc
-    check_output(output, force)
+    # Every input, so -f can never delete one before it is read, and
+    # defer_removal because collect stages to <output>.partial and renames it
+    # into place: a failed run must not destroy the previous output.
+    check_output(
+        output,
+        force,
+        inputs=[*cool_paths, genomes_table, contigs_table, metadata],
+        defer_removal=True,
+    )
     try:
         qc_distance_threshold = int(parse_size(qc_threshold))
     except ValueError as exc:

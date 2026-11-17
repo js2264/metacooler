@@ -9,14 +9,17 @@ on how the fix is implemented.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import cooler
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat
 from click.testing import CliRunner
 
+import metacooler.cli
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
 from metacooler.io._utils import read_user_table
@@ -125,3 +128,78 @@ class TestNetworkIntegerOverflow:
         rows = [line.split("\t") for line in result.stdout.splitlines()]
         edges = {(r[0], r[1]): int(r[2]) for r in rows if len(r) == 3}
         assert edges[(node, node)] == 3_000_000_000
+
+
+class TestCollectOutputGuard:
+    """``collect -f`` deleted its own inputs, and a previous output it then failed to replace.
+
+    Its ``check_output`` call passed neither ``inputs=`` nor ``defer_removal``
+    -- the one command added after the guard was introduced, and the one that
+    missed it. ``collect A.cool B.cool --genomes g.tsv -o g.tsv -f`` deleted
+    ``g.tsv`` and then failed with "Genomes table not found".
+    """
+
+    @pytest.fixture
+    def cools(self, tmp_path: Path, tiny_cool: Path) -> list[Path]:
+        out = []
+        for name in ("A", "B"):
+            dst = tmp_path / f"{name}.cool"
+            dst.write_bytes(tiny_cool.read_bytes())
+            out.append(dst)
+        return out
+
+    @pytest.mark.parametrize("option", ["--genomes", "--metadata"])
+    def test_an_input_table_survives_being_named_as_output(
+        self, tmp_path: Path, cools: list[Path], option: str
+    ):
+        table = tmp_path / "in.tsv"
+        table.write_text("genome_name\tphylum\nA\tx\nB\ty\n")
+        if option == "--metadata":
+            table = tmp_path / "in.yaml"
+            table.write_text("project: x\n")
+        before = table.read_bytes()
+        result = _run("collect", *cools, option, table, "-o", table, "-f")
+        assert result.exit_code != 0
+        assert "same file as the input" in flat(result.output)
+        assert table.read_bytes() == before
+
+    def test_an_input_cool_survives_being_named_as_output(self, cools: list[Path]):
+        before = cools[0].read_bytes()
+        result = _run("collect", *cools, "-o", cools[0], "-f")
+        assert result.exit_code != 0
+        assert cools[0].read_bytes() == before
+
+    def test_a_failed_run_keeps_the_previous_output(
+        self, tmp_path: Path, cools: list[Path]
+    ):
+        out = tmp_path / "prev.metacool"
+        assert _run("collect", *cools, "-o", out).exit_code == 0
+        before = out.read_bytes()
+        bad = tmp_path / "bad.tsv"
+        bad.write_text("no_such_column\tx\nA\t1\n")
+        result = _run("collect", *cools, "--genomes", bad, "-o", out, "-f")
+        assert result.exit_code != 0
+        assert out.read_bytes() == before
+
+
+def test_every_command_names_its_inputs_to_the_output_guard():
+    """Structural guard: a new command cannot forget ``inputs=`` again.
+
+    ``collect`` was added after the guard learned to refuse an output that is
+    one of the inputs, and its bare ``check_output(output, force)`` silently
+    reintroduced the input-deleting ``-f``. Every call in the CLI must say what
+    the command reads.
+    """
+    cli_dir = Path(metacooler.cli.__file__).parent
+    missing = []
+    for path in sorted(cli_dir.glob("cmd_*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "check_output"
+                and not any(k.arg == "inputs" for k in node.keywords)
+            ):
+                missing.append(f"{path.name}:{node.lineno}")
+    assert not missing, f"check_output without inputs=: {missing}"
