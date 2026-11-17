@@ -189,7 +189,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 | `--chunksize` | `50000000` | Pairs processed per chunk. This is chunk *granularity*, not read memory (the pyarrow read block is capped separately). Under `external` sorting each chunk becomes a temporary cooler at a fixed per-call cost that scales with contig count, so smaller chunks cost disproportionately more. |
 | `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (`memory` unless the binned pixels exceed 100 M rows), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
 | `--nproc` | `1` | Threads binning pairs while the file is read and decompressed (which stays on one thread: one gzip stream). The output, QC block, P(s) table and drop report are identical whatever the value; each thread holds one more batch of pairs. Two threads take ~15 % off a 30 M-pair run; more add little. |
-| `-f, --force` | off | Overwrite the output if it already exists. |
+| `-f, --force` | off | Overwrite the output if it already exists. A `<output>.ps.tsv.previous`, which a run leaves when it is killed while it moves the map and its table into place or cannot remove that table afterwards, stops the command before it reads anything, with or without `--ps` and even with `-f`: check which table matches the map, keep it as `<output>.ps.tsv`, and remove the other (a file of your own of that name: rename it). See [A failed write](api/io.md#keep-partial). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
 !!! warning "`--contig-order fasta` needs a source of order"
@@ -730,6 +730,7 @@ metacooler annotate METACOOL_PATH [--genomes T] [--contigs T] [OPTIONS] (-o OUT 
 | `--drop` | — | Remove these metadata columns, as `genomes.<name>` / `contigs.<name>`. |
 | `--replace` | off | Allow changing the values of a column the map already has. |
 | `--missing` | `keep` | For a replaced column, what the rows the table does not list get. `keep`: their current value, so a short table is a patch. `na`: an empty value, so the table is authoritative. |
+| `--unmatched` | `warn` | What to do with the rows of a table that name no genome or contig of the map. `warn`: ignore them with a warning. `ignore`: ignore them silently (logged at debug level). `error`: refuse the tables before anything is written. A table that matches nothing at all is refused whatever this says. |
 | `-o, --output` | — | Write an annotated copy here. Required unless `--inplace`. |
 | `--inplace` | off | Edit `METACOOL_PATH` itself. |
 | `-f, --force` | off | Overwrite the output if it already exists (only once the new file validates). An input is never overwritten. |
@@ -769,8 +770,10 @@ How rows and columns are matched:
 - **Names, not positions.** A table may list its rows in any order and cover
   any subset of the map. A genome or contig it does not list gets an empty
   value in a new column; a table row naming nothing in the map is ignored with
-  a warning; a table that matches *nothing* is refused — it is the wrong table,
-  or the format points at the wrong column. Rows are never added or removed.
+  a warning (`--unmatched ignore` drops the warning, `--unmatched error`
+  refuses such a row instead); a table that matches *nothing* is refused — it
+  is the wrong table, or the format points at the wrong column. Rows are never
+  added or removed.
 - **Existing columns.** Giving a column the values it already holds is not a
   change, so re-running a command is harmless. A table that would change an
   existing column is refused unless `--replace`, with the number of rows that

@@ -593,6 +593,70 @@ def chrom_codes(bins: pd.DataFrame) -> np.ndarray:
     return col.to_numpy(dtype=np.int64)
 
 
+#: What to do with the rows of a user table that name nothing in the map:
+#: log a WARNING that they are ignored, ignore them quietly, or refuse them.
+Unmatched = Literal["warn", "ignore", "error"]
+UNMATCHED_CHOICES: tuple[str, ...] = ("warn", "ignore", "error")
+
+
+def report_unmatched_rows(
+    unmatched: Unmatched,
+    what: str,
+    examples: str,
+    notes: str = "",
+    *,
+    deferred: list[str] | None = None,
+) -> None:
+    """Report the rows of a user table that name nothing in the map.
+
+    Args:
+        unmatched: ``"warn"`` logs a WARNING that the rows are ignored,
+            ``"ignore"`` only a DEBUG line, ``"error"`` refuses them.
+        what: The start of the sentence, saying which rows match nothing
+            (``"Contigs table (t.tsv): 2 of 9 row(s) match no contig of the
+            map"``).
+        examples: A few of the names, already quoted.
+        notes: Sentences appended after the examples.
+        deferred: Under ``"error"``, collect the refusal here rather than
+            raise it, for a caller with a clearer error to give first -- a
+            table that matches nothing at all -- which then raises
+            :func:`unmatched_rows_error` itself.
+
+    Raises:
+        ValueError: Under ``"error"``, unless *deferred* is given.
+    """
+    if unmatched == "error":
+        refusal = f"{what}, e.g. {examples}.{notes}"
+        if deferred is None:
+            raise ValueError(unmatched_rows_error([refusal]))
+        deferred.append(refusal)
+        return
+    logger.log(
+        logging.WARNING if unmatched == "warn" else logging.DEBUG,
+        "%s and are ignored, e.g. %s.%s",
+        what,
+        examples,
+        notes,
+    )
+
+
+def unmatched_rows_error(refusals: Sequence[str]) -> str:
+    """The message refusing table rows that name nothing in the map.
+
+    Worded for both callers: ``unmatched="error"`` is the API's spelling,
+    ``--unmatched error`` the command line's.
+
+    Args:
+        refusals: One sentence per table and map, from
+            :func:`report_unmatched_rows`.
+    """
+    return "\n".join(refusals) + (
+        "\nRefused under unmatched='error' (--unmatched error): every row of a "
+        "table must name a genome or contig of the map. 'warn' or 'ignore' "
+        "skips such rows instead."
+    )
+
+
 def check_output_path(
     path: str | Path,
     force: bool = False,

@@ -110,6 +110,52 @@ class TestInit:
         for name in metacooler.__all__:
             assert hasattr(metacooler, name), f"{name} has no __getattr__ branch"
 
+    def test_type_checkers_see_every_export_at_its_source(self):
+        """The ``if TYPE_CHECKING:`` block names each export as __getattr__ does.
+
+        Without it a type checker types ``metacooler.from_pairs`` and every
+        other lazy export as what ``__getattr__`` returns, ``object``, and
+        flags each call in client code as not callable.  This keeps the block
+        in step with ``__all__`` and with the dispatch.
+        """
+        import ast
+        import importlib
+        import inspect
+
+        import metacooler
+
+        block = next(
+            node
+            for node in ast.parse(inspect.getsource(metacooler)).body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "TYPE_CHECKING"
+        )
+        seen = {}
+        for node in block.body:
+            assert isinstance(node, ast.ImportFrom) and node.module
+            for alias in node.names:
+                seen[alias.asname or alias.name] = (node.module, alias.name)
+        assert set(seen) == set(metacooler.__all__) - {"__version__"}
+        for public, (module, name) in seen.items():
+            source = getattr(importlib.import_module(module), name)
+            assert getattr(metacooler, public) is source, public
+
+    def test_the_package_says_it_is_typed(self):
+        """PEP 561: without py.typed, mypy skips an installed package entirely."""
+        from pathlib import Path
+
+        import metacooler
+
+        assert (Path(metacooler.__file__).parent / "py.typed").is_file()
+
+    def test_the_type_checking_block_never_runs(self):
+        """The block is for type checkers: at run time it binds no export."""
+        import metacooler
+
+        assert metacooler.TYPE_CHECKING is False
+        assert "from_pairs" not in vars(metacooler)
+
     def test_all_exports_accessible(self):
         import metacooler
 
@@ -161,7 +207,7 @@ class TestInit:
         data_dir = Path(__file__).parent / "data"
         real_file = data_dir / "assembly_1_rep1_1kb.metacool"
         if real_file.exists():
-            assert metacooler.is_metacooler(real_file)  # ty:ignore
+            assert metacooler.is_metacooler(real_file)
 
     def test_is_mmetacooler_works_with_real_file(self):
         from pathlib import Path
@@ -171,12 +217,12 @@ class TestInit:
         data_dir = Path(__file__).parent / "data"
         real_file = data_dir / "assembly_1_1kb.mmetacool"
         if real_file.exists():
-            assert metacooler.is_mmetacooler(real_file)  # ty:ignore
+            assert metacooler.is_mmetacooler(real_file)
 
     def test_parse_uri_basic(self):
         from metacooler import parse_uri
 
-        path, group = parse_uri("file.mmetacool::groups/entry1")  # ty:ignore
+        path, group = parse_uri("file.mmetacool::groups/entry1")
         assert str(path) == "file.mmetacool"
         assert "groups/entry1" in group
 
@@ -188,5 +234,5 @@ class TestInit:
         data_dir = Path(__file__).parent / "data"
         real_file = data_dir / "assembly_1_rep1_1kb.metacool"
         if real_file.exists():
-            mc = MetaCooler(real_file)  # ty:ignore
+            mc = MetaCooler(real_file)
             assert mc is not None

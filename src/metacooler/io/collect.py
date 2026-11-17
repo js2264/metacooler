@@ -43,6 +43,7 @@ from metacooler.io._utils import (
     chrom_codes,
     read_user_table,
     rename_key_columns,
+    report_unmatched_rows,
     resolve_count_dtype,
     store_qc,
     to_upper_triangle,
@@ -69,6 +70,7 @@ from metacooler.io.create import (
     _load_extra_genomes_table,
     _normalize_genome_name,
     _protect_reserved_columns,
+    _refuse_staging_an_input,
     _staged_output,
     _tally_pixel_qc,
     _total_time_str,
@@ -85,6 +87,8 @@ from metacooler.uri import parse_uri
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
     from typing import Literal
+
+    from metacooler.io._utils import Unmatched
 
     CollectOrdering = Literal["cool", "genome-then-length", "genome-then-alpha"]
 
@@ -618,6 +622,8 @@ def _resolve_contig_metadata(
     path: str | Path,
     *,
     command: Literal["collect", "annotate"] = "collect",
+    unmatched: Unmatched = "warn",
+    deferred: list[str] | None = None,
 ) -> pd.DataFrame | None:
     """Resolve the rows of a per-contig metadata table to known contigs.
 
@@ -639,6 +645,10 @@ def _resolve_contig_metadata(
             messages).
         path: The table, for messages.
         command: Which command is asking, for the wording of the messages.
+        unmatched: What to do with rows that name no known contig (see
+            :func:`metacooler.io._utils.report_unmatched_rows`).
+        deferred: Where to collect, rather than raise, an ``"error"``
+            refusal (see the same function).
 
     Returns:
         A frame shaped like :func:`metacooler.io.contigs.parse_contigs_table`'s:
@@ -647,8 +657,9 @@ def _resolve_contig_metadata(
         table has no metadata column.
 
     Raises:
-        ValueError: If a row names a contig ambiguously, or contradicts the
-            genome a contig comes from.
+        ValueError: If a row names a contig ambiguously, contradicts the
+            genome a contig comes from, or (under ``unmatched="error"``) names
+            no known contig.
     """
     wording = _CONTIG_METADATA_WORDING[command]
     names = table["contig_name"]
@@ -717,16 +728,14 @@ def _resolve_contig_metadata(
 
     matched = resolved.notna()
     if not matched.all():
-        logger.warning(
-            "Contigs table (%s): %d of %d row(s) match no %s and are ignored, "
-            "e.g. %s. %s%s.",
-            path,
-            int((~matched).sum()),
-            len(table),
-            wording["target"],
+        in_genome = ", in the genome its genome_name column gives" if has_genome else ""
+        report_unmatched_rows(
+            unmatched,
+            f"Contigs table ({path}): {int((~matched).sum())} of {len(table)} "
+            f"row(s) match no {wording['target']}",
             _examples(pd.unique(names[~matched])),
-            wording["naming"],
-            ", in the genome its genome_name column gives" if has_genome else "",
+            f" {wording['naming']}{in_genome}.",
+            deferred=deferred,
         )
     repeated = resolved[matched].duplicated(keep=False)
     if repeated.any():
@@ -1028,6 +1037,7 @@ def collect(
     qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
     genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
     contigs_table_format: str = CONTIG_METADATA_FORMAT_DEFAULT,
+    keep_partial: bool = True,
 ) -> None:
     """Collect single-genome cool files into one metacool file, one genome each.
 
@@ -1088,6 +1098,11 @@ def collect(
             a table without a header line.  Defaults to ``genome_name``.
         contigs_table_format: Which column of *contigs_table* holds the contig
             names, in the same grammar.  Defaults to ``contig_name``.
+        keep_partial: On a failure while the output is being written, leave
+            ``<output>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run.
 
     Raises:
         ValueError: On an empty or ill-formed input list, inputs of different
@@ -1120,6 +1135,8 @@ def collect(
     if chunksize < 1:
         raise ValueError(f"chunksize must be a positive integer, got {chunksize}.")
     check_output_not_an_input(output, sources)
+    read = [*sources, genomes_table, contigs_table]
+    _refuse_staging_an_input(output, read)
     genome_names = _genome_names(sources, names)
 
     # --- Read every input's bins before a single pixel ---
@@ -1240,7 +1257,11 @@ def collect(
         )
     pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
     ordered = ordered or was_empty
-    with _staged_output(output) as staged:
+    with _staged_output(
+        output,
+        keep_partial=keep_partial,
+        inputs=read,
+    ) as staged:
         write_cooler(
             staged,
             bins_df,

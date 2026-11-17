@@ -19,6 +19,35 @@
   `ContactQC.set_intra_contig()`, `metacooler.ops.qc.tally_map()` (the pixel
   pass of `qc`, with the bins' genomes as an option), and a `per_contig`
   argument to `store_qc`.
+- **`annotate --unmatched warn|ignore|error`** (API: `annotate(...,
+  unmatched=)`): what to do with the rows of a genomes or contigs table that
+  name no genome or contig of the map. `warn`, the default, keeps the warning
+  `annotate` always gave; `ignore` says nothing about them (a debug line);
+  `error` refuses the tables before anything is written. A table that matches
+  nothing at all is still refused in every case.
+- **`keep_partial`** on every writer that stages its output — `from_pairs`,
+  `from_cool`, `collect`, `reassign` and `annotate`. When the write fails,
+  `keep_partial=False` removes `<output>.partial`, whatever stopped the run
+  (`KeyboardInterrupt` included), and logs that at INFO, where the default,
+  `True`, leaves it for inspection and logs at ERROR as before. For callers
+  that stage their own output; see [A failed write](api/io.md#keep-partial).
+  `from_pairs` now stages its `.ps.tsv` table with the map and moves it into
+  place just before it, the previous table set aside until the map is in place
+  and put back if the map cannot be moved: written after the map was in place, a
+  failure there left the new map behind. Once the map is in place the set-aside
+  table is removed, and one that cannot be is left, with a warning, not put
+  back: the new map and table match, and the run succeeds unless it was
+  interrupted. A `<name>.ps.tsv.previous` left behind, by that failure or by a
+  run killed during the moves, makes `from_pairs` refuse to start, before it
+  reads anything, until someone checks which table matches the map (a file
+  of the user's own of that name is refused alike: rename it).
+  `reassign` and `annotate` are now in the I/O API reference.
+- **`MetaCooler.iter_pixels(chunksize=, contig_ids=False)`** yields the pixel
+  table in consecutive chunks of at most `chunksize` rows, read with cooler's
+  selector, so a caller can stream a large map without `pixels()` reading all
+  of it at once. `contig_ids=True` adds `contig1_id`/`contig2_id`, looked up
+  through `indexes/chrom_offset`. See
+  [Reading pixels in chunks](api/metacooler.md#reading-pixels-in-chunks).
 
 ### Changed
 
@@ -57,6 +86,29 @@
 - **`reassign` no longer crashes on a non-object `qc` metadata value** when it
   recomputes the block; it measures at the default distance threshold, as
   `qc --store` does without `--threshold`.
+- **Type checkers see what every top-level name is.** `metacooler.from_pairs`,
+  `metacooler.MetaCooler` and the rest of `__all__` are loaded lazily through
+  the module's `__getattr__`, so pyright and ty typed each of them as `object`
+  and flagged every call in client code as not callable, while mypy typed each
+  as `Any` (`import-untyped`). An `if TYPE_CHECKING:` block in
+  `metacooler/__init__.py` now names each one at its source for type checkers
+  only: nothing more is imported at run time, so
+  `import metacooler` costs what it did. The package also ships a `py.typed`
+  marker, without which mypy does not read an installed metacooler at all
+  (`import-untyped`).
+- **`reassign` no longer claims that only provenance differs when no contig
+  moves** although the output differs in more: a `--genomes` table, a
+  re-grouped layout or a new `contig-ordering`, `--no-qc`, `--metadata` keys,
+  or the QC block it recomputes. The message names each, and is an INFO line
+  rather than a warning when the caller asked for one of them; a table that
+  moves nothing, and nothing else asked for, still warns.
+- **A left-over `<output>.partial` given as the input is no longer deleted.**
+  Every writer that stages its output removes a stale `<output>.partial`
+  before it starts, and it did so even when that file was its input:
+  `reassign out.metacool.partial -o out.metacool`, rescuing a partial run,
+  deleted the map before reading it (as did `annotate`, `collect`,
+  `create cool` and `create pairs` given such an input). It is now refused
+  before anything is read, as an output that is an input always was.
 
 ## 0.2.0 - 2026-11-16
 

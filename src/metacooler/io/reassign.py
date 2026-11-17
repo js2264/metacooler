@@ -71,6 +71,7 @@ from metacooler.io.create import (
     _compute_all_offsets,
     _load_extra_genomes_table,
     _parse_contig_map,
+    _refuse_staging_an_input,
     _remap_bins,
     _staged_output,
     _stream_remapped_pixels,
@@ -224,11 +225,65 @@ def _log_report(report: ReassignReport, n_contigs: int) -> None:
             len(report.unknown),
             _names(report.unknown),
         )
-    if not report.moved:
-        logger.warning(
-            "No contig changes genome; the output differs from the input only "
-            "in its provenance metadata."
-        )
+
+
+def _and(items: list[str]) -> str:
+    """Join phrases as English does: ``a``, ``a and b``, ``a, b and c``."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _log_nothing_moved(
+    *,
+    genomes_table: bool,
+    reorder: bool,
+    strategy: str,
+    source_ordering: str | None,
+    ordering: str,
+    qc_block: Literal["recomputed", "dropped"] | None,
+    metadata_keys: list[str],
+) -> None:
+    """Say what a reassignment that moves no contig changes all the same.
+
+    Alone, a table that moves nothing is most likely the wrong table (or the
+    wrong ``--contigs-format``), which is worth a WARNING.  But the output may
+    still differ from the input in what the caller asked for -- a genomes
+    table, a layout, metadata -- and in a QC block the command recomputes from
+    the pixels or drops; the message names each, and drops to INFO when the
+    caller changed something on purpose.  A carried block is not named: with
+    no contig moved, it is the source's.
+
+    Args:
+        genomes_table: Whether a genomes table replaced the ``/genomes``
+            metadata columns.
+        reorder: Whether the contigs (hence bins and pixels) are re-laid out.
+        strategy: The layout strategy, for the message.
+        source_ordering: The source's ``contig-ordering`` attribute.
+        ordering: The output's ``contig-ordering`` attribute.
+        qc_block: ``"recomputed"`` or ``"dropped"`` when that happens to the
+            source's QC block; ``None`` when it has none, or it is carried.
+        metadata_keys: Metadata keys the caller merged in, provenance aside.
+    """
+    asked = []
+    if genomes_table:
+        asked.append("its /genomes metadata columns (from the genomes table)")
+    if reorder:
+        asked.append(f"its contig layout (re-grouped as {strategy!r})")
+    elif ordering != source_ordering:
+        asked.append(f"its contig-ordering attribute (now {ordering!r})")
+    if qc_block == "dropped":
+        asked.append("its QC block (dropped)")
+    if metadata_keys:
+        asked.append(f"its metadata key(s) ({', '.join(metadata_keys)})")
+    also = asked + (
+        ["its QC block (recomputed from the pixels)"]
+        if qc_block == "recomputed"
+        else []
+    )
+    logger.log(
+        logging.INFO if asked else logging.WARNING,
+        "No contig changes genome; the output differs from the input only in %s.",
+        _and(["its provenance metadata", *also]),
+    )
 
 
 def _resolve_layout(layout: str, source_ordering: str | None) -> str:
@@ -891,6 +946,7 @@ def reassign(
     qc: bool = True,
     chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
+    keep_partial: bool = True,
 ) -> None:
     """Reassign the contigs of a metacool file to different genomes.
 
@@ -950,6 +1006,12 @@ def reassign(
         force: Replace *output* if it exists.  The existing file is only
             replaced once the new one has been written and validated, so a
             failed run leaves it untouched.
+        keep_partial: On a failure while the output is being written, leave
+            ``<output>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run.  Unused
+            with *inplace*, which stages nothing.
 
     Raises:
         ValueError: If the output arguments are inconsistent, if *output* is
@@ -971,20 +1033,18 @@ def reassign(
             "An output path is required. Pass output=... to write a new file, "
             "or inplace=True to rewrite the input."
         )
+    inputs = [
+        uri,
+        genomes_table,
+        None if isinstance(contig_genome_map, dict) else contig_genome_map,
+    ]
     if output is not None:
-        # Before anything is read: an output that is one of the inputs is
-        # refused even under force, and an existing output is left in place
-        # for _staged_output to replace once the new file has validated.
-        check_output_path(
-            output,
-            force,
-            inputs=[
-                uri,
-                genomes_table,
-                None if isinstance(contig_genome_map, dict) else contig_genome_map,
-            ],
-            defer_removal=True,
-        )
+        # Before anything is read: an output (or the partial file it is staged
+        # as) that is one of the inputs is refused even under force, and an
+        # existing output is left in place for _staged_output to replace once
+        # the new file has validated.
+        check_output_path(output, force, inputs=inputs, defer_removal=True)
+        _refuse_staging_an_input(output, inputs)
 
     mc = MetaCooler(uri)
     old_contigs = mc.contigs
@@ -1095,18 +1155,28 @@ def reassign(
         layout=strategy,
         n_moved=len(report.moved),
     )
+    block = source_metadata.get(QC_METADATA_KEY)
+    carried = _carried_contig_qc(block, old_contigs) if had_qc and qc else None
+    if not report.moved:
+        _log_nothing_moved(
+            genomes_table=genomes_table is not None,
+            reorder=reorder,
+            strategy=strategy,
+            source_ordering=source_ordering,
+            ordering=ordering,
+            qc_block=(
+                None
+                if not had_qc or carried is not None
+                else "recomputed"
+                if qc
+                else "dropped"
+            ),
+            metadata_keys=[k for k in (metadata or {}) if k != "commands"],
+        )
     if had_qc and qc:
         # Measured before anything is written, and written with the rest of
         # the map: a run stopped meanwhile leaves the source's block intact.
-        block = source_metadata[QC_METADATA_KEY]
-        new_qc = _measure_qc(
-            mc,
-            genomes,
-            contigs,
-            block,
-            _carried_contig_qc(block, old_contigs),
-            chunksize,
-        )
+        new_qc = _measure_qc(mc, genomes, contigs, block, carried, chunksize)
         output_metadata[QC_METADATA_KEY] = new_qc.summary
         genomes = _with_columns(genomes, new_qc.per_genome, QC_GENOME_COLUMNS)
         contigs = _with_columns(contigs, new_qc.per_contig, QC_CONTIG_COLUMNS)
@@ -1118,7 +1188,7 @@ def reassign(
     else:
         assert output is not None  # guaranteed by the argument check above
         target = Path(output)
-        with _staged_output(target) as staged:
+        with _staged_output(target, keep_partial=keep_partial, inputs=inputs) as staged:
             if reorder:
                 logger.info(
                     "Re-ordering %d contigs into %r layout: the bins move with "

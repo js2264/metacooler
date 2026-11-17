@@ -17,6 +17,50 @@ attribute on the module object so subsequent accesses skip the lookup.
 
 from metacooler._version import __version__
 
+# For type checkers only.  They type every lazily exported name as what
+# __getattr__ returns, `object`, so a call such as `metacooler.from_pairs(...)`
+# in client code was "not callable".  The block below names each public symbol
+# of __all__ at its source, and never runs: it is NOT a runtime barrel import
+# (those stay forbidden -- see __getattr__), so the import time and the lazy
+# dispatch are unchanged.  A module constant rather than typing.TYPE_CHECKING,
+# which type checkers honour all the same: importing typing alone would make
+# `import metacooler` several times slower.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from metacooler.api import MetaCooler
+    from metacooler.io.annotate import annotate
+    from metacooler.io.collect import collect
+    from metacooler.io.create import from_cool, from_pairs
+    from metacooler.io.dump import dump_table
+    from metacooler.io.extract import extract
+    from metacooler.io.flatten import flatten
+    from metacooler.io.merge import merge
+    from metacooler.io.mmetacool import (
+        add_entry,
+        copy_entry,
+        copy_entry_cross_file,
+        create_mmetacool,
+        list_entries,
+        move_entry,
+        remove_entry,
+    )
+    from metacooler.io.network import network
+    from metacooler.io.reassign import reassign
+    from metacooler.ops.aggregate import aggregate
+    from metacooler.ops.binnify import binnify
+    from metacooler.ops.ps import contact_probability, plot_ps
+    from metacooler.ops.qc import qc as contact_qc
+    from metacooler.ops.zoomify import zoomify
+    from metacooler.schema import (
+        CheckResult,
+        check,
+        is_metacooler,
+        is_mmetacooler,
+        validate,
+        validate_mmetacooler,
+    )
+    from metacooler.uri import parse_uri
+
 __all__ = [
     "__version__",
     "MetaCooler",

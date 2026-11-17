@@ -12,6 +12,7 @@ derived ``/genomes`` table and the physical contig layout that
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 
@@ -27,7 +28,8 @@ from numpy.testing import assert_array_equal
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
 from metacooler.io.reassign import CUSTOM_ORDERING, reassign
-from metacooler.schema import validate
+from metacooler.qc import QC_CONTIG_COLUMNS
+from metacooler.schema import Layout, validate
 
 # The tiny fixture is built with contig-ordering="genome-then-alpha" from:
 #   __unbinned__ = {contig_D}, MAG_1 = {contig_A, contig_B}, MAG_2 = {contig_C}
@@ -702,6 +704,132 @@ def test_provenance_is_appended_not_replaced(tmp_path: Path, tiny_metacooler: Pa
     ]
     assert metadata["reassign"][0]["n_contigs_reassigned"] == 1
     assert metadata["reassign"][0]["layout"] == "genome-then-alpha"
+
+
+# ---------------------------------------------------------------------------
+# A table that moves no contig
+# ---------------------------------------------------------------------------
+
+# contig_A is in MAG_1 already.
+NO_MOVE = {"contig_A": "MAG_1"}
+ONLY_PROVENANCE = (
+    "No contig changes genome; the output differs from the input only in its "
+    "provenance metadata."
+)
+
+
+def _nothing_moved(caplog: pytest.LogCaptureFixture) -> logging.LogRecord:
+    (record,) = [
+        r for r in caplog.records if r.getMessage().startswith("No contig changes")
+    ]
+    return record
+
+
+def _drop_qc_block(path: Path) -> Path:
+    with h5py.File(path, "r+") as f:
+        metadata = json.loads(f.attrs["metadata"])
+        del metadata["qc"]
+        f.attrs["metadata"] = json.dumps(metadata)
+    return path
+
+
+def test_a_table_moving_nothing_warns_that_only_provenance_differs(
+    tmp_path: Path, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
+):
+    """Guard: the warning keeps its meaning when it is true."""
+    source = _drop_qc_block(tiny_metacooler)
+    reassign(source, _table(tmp_path / "t.tsv", NO_MOVE), tmp_path / "out.metacool")
+
+    record = _nothing_moved(caplog)
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == ONLY_PROVENANCE
+
+
+def test_a_table_moving_nothing_still_names_a_recomputed_qc_block(
+    tmp_path: Path, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
+):
+    """Nothing was asked for but the table, so it warns -- truthfully.
+
+    A map without per-contig QC counts (written by 0.2.0) has its block
+    recomputed from the pixels, which the message names.
+    """
+    with h5py.File(tiny_metacooler, "r+") as f:
+        for column in QC_CONTIG_COLUMNS:
+            del f["contigs"][column]
+    reassign(
+        tiny_metacooler, _table(tmp_path / "t.tsv", NO_MOVE), tmp_path / "out.metacool"
+    )
+
+    record = _nothing_moved(caplog)
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        "No contig changes genome; the output differs from the input only in its "
+        "provenance metadata and its QC block (recomputed from the pixels)."
+    )
+
+
+def test_a_table_moving_nothing_does_not_name_a_carried_qc_block(
+    tmp_path: Path, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
+):
+    """Carried with no contig moved, the block is the source's: not a change.
+
+    A guard against this commit's parent, whose one message happened to be
+    true here; it pins that a carried block is never named as recomputed.
+    """
+    out = tmp_path / "out.metacool"
+    reassign(tiny_metacooler, _table(tmp_path / "t.tsv", NO_MOVE), out)
+
+    record = _nothing_moved(caplog)
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == ONLY_PROVENANCE
+    assert MetaCooler(out).metadata["qc"] == MetaCooler(tiny_metacooler).metadata["qc"]
+
+
+@pytest.mark.parametrize(
+    ("change", "says"),
+    [
+        ("genomes", "its /genomes metadata columns (from the genomes table)"),
+        ("layout", "its contig layout (re-grouped as 'genome-then-alpha')"),
+        ("label", "its contig-ordering attribute (now 'genome-then-length')"),
+        ("no-qc", "its QC block (dropped)"),
+        ("metadata", "its metadata key(s) (sample)"),
+    ],
+)
+def test_a_table_moving_nothing_reports_what_else_changes(
+    tmp_path: Path,
+    tiny_metacooler: Path,
+    alpha_ordered_metacooler: Path,
+    caplog: pytest.LogCaptureFixture,
+    change: str,
+    says: str,
+):
+    """Asked for on purpose, the other changes make it an INFO line naming them."""
+    caplog.set_level(logging.INFO, logger="metacooler")
+    source = alpha_ordered_metacooler if change == "layout" else tiny_metacooler
+    genomes = tmp_path / "g.tsv"
+    genomes.write_text("genome_name\tcompleteness\nMAG_1\t90\n")
+    layouts: dict[str, Layout] = {
+        "layout": "genome-then-alpha",
+        "label": "genome-then-length",
+    }
+    reassign(
+        source,
+        _table(tmp_path / "t.tsv", NO_MOVE),
+        tmp_path / "out.metacool",
+        genomes_table=genomes if change == "genomes" else None,
+        layout=layouts.get(change, "auto"),
+        qc=change != "no-qc",
+        metadata={"commands": ["metacooler reassign"], "sample": "S1"}
+        if change == "metadata"
+        else None,
+    )
+
+    record = _nothing_moved(caplog)
+    assert record.levelno == logging.INFO
+    message = record.getMessage()
+    assert message.startswith("No contig changes genome; the output differs")
+    assert says in message
+    assert message != ONLY_PROVENANCE
 
 
 # ---------------------------------------------------------------------------

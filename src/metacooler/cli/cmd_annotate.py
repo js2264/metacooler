@@ -100,6 +100,19 @@ if TYPE_CHECKING:
     ),
 )
 @click.option(
+    "--unmatched",
+    type=click.Choice(["warn", "ignore", "error"]),
+    default="warn",
+    show_default=True,
+    help=(
+        "What to do with the rows of a table that name no genome or contig of "
+        "the map. [cyan]warn[/cyan]: ignore them with a warning. "
+        "[cyan]ignore[/cyan]: ignore them silently. [cyan]error[/cyan]: refuse "
+        "the tables, before anything is written. A table that matches nothing "
+        "at all is refused in every case."
+    ),
+)
+@click.option(
     "-o",
     "--output",
     type=click.Path(path_type=Path),
@@ -131,6 +144,7 @@ def cmd_annotate(
     drop: list[str],
     replace: bool,
     missing: Literal["keep", "na"],
+    unmatched: Literal["warn", "ignore", "error"],
     output: Path | None,
     inplace: bool,
     force: bool,
@@ -181,6 +195,7 @@ def cmd_annotate(
         drop=drop or None,
         replace=replace,
         missing=missing,
+        unmatched=unmatched,
         inplace=inplace,
         metadata={"commands": [reconstruct_command()]},
         force=force,
