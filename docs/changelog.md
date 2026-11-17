@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Added
+
+- **Per-contig QC columns.** Every command that stores the contact-quality
+  block — `create pairs`, `create cool`, `collect`, `qc --store`, `reassign` —
+  now also writes `qc_intra_contig_short` and `qc_intra_contig_long` to
+  `/contigs` (`int64`, or `float64` on a map with float counts), from the same
+  tally: read positions for `create pairs`, bin midpoints for a pixel tally.
+  They are the two categories that do not depend on the genome assignment,
+  counted contig by contig; the `/genomes` columns of the same names are their
+  per-genome sums. The block's `version` stays `2`: no existing key changes
+  meaning. Like the `/genomes` ones, the names are reserved (a user table
+  column of that name is stored as `user_qc_intra_contig_short`), `binnify` and
+  `merge` drop them, and `annotate` cannot drop or replace them. Python:
+  `ContactQC(..., n_contigs=)`, `ContactQC.contig_table()`, and a `per_contig`
+  argument to `store_qc`.
+
+### Changed
+
+- **In `/contigs`, only the two QC columns go with the QC block.** `merge`
+  drops them (it copied the first input's `/contigs` verbatim), as `binnify`
+  does, and `reassign` replaces or drops them with the block, whether it moves
+  the contigs or not. A user column that merely starts with `qc_` (`qc_pass`,
+  from a `--contigs` table) is contig metadata, kept by every writer:
+  `binnify` and a re-grouping `reassign` used to drop every `qc_*` column of
+  `/contigs`. `annotate --drop` now accepts it, and `merge` reports it when
+  inputs differ, as for any metadata column; both treated every `qc_*` column
+  of `/contigs` as metacooler's.
+
 ## 0.2.0 - 2026-11-16
 
 ### Breaking

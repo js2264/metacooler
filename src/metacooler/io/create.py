@@ -55,6 +55,7 @@ from metacooler.ps import (
 )
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
+    QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
     BinMaps,
     ContactQC,
@@ -113,7 +114,9 @@ _PAIRS_READ_BLOCK_MAX_BYTES = 128 * 1024**2  # 128 MiB (~1.2 M pairs)
 _GENOMES_RESERVED_COLUMNS = frozenset(
     {"name", "length", "n_contigs", "n_bins"} | set(QC_GENOME_COLUMNS)
 )
-_CONTIGS_RESERVED_COLUMNS = frozenset({"name", "length", "genome_id"})
+_CONTIGS_RESERVED_COLUMNS = frozenset(
+    {"name", "length", "genome_id"} | set(QC_CONTIG_COLUMNS)
+)
 # How many distinct unknown contig names to remember for the dropped-pair report.
 _MAX_REPORTED_UNKNOWN_CONTIGS = 10
 # How many genome names to name when the contigs and genomes tables diverge.
@@ -2628,11 +2631,13 @@ def from_pairs(
             they exceed 100 M rows, in which case fall back to ``False`` with a
             logged warning.
         qc: Tally contact-quality statistics while the pairs are being binned
-            and store them in ``metadata["qc"]`` and the ``/genomes`` ``qc_*``
-            columns (see :mod:`metacooler.qc`).  Free apart from a few
-            vectorised operations per chunk, since the pass over the pairs is
-            happening anyway — and only possible *here*, because binning
-            discards the sub-bin distances the short/long split needs.
+            and store them in ``metadata["qc"]`` and the ``qc_*`` columns of
+            ``/genomes`` and ``/contigs`` (see :mod:`metacooler.qc`).  Free
+            apart from a few vectorised operations per chunk, since the pass
+            over the pairs is happening anyway — and only possible *here*,
+            because binning discards the sub-bin distances the short/long
+            split needs.  The per-contig short/long counts are what lets a
+            later :func:`metacooler.io.reassign.reassign` keep that split.
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
         ps: Accumulate a per-genome P(s) curve from the same pass and write it
             beside the output as ``<name>.ps.tsv`` (see :mod:`metacooler.ps`).
@@ -2830,6 +2835,7 @@ def from_pairs(
             qc_distance_threshold,
             source="pairs",
             unbinned_genome=unbinned_genome_id(genomes_df["name"]),
+            n_contigs=len(contigs_df),
         )
         if qc
         else None
@@ -2922,6 +2928,7 @@ def from_pairs(
                     n_pairs_discarded=drop_stats.dropped,
                 ),
                 qc_tally.genome_table(genomes_df["name"].to_numpy()),
+                qc_tally.contig_table(contigs_df["name"].to_numpy()),
             )
 
         # --- Validate ---
@@ -3019,10 +3026,10 @@ def from_cool(
             more than 100 M pixels use ``False`` with a logged warning.
         qc: Tally contact-quality statistics off the pixel stream that is
             being copied anyway, and store them in ``metadata["qc"]`` and the
-            ``/genomes`` ``qc_*`` columns (see :mod:`metacooler.qc`).  A cool
-            file has no read positions left, so intra-contig distances are
-            measured between bin midpoints and the block records
-            ``source="pixels"``.
+            ``qc_*`` columns of ``/genomes`` and ``/contigs`` (see
+            :mod:`metacooler.qc`).  A cool file has no read positions left, so
+            intra-contig distances are measured between bin midpoints and the
+            block records ``source="pixels"``.
         qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
@@ -3181,6 +3188,7 @@ def from_cool(
             qc_distance_threshold,
             source="pixels",
             unbinned_genome=unbinned_genome_id(genomes["name"]),
+            n_contigs=len(contigs),
         )
         if qc
         else None
@@ -3237,6 +3245,7 @@ def from_cool(
                 staged,
                 qc_tally.summary(binsize=infer_binsize(bins_remapped)),
                 qc_tally.genome_table(genomes["name"].to_numpy()),
+                qc_tally.contig_table(contigs["name"].to_numpy()),
             )
 
         # --- Validate ---

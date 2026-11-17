@@ -113,8 +113,9 @@ _ORDERINGS = ["cool", "genome-then-length", "genome-then-alpha"]
     show_default=True,
     help=(
         "Tally contact-quality statistics while the pixels are copied and store "
-        "them in [cyan]metadata.qc[/cyan] and the [cyan]/genomes[/cyan] "
-        "[cyan]qc_*[/cyan] columns. Inter-genome contacts are 0 by construction."
+        "them in [cyan]metadata.qc[/cyan] and the [cyan]qc_*[/cyan] columns of "
+        "[cyan]/genomes[/cyan] and [cyan]/contigs[/cyan]. Inter-genome contacts "
+        "are 0 by construction."
     ),
 )
 @click.option(

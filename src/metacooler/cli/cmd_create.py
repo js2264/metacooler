@@ -72,9 +72,9 @@ def shared_options(f):
             show_default=True,
             help=(
                 "Tally contact-quality statistics during creation and store them "
-                "in [cyan]metadata.qc[/cyan] and the [cyan]/genomes[/cyan] "
-                "[cyan]qc_*[/cyan] columns. Read them back with "
-                "[cyan]metacooler qc[/cyan]."
+                "in [cyan]metadata.qc[/cyan] and the [cyan]qc_*[/cyan] columns "
+                "of [cyan]/genomes[/cyan] and [cyan]/contigs[/cyan]. Read them "
+                "back with [cyan]metacooler qc[/cyan]."
             ),
         ),
         click.option(

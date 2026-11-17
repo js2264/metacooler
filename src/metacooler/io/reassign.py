@@ -68,7 +68,9 @@ from metacooler.io.create import (
     _stream_remapped_pixels,
 )
 from metacooler.qc import (
+    QC_CONTIG_COLUMNS,
     QC_METADATA_KEY,
+    strip_contig_qc_columns,
     strip_qc_columns,
     strip_qc_metadata,
 )
@@ -393,7 +395,9 @@ def _carry_contig_metadata(
 
     Contigs themselves are untouched by a reassignment — same names, same
     lengths, same bins — so every extra column stays valid and is carried
-    verbatim.
+    verbatim.  The two per-contig QC columns are the exception: they belong to
+    the QC block, which :func:`reassign` recomputes (or drops) as a whole.  A
+    user's own ``qc_*`` column is metadata like any other.
 
     Args:
         old_contigs: The source file's ``/contigs`` table.
@@ -405,7 +409,9 @@ def _carry_contig_metadata(
         ``None`` when the source carried no extra column.
     """
     derived = {"name", "length", "genome_id"}
-    extra = [c for c in old_contigs.columns if c not in derived]
+    extra = [
+        c for c in strip_contig_qc_columns(old_contigs).columns if c not in derived
+    ]
     if not extra:
         return None
     names = old_contigs["name"].astype(str)
@@ -518,7 +524,9 @@ def _write_relabelled(
     ``chrom_offset``, ``bin1_offset``, every extra ``/contigs`` column — is left
     exactly where it is, because the contig rows keep their positions.  Only
     ``/genomes`` (whose rows are derived), ``/contigs/genome_id``,
-    ``indexes/genome_offset`` and the affected attributes are written.
+    ``indexes/genome_offset`` and the affected attributes are written, and the
+    per-contig QC columns that *contigs* does not have are removed, so the
+    table on disk is the one the regroup path would write.
 
     Args:
         path: File to modify.
@@ -559,6 +567,9 @@ def _write_relabelled(
         write_column(
             grp["contigs"], "genome_id", contigs["genome_id"].to_numpy(np.int32)
         )
+        for column in QC_CONTIG_COLUMNS:
+            if column in grp["contigs"] and column not in contigs:
+                del grp["contigs"][column]
 
         indexes = grp["indexes"]
         if "genome_offset" in indexes:
@@ -863,7 +874,7 @@ def reassign(
         contig_df=_carry_contig_metadata(old_contigs, assignment),
     )
     genomes = strip_qc_columns(genomes)
-    contigs = strip_qc_columns(contigs)
+    contigs = strip_contig_qc_columns(contigs)
     if not reorder:
         # The re-ordering path gets n_bins from _compute_all_offsets, which needs
         # the bins table; here the bins have not moved, so the per-contig counts

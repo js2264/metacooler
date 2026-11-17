@@ -37,6 +37,12 @@ The headline number, ``trans_contig_ratio`` (the "3D ratio"), is the share of
 contacts joining two *different* contigs — the signal that assembles a
 metagenome — and is by construction
 ``(inter_contig_intra_genome + inter_genome) / n_contacts``.
+
+The first two categories do not depend on the contig→genome assignment: a
+contact inside one contig stays inside it whichever genome the contig is given
+to.  They are therefore also counted per *contig* (:data:`QC_CONTIG_COLUMNS`,
+stored in ``/contigs``), and the per-genome columns of the same names are
+their sums over each genome's contigs.
 """
 
 from __future__ import annotations
@@ -90,6 +96,11 @@ QC_COLUMN_PREFIX = "qc_"
 QC_GENOME_COLUMNS = tuple(f"{QC_COLUMN_PREFIX}{c}" for c in QC_CATEGORIES) + (
     f"{QC_COLUMN_PREFIX}intra_genome_ratio",
 )
+
+# Per-contig columns written into ``/contigs``: the two categories that do not
+# depend on the genome assignment, under the names their per-genome sums carry
+# in ``/genomes``.
+QC_CONTIG_COLUMNS = QC_GENOME_COLUMNS[:2]
 
 # Records classified per pass.  Every temporary of one block -- a handful of
 # int64 and bool arrays this long -- stays in a core's L2 cache, where a whole
@@ -177,6 +188,9 @@ class ContactQC:
         unbinned_genome: Row of ``__unbinned__`` in ``/genomes`` (see
             :func:`unbinned_genome_id`), whose contigs are each classified as
             a genome of their own; ``None`` if the file has none.
+        n_contigs: Number of rows of the ``/contigs`` table, to also count the
+            two intra-contig categories per contig (see :meth:`contig_table`);
+            ``None`` (the default) counts per genome only.
     """
 
     def __init__(
@@ -185,6 +199,7 @@ class ContactQC:
         distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
         source: Literal["pairs", "pixels"] = "pixels",
         unbinned_genome: int | None = None,
+        n_contigs: int | None = None,
     ) -> None:
         if distance_threshold < 0:
             raise ValueError(
@@ -199,6 +214,15 @@ class ContactQC:
         self.per_genome: np.ndarray = np.zeros(
             (self.n_genomes, len(QC_CATEGORIES)), dtype=np.int64
         )
+        # (short, long) per contig, when asked for.  Intra-contig records are
+        # queued and summed in batches (see `_queue_intra_contig`).
+        self._per_contig: np.ndarray | None = (
+            None
+            if n_contigs is None
+            else np.zeros((int(n_contigs), len(QC_CONTIG_COLUMNS)), dtype=np.int64)
+        )
+        self._contig_queue: list[tuple[np.ndarray, np.ndarray | None]] = []
+        self._contig_queued = 0
 
     # ------------------------------------------------------------------
     # Accumulation
@@ -208,8 +232,72 @@ class ContactQC:
         if weights is None or weights.dtype.kind != "f":
             return
         if self.counts.dtype.kind != "f":
+            # What is queued was weighted by integers: summed into the integer
+            # accumulator first, it stays exact.
+            self._flush_contigs()
             self.counts = self.counts.astype(np.float64)
             self.per_genome = self.per_genome.astype(np.float64)
+            if self._per_contig is not None:
+                self._per_contig = self._per_contig.astype(np.float64)
+
+    def _queue_intra_contig(
+        self,
+        contig: np.ndarray,
+        same_contig: np.ndarray,
+        long_range: np.ndarray,
+        weights: np.ndarray | None,
+    ) -> None:
+        """Queue one block's intra-contig records for the per-contig tally.
+
+        The per-contig table has two cells per contig -- millions on a
+        metagenome -- so a ``bincount`` sized to it for every cache-sized block
+        would cost more than the block itself.  The records are queued instead
+        and summed once at least as many have gathered as the table has cells
+        (:meth:`_flush_contigs`), which bounds that fixed cost by the work it
+        does while the queue stays a few times the size of the table.
+        """
+        rows = np.flatnonzero(same_contig)
+        key = np.multiply(contig[rows], len(QC_CONTIG_COLUMNS), dtype=np.int64)
+        key += long_range[rows]
+        self._contig_queue.append((key, None if weights is None else weights[rows]))
+        self._contig_queued += len(key)
+        assert self._per_contig is not None
+        if self._contig_queued >= max(_TALLY_BLOCK, self._per_contig.size):
+            self._flush_contigs()
+
+    def _flush_contigs(self) -> None:
+        """Add the queued intra-contig records to the per-contig table."""
+        if self._per_contig is None or not self._contig_queue:
+            return
+        queue, self._contig_queue, self._contig_queued = self._contig_queue, [], 0
+        keys = np.concatenate([key for key, _ in queue])
+        w = None
+        if any(weights is not None for _, weights in queue):
+            w = np.concatenate(
+                [
+                    np.ones(len(key)) if weights is None else weights
+                    for key, weights in queue
+                ]
+            ).astype(np.float64, copy=False)
+        # As in `_tally_block`: bincount sums in float64, exact for integers
+        # below 2**53, and the cast back to the accumulator dtype is lossless;
+        # a contig id never exceeds n_contigs-1, so the slice only trims the
+        # zero tail.
+        cells = np.bincount(keys, weights=w, minlength=self._per_contig.size)
+        self._per_contig += (
+            cells[: self._per_contig.size]
+            .reshape(self._per_contig.shape)
+            .astype(self._per_contig.dtype, copy=False)
+        )
+
+    @property
+    def per_contig(self) -> np.ndarray | None:
+        """``(n_contigs, 2)`` short/long intra-contig counts, or ``None``.
+
+        ``None`` unless the tally was created with *n_contigs*.
+        """
+        self._flush_contigs()
+        return self._per_contig
 
     def _blocks(self, n: int) -> Iterator[slice]:
         """Cut a chunk of *n* records into the slices :meth:`_tally_block` takes.
@@ -269,6 +357,8 @@ class ContactQC:
         long_range = distance >= self.distance_threshold
         long_range &= same_contig
         category |= long_range.view(np.uint8)
+        if self._per_contig is not None:
+            self._queue_intra_contig(contig1, same_contig, long_range, weights)
 
         key = np.multiply(genome1, n_categories, dtype=np.int64)
         key += category
@@ -461,23 +551,95 @@ class ContactQC:
         frame[QC_GENOME_COLUMNS[-1]] = ratio
         return frame
 
+    def contig_table(self, names: Sequence[str] | np.ndarray) -> pd.DataFrame:
+        """Per-contig short/long intra-contig counts, one row per contig.
 
-def strip_qc_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    """Drop every ``qc_*`` column from a genomes/contigs table.
+        Args:
+            names: Contig names, in ``/contigs`` order.
 
-    Called by the writers that derive a new file from an existing one
-    (``binnify``, ``merge``).  Their output has a different bin grid or a
-    different pixel table, so counts copied across would describe contacts
-    the output does not contain — a stale number is worse than no number,
-    because nothing about it looks stale.
+        Returns:
+            DataFrame with a ``name`` column and the :data:`QC_CONTIG_COLUMNS`
+            columns.
+
+        Raises:
+            ValueError: If the tally was created without *n_contigs*, or
+                *names* does not have one entry per tallied contig.
+        """
+        per_contig = self.per_contig
+        if per_contig is None:
+            raise ValueError(
+                "this tally does not count per contig; create it with n_contigs"
+            )
+        if len(names) != len(per_contig):
+            raise ValueError(
+                f"expected {len(per_contig)} contig name(s), got {len(names)}"
+            )
+        frame = pd.DataFrame({"name": np.asarray(names)})
+        for i, column in enumerate(QC_CONTIG_COLUMNS):
+            frame[column] = per_contig[:, i]
+        return frame
+
+
+def is_qc_column(table: str, column: object) -> bool:
+    """Whether a column of ``/genomes`` or ``/contigs`` belongs to the QC block.
+
+    In ``/genomes``, every ``qc_*`` column does: metacooler writes those names
+    there, and a user's own are stripped with them (:func:`strip_qc_columns`).
+    In ``/contigs``, only the two per-contig columns, :data:`QC_CONTIG_COLUMNS`,
+    do: any other ``qc_*`` column there (``qc_pass``, from a ``--contigs``
+    table) is a user's contig metadata, which every writer keeps.
 
     Args:
-        frame: Table about to be written to a derived file.
+        table: ``"genomes"`` or ``"contigs"``.
+        column: The column name.
+
+    Raises:
+        ValueError: If *table* is neither.
+    """
+    if table == "contigs":
+        return column in QC_CONTIG_COLUMNS
+    if table == "genomes":
+        return str(column).startswith(QC_COLUMN_PREFIX)
+    raise ValueError(f"table must be 'genomes' or 'contigs', got {table!r}")
+
+
+def strip_qc_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Drop every ``qc_*`` column from a genomes table.
+
+    Called by the writers that derive a new file from an existing one
+    (``binnify``, ``merge``, ``reassign``).  Their output has a different bin
+    grid, a different pixel table or different genomes, so counts copied
+    across would describe contacts the output does not contain — a stale
+    number is worse than no number, because nothing about it looks stale.
+    (``reassign`` then stores a block measured on its own output.)
+
+    For ``/contigs``, see :func:`strip_contig_qc_columns`.
+
+    Args:
+        frame: Genomes table about to be written to a derived file.
 
     Returns:
         *frame* unchanged when it carries no QC column, else a narrower copy.
     """
-    drop = [c for c in frame.columns if str(c).startswith(QC_COLUMN_PREFIX)]
+    drop = [c for c in frame.columns if is_qc_column("genomes", c)]
+    return frame.drop(columns=drop) if drop else frame
+
+
+def strip_contig_qc_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Drop the per-contig QC columns, :data:`QC_CONTIG_COLUMNS`, from a contigs table.
+
+    The ``/contigs`` counterpart of :func:`strip_qc_columns`, and narrower on
+    purpose: these two are the only ``qc_*`` columns metacooler writes to
+    ``/contigs``, while a user's ``--contigs`` table may bring a ``qc_*`` column
+    of its own (``qc_pass``) -- contig metadata, which a derived file keeps.
+
+    Args:
+        frame: Contigs table about to be written to a derived file.
+
+    Returns:
+        *frame* unchanged when it has neither column, else a narrower copy.
+    """
+    drop = [c for c in frame.columns if is_qc_column("contigs", c)]
     return frame.drop(columns=drop) if drop else frame
 
 

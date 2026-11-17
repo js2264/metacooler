@@ -18,7 +18,12 @@ from metacooler.io._utils import (
     resolve_count_dtype,
     to_upper_triangle,
 )
-from metacooler.qc import strip_qc_columns, strip_qc_metadata
+from metacooler.qc import (
+    is_qc_column,
+    strip_contig_qc_columns,
+    strip_qc_columns,
+    strip_qc_metadata,
+)
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -658,9 +663,11 @@ def _tile_per_genome_ligated(
         }
     )
     # Extra /genomes columns describe the ligated sequences too; keep them so
-    # this branch does not silently drop columns the contig branch preserves.
+    # this branch does not silently drop columns the contig branch preserves --
+    # but not the QC ones, the source's per-genome counts: in /contigs they
+    # would pass for user metadata that no writer strips.
     for col in genomes.columns:
-        if col not in reserved:
+        if col not in reserved and not is_qc_column("genomes", col):
             out_contigs[col] = genomes[col].values[keep]
 
     out_genomes = genomes.iloc[keep].copy().reset_index(drop=True)
@@ -751,13 +758,13 @@ def _write_rebinned_metacool(
     # The QC block is the exception — its short/long intra-contig split is a
     # statement about the source resolution, so carrying it onto a coarser grid
     # would attach numbers to a file they were never measured on. Same for the
-    # per-genome qc_* columns of the tables below.
+    # qc_* columns of the tables below, per genome and per contig.
     metadata = strip_qc_metadata(source_metadata)
     history = list(metadata.get("binnify", []))
     history.append({"source": str(source_uri), "binsize": int(binsize), "level": level})
     metadata["binnify"] = history
     genomes = strip_qc_columns(genomes)
-    contigs = strip_qc_columns(contigs)
+    contigs = strip_contig_qc_columns(contigs)
 
     # Pixel chunks arrive sorted and de-duplicated.  Row blocks of a monotonic
     # re-binning are also globally ordered; otherwise the chunk sequence is not,

@@ -120,6 +120,23 @@ class TestMetadataColumns:
             merge([a, b], tmp_path / "m.metacool")
         assert "genomes.completeness (other values)" in caplog.text
 
+    def test_a_user_qc_column_of_contigs_is_compared(
+        self, tiny_metacooler, tmp_path, caplog
+    ):
+        """Only the two QC columns of /contigs are skipped; qc_pass is metadata."""
+        from metacooler.io.annotate import annotate
+
+        a = self._copy(tiny_metacooler, tmp_path / "a.metacool")
+        b = self._copy(tiny_metacooler, tmp_path / "b.metacool")
+        for path, value in ((a, "1"), (b, "0")):
+            table = tmp_path / f"{path.stem}.tsv"
+            table.write_text(f"contig_name\tqc_pass\ncontig_A\t{value}\n")
+            annotate(path, inplace=True, contigs_table=table)
+        with caplog.at_level("WARNING", logger="metacooler"):
+            merge([a, b], tmp_path / "m.metacool")
+        assert "contigs.qc_pass (other values)" in caplog.text
+        assert "qc_intra_contig_short" not in caplog.text
+
     def test_identity_hash_ignores_integer_width(self, tiny_metacooler, tmp_path):
         import h5py
         import numpy as np

@@ -1155,40 +1155,66 @@ def store_qc(
     path: str | Path,
     summary: dict,
     per_genome: pd.DataFrame | None = None,
+    per_contig: pd.DataFrame | None = None,
     *,
     group_path: str = "/",
 ) -> None:
     """Write a QC block into an existing metacool file.
 
-    The single writer for both producers — ``create`` (right after
-    :func:`_finalize_metacool_file`) and ``metacooler qc --store`` on a file
-    that already exists — so the two cannot disagree about where the numbers
-    live or what they are called.
+    The single writer for every producer — ``create`` and ``collect`` (right
+    after :func:`_finalize_metacool_file`), ``reassign``, and ``metacooler qc
+    --store`` on a file that already exists — so they cannot disagree about
+    where the numbers live or what they are called.
 
-    Two things are written:
+    Three things are written:
 
     - ``metadata["qc"]``, merged into whatever the ``metadata`` attribute
       already holds, so a user's own keys survive;
     - one ``/genomes`` column per :data:`metacooler.qc.QC_GENOME_COLUMNS`,
-      replacing any column of that name left by an earlier run.
+      replacing any column of that name left by an earlier run;
+    - one ``/contigs`` column per :data:`metacooler.qc.QC_CONTIG_COLUMNS`,
+      likewise.
+
+    Both tables are checked before anything is written, so a mismatch leaves
+    the file as it was.
 
     Args:
         path: Metacool file to annotate, in place.
         summary: The block from :meth:`metacooler.qc.ContactQC.summary`.
         per_genome: Per-genome table from
-            :meth:`metacooler.qc.ContactQC.genome_table`, or ``None`` to write
-            the file-level block only.
+            :meth:`metacooler.qc.ContactQC.genome_table`, or ``None`` to leave
+            ``/genomes`` alone.
+        per_contig: Per-contig table from
+            :meth:`metacooler.qc.ContactQC.contig_table`, or ``None`` to leave
+            ``/contigs`` alone.
         group_path: HDF5 group of the map, for an mmetacool entry.
 
     Raises:
-        ValueError: If *per_genome* does not have one row per ``/genomes`` row.
+        ValueError: If *per_genome* does not have one row per ``/genomes`` row,
+            or *per_contig* one per ``/contigs`` row.
     """
     import json
 
-    from metacooler.qc import QC_GENOME_COLUMNS, QC_METADATA_KEY
+    from metacooler.qc import QC_CONTIG_COLUMNS, QC_GENOME_COLUMNS, QC_METADATA_KEY
 
     with h5py.File(path, "r+") as f:
         grp = f[group_path.lstrip("/")] if group_path.strip("/") else f
+
+        tables = [
+            (table, frame, columns)
+            for table, frame, columns in (
+                ("genomes", per_genome, QC_GENOME_COLUMNS),
+                ("contigs", per_contig, QC_CONTIG_COLUMNS),
+            )
+            if frame is not None
+        ]
+        for table, frame, _ in tables:
+            n_rows = len(grp[table]["name"])
+            if len(frame) != n_rows:
+                raise ValueError(
+                    f"QC table has {len(frame)} row(s) but /{table} has "
+                    f"{n_rows}; refusing to write columns that would not line up."
+                )
 
         raw = grp.attrs.get("metadata", "{}")
         if isinstance(raw, bytes):
@@ -1197,19 +1223,12 @@ def store_qc(
         metadata[QC_METADATA_KEY] = summary
         grp.attrs["metadata"] = json.dumps(metadata)
 
-        if per_genome is None:
-            return
-        genomes = grp["genomes"]
-        n_genomes = len(genomes["name"])
-        if len(per_genome) != n_genomes:
-            raise ValueError(
-                f"QC table has {len(per_genome)} row(s) but /genomes has "
-                f"{n_genomes}; refusing to write columns that would not line up."
-            )
-        for column in QC_GENOME_COLUMNS:
-            if column in genomes:
-                del genomes[column]
-            write_column(genomes, column, per_genome[column].to_numpy())
+        for table, frame, columns in tables:
+            group = grp[table]
+            for column in columns:
+                if column in group:
+                    del group[column]
+                write_column(group, column, frame[column].to_numpy())
 
 
 def _filter_by_genomes_and_contigs(

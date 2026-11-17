@@ -15,7 +15,7 @@ import numpy as np
 
 from metacooler._version import __version__
 from metacooler.io._utils import check_output_path, cooler_writer_shims, write_column
-from metacooler.qc import QC_COLUMN_PREFIX, QC_METADATA_KEY
+from metacooler.qc import QC_METADATA_KEY, is_qc_column
 from metacooler.schema import (
     COOLER_FORMAT,
     COOLER_FORMAT_URL,
@@ -88,13 +88,14 @@ def _hash_group(f: h5py.Group, group: str) -> str:
 def _metadata_digests(f: h5py.Group) -> dict[str, str]:
     """Digest of every metadata column, keyed ``table.column``.
 
-    Metadata columns are those neither in :data:`_IDENTITY_COLUMNS` nor
-    ``qc_*``.
+    Metadata columns are those neither in :data:`_IDENTITY_COLUMNS` nor part
+    of the QC block (:func:`metacooler.qc.is_qc_column`): a user's ``qc_pass``
+    in ``/contigs`` is compared like any other.
     """
     digests = {}
     for table, identity in _IDENTITY_COLUMNS.items():
         for key in f[table]:
-            if key in identity or str(key).startswith(QC_COLUMN_PREFIX):
+            if key in identity or is_qc_column(table, key):
                 continue
             digests[f"{table}.{key}"] = hashlib.md5(
                 _column_bytes(f[table][key]), usedforsecurity=False
@@ -302,13 +303,17 @@ def merge(
         if "genomes" in fdst:
             del fdst["genomes"]
         fdst.copy(fsrc["genomes"], "genomes")
-        for key in [k for k in fdst["genomes"] if str(k).startswith(QC_COLUMN_PREFIX)]:
+        for key in [k for k in fdst["genomes"] if is_qc_column("genomes", k)]:
             del fdst["genomes"][key]
 
-        # Copy contigs (overwrites the chroms-compatible one)
+        # Copy contigs (overwrites the chroms-compatible one), minus their two
+        # QC columns for the same reason as the genomes' -- only those: any
+        # other qc_* column there is a user's contig metadata.
         if "contigs" in fdst:
             del fdst["contigs"]
         fdst.copy(fsrc["contigs"], "contigs")
+        for key in [k for k in fdst["contigs"] if is_qc_column("contigs", k)]:
+            del fdst["contigs"][key]
 
         # Soft link chroms -> contigs
         if "chroms" in fdst:

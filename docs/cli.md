@@ -182,7 +182,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 | `--assembly-name` | — | Name for this assembly / metagenome. Stored in the standard cooler `genome-assembly` attribute (reported as `assembly` by `info`). |
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* anything is binned — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. See [Filtering with `--filter`](#filter). `genomes.n_bins` is not available here. |
-| `--qc / --no-qc` | on | Tally contact-quality statistics while the pairs are binned and store them in `metadata.qc` plus the `/genomes` `qc_*` columns. See [`qc`](#qc). Costs a few vectorised operations per chunk, and is the only way to get an *exact* short/long split — binning throws the sub-bin distances away. |
+| `--qc / --no-qc` | on | Tally contact-quality statistics while the pairs are binned and store them in `metadata.qc` plus the `qc_*` columns of `/genomes` and `/contigs`. See [`qc`](#qc). Costs a few vectorised operations per chunk, and is the only way to get an *exact* short/long split — binning throws the sub-bin distances away. |
 | `--qc-threshold` | `10000` | Distance separating short- from long-range intra-contig signal. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--ps / --no-ps` | on | Accumulate a **per-MAG P(s) curve** from the same pass and write it beside the output as `<output>.ps.tsv`. Measured on read positions, so it resolves distances the binned map cannot. No plot is drawn. See [`ps`](#ps). |
 | `--ps-bins-per-decade` | `10` | Log-grid resolution of the P(s) table. |
@@ -316,7 +316,7 @@ Repeat `--pairs` to build one map from several libraries of the same assembly
 (replicates, sequencing runs, restriction enzymes). The files are streamed back
 to back, in the given order, as if they were one concatenated file, so
 everything a single pass measures covers all of them, **exactly**: the summed
-contacts, the QC block and the `/genomes` `qc_*` columns, the `<output>.ps.tsv`
+contacts, the QC block and its `qc_*` columns, the `<output>.ps.tsv`
 P(s) table, and the dropped-pairs report with `n_pairs_read` /
 `n_pairs_discarded`. One map per library joined with [`merge`](#merge) holds the
 same contacts but not the rest: `merge` drops the QC block, and no P(s) table
@@ -374,7 +374,7 @@ metacooler create cool --cool IN.cool [--contigs C] -o OUT.metacool [OPTIONS]
 | `--assembly-name` | — | Assembly / metagenome name, stored as `genome-assembly`. |
 | `--drop-unassigned` | off | Drop unassigned contigs. |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* the bins are remapped. Repeatable. Same semantics and caveats as `create pairs`. |
-| `--qc / --no-qc` | on | Tally contact-quality statistics off the pixel stream being copied, and store them in `metadata.qc` plus the `/genomes` `qc_*` columns. A cool file has no read positions left, so intra-contig distances are measured between bin midpoints and the block records `source="pixels"`. See [`qc`](#qc). |
+| `--qc / --no-qc` | on | Tally contact-quality statistics off the pixel stream being copied, and store them in `metadata.qc` plus the `qc_*` columns of `/genomes` and `/contigs`. A cool file has no read positions left, so intra-contig distances are measured between bin midpoints and the block records `source="pixels"`. See [`qc`](#qc). |
 | `--qc-threshold` | `10000` | Distance separating short- from long-range intra-contig signal. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--nproc` | `1` | Parallel reader threads for pixel remapping. |
 | `--sort-strategy` | `auto` | As `create pairs`, but `nnz` is known up front so the 100 M-pixel threshold is compared directly. |
@@ -758,9 +758,11 @@ How rows and columns are matched:
   existing column is refused unless `--replace`, with the number of rows that
   would change and an example.
 - **Derived columns are off limits.** `name`, `length`, `genome_id`,
-  `n_contigs`, `n_bins` and the `qc_*` columns cannot be dropped or replaced:
-  the assignment changes with [`reassign`](#reassign), the QC columns with
-  [`qc --store`](#qc).
+  `n_contigs`, `n_bins` and the QC columns — every `qc_*` column of `/genomes`,
+  `qc_intra_contig_short` and `qc_intra_contig_long` in `/contigs` — cannot be
+  dropped or replaced: the assignment changes with [`reassign`](#reassign), the
+  QC columns with [`qc --store`](#qc). Any other `qc_*` column of `/contigs`
+  (`qc_pass`, say) is metadata like the rest.
 - **Contig names.** A row names a contig as the map stores it — or, in a map
   made by [`collect`](#collect), as in its input cool (`chromosome`, with a
   `genome_name` column to say which genome), as `collect` itself accepts. Its
@@ -832,9 +834,9 @@ summed in `int64`, float counts in `float64`. **API:**
 "Identical" means the same contig names and lengths, the same contig-to-genome
 assignment and the same genome sizes — the columns that say what the pixels
 are. Metadata columns (completeness, coverage, …, whether from creation or
-[`annotate`](#annotate)) and the `qc_*` columns may differ: the merged map keeps
-the first input's metadata, and each difference is reported as a warning naming
-the input and the columns.
+[`annotate`](#annotate)) and the QC columns may differ: the merged map keeps
+the first input's metadata, and each difference in a metadata column is
+reported as a warning naming the input and the columns.
 
 ```console
 metacooler merge A.metacool B.metacool [...] -o merged.metacool [OPTIONS]
@@ -1428,7 +1430,7 @@ category. On an empty file the ratios are `null` rather than `0`.
 | `--table` | off | Print a rich table instead of JSON. |
 | `--per-genome` | — | Write the per-genome breakdown as a TSV to this path. |
 | `--threshold` | `10000` | Short/long intra-contig split. Accepts `bp/kb/Mb/Gb` suffixes. |
-| `--store` | off | Write the result back into the file: `metadata.qc` plus the `/genomes` `qc_*` columns. |
+| `--store` | off | Write the result back into the file: `metadata.qc` plus the `qc_*` columns of `/genomes` and `/contigs`. |
 | `--chunksize` | `50000000` | Pixels processed per chunk. |
 | `-f, --force` | off | Overwrite `-o`/`--per-genome` if they exist. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
@@ -1462,6 +1464,10 @@ That last one is a bin-quality score: a MAG whose contigs really belong
 together sits near 1, while a chimeric or over-split one leaks contacts to its
 neighbours. An inter-genome contact is credited to *both* genomes, so the
 per-genome columns sum to more than the file-level total.
+
+They come with two per-contig columns in `/contigs`, `qc_intra_contig_short`
+and `qc_intra_contig_long`: the same split contig by contig, which the
+`/genomes` columns of those names sum per genome.
 
 Because these columns describe one particular pixel table, `binnify` and
 `merge` drop them (and the `metadata.qc` block) from their output rather than

@@ -59,7 +59,7 @@ def qc(
         chunksize: Pixels read per iteration.
         store: If ``True``, write the result back into the file —
             ``metadata["qc"]`` plus the per-genome ``qc_*`` columns of
-            ``/genomes``.
+            ``/genomes`` and the per-contig ones of ``/contigs``.
 
     Returns:
         A :class:`QCResult`.
@@ -70,13 +70,15 @@ def qc(
     """
     mc = MetaCooler(uri)
     genomes = mc.genomes
+    contigs = mc.contigs
     tally = ContactQC(
         n_genomes=len(genomes),
         distance_threshold=distance_threshold,
         source="pixels",
         unbinned_genome=unbinned_genome_id(genomes["name"]),
+        n_contigs=len(contigs) if store else None,
     )
-    maps = bin_maps(mc.bins(), mc.contigs)
+    maps = bin_maps(mc.bins(), contigs)
 
     # cooler hands `binsize` back as whatever the attribute holds — a NumPy
     # integer normally, but a string on a file another tool wrote — and this is
@@ -124,6 +126,14 @@ def qc(
                 "between bin midpoints: the intra-contig short/long split will "
                 "be coarser than the one 'create pairs' recorded.",
             )
-        store_qc(mc.store, summary, per_genome, group_path=mc._group_path)
-        logger.info("Stored QC block and per-genome columns in %s", mc.uri)
+        store_qc(
+            mc.store,
+            summary,
+            per_genome,
+            tally.contig_table(contigs["name"].to_numpy()),
+            group_path=mc._group_path,
+        )
+        logger.info(
+            "Stored QC block and per-genome and per-contig columns in %s", mc.uri
+        )
     return QCResult(summary, per_genome)

@@ -20,6 +20,7 @@ from metacooler.io.collect import (
     collect,
     collected_contig_name,
 )
+from metacooler.qc import QC_CONTIG_COLUMNS
 from metacooler.schema import MetaCoolerFormatError, check, validate
 
 DATA = Path(__file__).parent / "data"
@@ -755,7 +756,8 @@ class TestContigsTable:
             bsub,
             "contig_name\tgenome_name\nplasmid2\tE_coli\n",
         )
-        assert list(contigs.columns) == ["length", "genome_id"]
+        # Nothing from the table: only metacooler's own columns, QC included.
+        assert list(contigs.columns) == ["length", "genome_id", *QC_CONTIG_COLUMNS]
 
     def test_missing_or_empty_table(self, tmp_path, ecoli, bsub):
         with pytest.raises(FileNotFoundError, match="Contigs table not found"):
