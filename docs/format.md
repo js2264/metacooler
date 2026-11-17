@@ -33,7 +33,7 @@ file.metacool  (HDF5)
 │   ├── nbins                     = <int>
 │   ├── nnz                       = <int>                  ← number of non-zero pixels
 │   ├── sum                       = <int>                  ← total contact count
-│   └── metadata                  = <JSON string>          ← user metadata blob
+│   └── metadata                  = <JSON string>          ← user metadata + reserved keys (see below)
 │
 ├── /genomes    ← MAG / genome table
 ├── /contigs    ← contig table (canonical chromosome reference)
@@ -227,6 +227,20 @@ grouping its rows no longer have.
 | `custom` | Row order inherited from an earlier layout and no longer described by any strategy. Written by `reassign --layout keep` when the new assignment breaks genome grouping; not a value `create` can produce. |
 
 ---
+
+## The `metadata` attribute { #metadata }
+
+The root `metadata` attribute is a JSON object. Every key in it is user
+metadata — from `--metadata` files, `metadata add`/`load` — except four that
+metacooler writes itself. `--metadata` and `metadata add`/`load`/`remove` refuse
+to set or remove those four; `metadata list`/`get` read them like any other key.
+
+| Key | Written by | Content |
+|-----|------------|---------|
+| `commands` | every command that writes a map | List of the command lines that produced the file, oldest first. Carried forward by every derived map. |
+| `qc` | `create`, `collect`, `qc --store`, `reassign` | The contact-quality block ([below](#qc-block)). |
+| `reassign` | `reassign` | List, one entry per run, oldest first: `source` (the map reassigned), `table` (the assignment table; empty when the API was given a mapping), `layout` (the `contig-ordering` written) and `n_contigs_reassigned`. |
+| `annotate` | `annotate` | List, one entry per run that changed the map, oldest first: `genomes_table` and `contigs_table` (the tables given, or `null`), `replace` and `missing` (the options used), and `added`, `replaced`, `dropped` — the columns affected, each as `<table>.<column>` (e.g. `contigs.gc`). A run that changes nothing records nothing. |
 
 ## Contact-quality block { #qc-block }
 

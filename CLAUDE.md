@@ -66,7 +66,7 @@ src/metacooler/
 /indexes  [chrom_offset, bin1_offset, genome_offset]
 /chroms   → soft link to /contigs             # cooler compatibility
 ```
-`schema.validate()` enforces this (required groups/columns, offset lengths = count+1, pixel sort order, genome_id range). Run it mentally when changing anything that writes the format. `validate(uri, full=False)` is its O(n_columns) structural subset, which `MetaCooler()` runs on every open (plus `_check_decodable`, so a map cooler could not decode still fails by name); every writer and `metacooler validate` run the full check.
+`schema.validate()` enforces this (required groups/columns, offset lengths = count+1, pixel sort order, genome_id range). Run it mentally when changing anything that writes the format. `validate(uri, full=False)` is its O(n_columns) structural subset, which `MetaCooler()` runs on every open (plus `_check_decodable`, so a map cooler could not decode still fails by name); every writer and `metacooler check` (`schema.check()`) run the full check.
 
 ## Conventions (non-obvious)
 

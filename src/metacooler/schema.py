@@ -475,8 +475,8 @@ def validate(uri: str | Path, *, full: bool = True) -> None:
     Every check is O(n_bins) / O(n_contigs) at worst — the pixel table is
     never scanned end to end.  That is still seconds on a multi-million-contig
     metagenome, so ``MetaCooler()`` only runs the *structural* subset
-    (``full=False``) on open; ``metacooler validate`` and every writer run the
-    whole thing.
+    (``full=False``) on open; ``metacooler check`` (:func:`check`) and every
+    writer run the whole thing.
 
     Args:
         uri: Path to the ``.metacool`` file, or a URI of the form

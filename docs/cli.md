@@ -279,7 +279,11 @@ Each column is a **1-based position** (digits only) or a **header name**
 `1,Final_bin`. Add `,noheader` when the table has no header line; only
 positions work then. Names are looked up wherever they are in the header, and
 every other column of the table is stored in `/contigs` (named `col3`, `col4`,
-… in a table without a header).
+… in a table without a header). A column whose name metacooler uses itself is
+renamed: `name` and `length` become `user_name` and `user_length`, and a
+`genome_id` column becomes `genome_id_col<N>`, after its position (the
+key columns are relabelled by position, so a `genome_id` of the table's own
+is never read as the assignment).
 
 The default, `contigs`, means `contig_name,genome_name`: looked up by name, so a
 table given without its format fails with its header listed instead of being
@@ -1173,7 +1177,7 @@ metacooler network METACOOL_PATH --level LEVEL [OPTIONS]
 | `--weight` | `count` | Pixel column used as edge weight. |
 | `-o, --output` | stdout | Output TSV file. |
 | `--header` | off | Write a `node1  node2  value` header line. |
-| `--chunksize` | `1000000` | Pixels processed per chunk (memory control). |
+| `--chunksize` | `50000000` | Pixels processed per chunk (memory control). |
 | `-f, --force` | off | Overwrite `-o/--output` if it already exists (`network` used to clobber it silently). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -1196,7 +1200,7 @@ metacooler aggregate METACOOL_PATH --level LEVEL -o OUT.cool [OPTIONS]
 | `-o, --output` | *required* | Output `.cool` path. |
 | `--level` | `contig` | `contig` (one chromosome per contig) or `genome` (sum contacts per genome pair). |
 | `--count-col` | `count` | Pixel value column to aggregate. |
-| `--chunksize` | `1000000` | Pixels read per chunk (peak-memory control). |
+| `--chunksize` | `50000000` | Pixels read per chunk (peak-memory control). |
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
