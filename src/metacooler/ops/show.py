@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from metacooler.api import MetaCooler
 from metacooler.io._utils import check_output_path, chrom_codes
@@ -123,20 +124,32 @@ def _check_dense_size(n_rows: int, n_cols: int, hint: str) -> None:
         )
 
 
-def _genome_id(mc: MetaCooler, name: str) -> int:
-    """Return the integer genome id of *name*."""
-    return int(mc.genomes.loc[mc.genomes["name"] == name].index[0])
+# Each helper resolves a whole list of names in one pass over its table: one
+# scan of the table per name made a list of a few thousand contigs cost seconds.
 
 
-def _contig_id(mc: MetaCooler, name: str) -> int:
-    """Return the integer contig id of *name*."""
-    return int(mc.contigs.loc[mc.contigs["name"] == name].index[0])
+def _genome_ids(mc: MetaCooler, names: Sequence[str]) -> list[int]:
+    """Return the integer genome id of each of *names*, in order."""
+    ids = pd.Series(mc.genomes.index, index=mc.genomes["name"].to_numpy())
+    return [int(i) for i in ids.loc[list(names)]]
 
 
-def _genome_contig_ids(mc: MetaCooler, name: str) -> list[int]:
-    """Return the contig ids belonging to genome *name*."""
-    gid = _genome_id(mc, name)
-    return [int(i) for i in mc.contigs.index[mc.contigs["genome_id"] == gid]]
+def _contig_ids(mc: MetaCooler, names: Sequence[str]) -> list[int]:
+    """Return the integer contig id of each of *names*, in order."""
+    ids = pd.Series(mc.contigs.index, index=mc.contigs["name"].to_numpy())
+    return [int(i) for i in ids.loc[list(names)]]
+
+
+def _genome_contig_ids(mc: MetaCooler, names: Sequence[str]) -> list[list[int]]:
+    """Return the contig ids of each genome of *names* (ascending), in order."""
+    gids = np.asarray(_genome_ids(mc, names), dtype=np.int64)
+    genome_id = mc.contigs["genome_id"].to_numpy()
+    order = np.argsort(genome_id, kind="stable")
+    by_genome = genome_id[order]
+    lo = np.searchsorted(by_genome, gids, side="left")
+    hi = np.searchsorted(by_genome, gids, side="right")
+    index = mc.contigs.index.to_numpy()
+    return [index[order[a:b]].tolist() for a, b in zip(lo, hi, strict=True)]
 
 
 def _plural(n: int, noun: str) -> str:
@@ -350,9 +363,11 @@ def _apply_filters(
     if base.kind == "contigs" or any(f.table == "contigs" for f in parsed):
         # Candidate contigs, in the order the caller asked for.
         if base.kind == "contigs":
-            candidates = [_contig_id(mc, c) for c in base.names]
+            candidates = _contig_ids(mc, base.names)
         elif base.kind == "genomes":
-            candidates = [cid for g in base.names for cid in _genome_contig_ids(mc, g)]
+            candidates = [
+                cid for ids in _genome_contig_ids(mc, base.names) for cid in ids
+            ]
         else:
             candidates = list(contigs_df.index)
         genome_of = contigs_df["genome_id"].map(genomes_df["name"])
@@ -419,11 +434,14 @@ def _selection_blocks(
     """Return ``(block name, ids)`` for every name in *sel*, in the given order."""
     if sel.kind == "genomes":
         if level == "genome":
-            return [(g, [_genome_id(mc, g)]) for g in sel.names]
-        return [(g, _genome_contig_ids(mc, g)) for g in sel.names]
+            ids = _genome_ids(mc, sel.names)
+            return [(g, [i]) for g, i in zip(sel.names, ids, strict=True)]
+        blocks = _genome_contig_ids(mc, sel.names)
+        return list(zip(sel.names, blocks, strict=True))
     # A contig selection is meaningless in genome id space; ``show`` coerces
     # ``level="genome"`` to ``"contig"`` before we get here.
-    return [(c, [_contig_id(mc, c)]) for c in sel.names]
+    ids = _contig_ids(mc, sel.names)
+    return [(c, [i]) for c, i in zip(sel.names, ids, strict=True)]
 
 
 def _selection_extents(mc: MetaCooler, sel: _Selection) -> list[tuple[int, int]]:

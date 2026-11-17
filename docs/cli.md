@@ -169,7 +169,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
+| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, `.zst`/`.zstd`, or `.lz4`; the suffix is matched case-insensitively). A blank line inside the `#` header is allowed. **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--contigs` | — | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`, and its other columns land in `/contigs`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). Leave it out to build a map with no binning yet. |
@@ -279,7 +279,11 @@ Each column is a **1-based position** (digits only) or a **header name**
 `1,Final_bin`. Add `,noheader` when the table has no header line; only
 positions work then. Names are looked up wherever they are in the header, and
 every other column of the table is stored in `/contigs` (named `col3`, `col4`,
-… in a table without a header).
+… in a table without a header). A column whose name metacooler uses itself is
+renamed: `name` and `length` become `user_name` and `user_length`, and a
+`genome_id` column becomes `genome_id_col<N>`, after its position (the
+key columns are relabelled by position, so a `genome_id` of the table's own
+is never read as the assignment).
 
 The default, `contigs`, means `contig_name,genome_name`: looked up by name, so a
 table given without its format fails with its header listed instead of being
@@ -449,7 +453,12 @@ file stem (`E_coli.cool` → `E_coli`) unless `--names` says otherwise, and
     is 1, by construction.
 
 **All inputs must share one bin size** — or all have variable
-(restriction-fragment) bins — because a metacool file has a single bin table:
+(restriction-fragment) bins — because a metacool file has a single bin table.
+An input whose every contig is a single bin (a phage, or a handful of short
+plasmids) has no bin size of its own, and cooler reports it as variable; it
+joins a collection of any bin size at least as long as its longest contig,
+since its bins are exactly that grid.
+
 
 ```console
 $ metacooler collect E_coli_1kb.cool B_subtilis_5kb.cool -o species.metacool
@@ -1168,7 +1177,7 @@ metacooler network METACOOL_PATH --level LEVEL [OPTIONS]
 | `--weight` | `count` | Pixel column used as edge weight. |
 | `-o, --output` | stdout | Output TSV file. |
 | `--header` | off | Write a `node1  node2  value` header line. |
-| `--chunksize` | `1000000` | Pixels processed per chunk (memory control). |
+| `--chunksize` | `50000000` | Pixels processed per chunk (memory control). |
 | `-f, --force` | off | Overwrite `-o/--output` if it already exists (`network` used to clobber it silently). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -1191,7 +1200,7 @@ metacooler aggregate METACOOL_PATH --level LEVEL -o OUT.cool [OPTIONS]
 | `-o, --output` | *required* | Output `.cool` path. |
 | `--level` | `contig` | `contig` (one chromosome per contig) or `genome` (sum contacts per genome pair). |
 | `--count-col` | `count` | Pixel value column to aggregate. |
-| `--chunksize` | `1000000` | Pixels read per chunk (peak-memory control). |
+| `--chunksize` | `50000000` | Pixels read per chunk (peak-memory control). |
 | `-f, --force` | off | Overwrite the output if it already exists. |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
@@ -1217,7 +1226,7 @@ same MAG or not) are what [`qc`](#qc) counts instead.
 |--------|---------|-------------|
 | `-o, --output` | stdout | TSV destination. |
 | `--plot` | — | Also render the curve here (`.png`, `.pdf`, `.svg`). |
-| `--pairs` | — | Measure from this pairs file instead of the binned pixel table (plain text, `.gz`, `.bgz` — read by the same streamer `create pairs` uses). See [Two sources](#ps-sources). |
+| `--pairs` | — | Measure from this pairs file instead of the binned pixel table (any codec `create pairs` reads — read by the same streamer). See [Two sources](#ps-sources). |
 | `--by` | `all` | `all` pools every selected contig into one curve; `genome` emits one curve per MAG. |
 | `--genomes` | — | Restrict to these genomes, **comma-separated or repeated**. |
 | `--contigs` | — | Restrict to these contigs, same syntax. |

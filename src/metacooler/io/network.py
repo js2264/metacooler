@@ -75,8 +75,15 @@ def _aggregate_pairs(
             bin_to_node[chunk["bin1_id"].to_numpy()],
             bin_to_node[chunk["bin2_id"].to_numpy()],
         )
+        values = chunk[weight].to_numpy()
+        # A node pair sums every pixel between two contigs or genomes, and
+        # aggregate_pixels keeps the dtype it is given: an int32 count column
+        # (what create writes) wrapped past 2**31 to a negative edge weight.
+        # Widen integers as ops/aggregate does; float weights pass unchanged.
+        if np.issubdtype(values.dtype, np.integer):
+            values = values.astype(np.int64, copy=False)
         df = pd.DataFrame(
-            {"bin1_id": n1, "bin2_id": n2, "count": chunk[weight].to_numpy()},
+            {"bin1_id": n1, "bin2_id": n2, "count": values},
             copy=False,
         )
         pending.append(aggregate_pixels([df]))

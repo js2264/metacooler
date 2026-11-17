@@ -1,8 +1,9 @@
 # Operations
 
 Computation on already-open metacooler files: aggregation, re-binning,
-multi-resolution generation, visualisation, and range parsing. These act on
-files produced by the [I/O functions](io.md).
+multi-resolution generation, visualisation, range parsing, contact QC and
+contact probability P(s). These act on files produced by the
+[I/O functions](io.md).
 
 `aggregate`, `binnify`, and `zoomify` are re-exported at the top level, so
 `metacooler.binnify(...)` and `metacooler.ops.binnify.binnify(...)` are
@@ -39,3 +40,22 @@ equivalent.
     options:
       toc_label: "Range resolution"
       heading: "Range resolution"
+
+::: metacooler.ops.qc
+    options:
+      toc_label: "Contact QC"
+      heading: "Contact QC"
+      members:
+        - qc
+        - QCResult
+
+`qc` is re-exported at the top level as `metacooler.contact_qc` —
+`metacooler.qc` is the tally module the writers share, not this function.
+
+::: metacooler.ops.ps
+    options:
+      toc_label: "Contact probability P(s)"
+      heading: "Contact probability P(s)"
+      members:
+        - contact_probability
+        - plot_ps

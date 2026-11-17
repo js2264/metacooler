@@ -606,17 +606,43 @@ class MetaCooler:
 
         Read with cooler's bin selector, one range at a time (or, for many
         short runs, their span at once), so nothing outside the span is read.
+        A bin table already cached by :meth:`bins` is sliced instead.
+
+        The selector is asked for contig *ids* (``convert_enum=False``) and the
+        names are put on once, at the end, exactly as cooler would.  Left to
+        convert them itself, cooler reads and decodes the whole ``/chroms``
+        table on every read -- once per range -- which made a genome of a few
+        hundred contigs scattered over a ``--contig-order alpha`` map cost
+        ranges x contigs: a minute at a million contigs.
         """
-        bins = self._clr.bins()
+        if "_bins_cache" in self.__dict__:
+            return self._bins_cache.iloc[_ranges_to_ids(ranges)]
+        bins = self._clr.bins(convert_enum=False)
         if not len(ranges):
-            return cast(pd.DataFrame, bins[0:0])
-        if len(ranges) <= _MAX_RANGE_READS:
+            out = cast(pd.DataFrame, bins[0:0])
+        elif len(ranges) <= _MAX_RANGE_READS:
             parts = [cast(pd.DataFrame, bins[int(lo) : int(hi)]) for lo, hi in ranges]
-            return pd.concat(parts) if len(parts) > 1 else parts[0]
-        # Many short runs: one read of the span beats thousands of small ones,
-        # each of which decompresses a whole chunk.
-        lo, hi = int(ranges[0, 0]), int(ranges[-1, 1])
-        return cast(pd.DataFrame, bins[lo:hi]).iloc[_ranges_to_ids(ranges) - lo]
+            out = pd.concat(parts) if len(parts) > 1 else parts[0]
+        else:
+            # Many short runs: one read of the span beats thousands of small
+            # ones, each of which decompresses a whole chunk.
+            lo, hi = int(ranges[0, 0]), int(ranges[-1, 1])
+            out = cast(pd.DataFrame, bins[lo:hi]).iloc[_ranges_to_ids(ranges) - lo]
+        out = out.copy()
+        out["chrom"] = pd.Categorical.from_codes(
+            out["chrom"].to_numpy(), dtype=self._chrom_dtype
+        )
+        return out
+
+    @functools.cached_property
+    def _chrom_dtype(self) -> pd.CategoricalDtype:
+        """The dtype cooler gives ``bins.chrom``: the contig names, ordered.
+
+        Read once with cooler's own chroms selector, so the categories match
+        what ``cooler.Cooler.bins()`` builds on each read, dtype included.
+        """
+        names = cast(pd.Series, self._clr.chroms()["name"][:])
+        return pd.CategoricalDtype(pd.Index(names), ordered=True)
 
     def _pixel_offsets(self, bins: np.ndarray) -> np.ndarray:
         """``bin1_offset`` at each of *bins* (int64 array of bin ids)."""

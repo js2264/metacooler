@@ -389,6 +389,7 @@ def _read_genomes(
     """Read a genomes table as ``create`` does: deduplicated, typed, renamed."""
     from metacooler.io.create import (
         _GENOMES_RESERVED_COLUMNS,
+        _GENOMES_RESERVED_PREFIXES,
         _coerce_numeric_columns,
         _load_extra_genomes_table,
         _protect_reserved_columns,
@@ -402,6 +403,7 @@ def _read_genomes(
         reserved=_GENOMES_RESERVED_COLUMNS,
         keys=frozenset({"genome_id"}),
         context="Genomes table",
+        reserved_prefixes=_GENOMES_RESERVED_PREFIXES,
     )
     extra = extra.drop_duplicates(subset="genome_id", keep="last")
     _coerce_numeric_columns(extra, [c for c in extra.columns if c != "genome_id"])
@@ -475,7 +477,6 @@ def _plan_map(
 ) -> _MapEdit:
     """Work out, without writing, what annotating does to one map."""
     from metacooler.io.collect import _resolve_contig_metadata
-    from metacooler.io.create import _coerce_numeric_columns
 
     edit = _MapEdit(uri=mc.uri, group=group)
     genomes = mc.genomes
@@ -523,10 +524,11 @@ def _plan_map(
         if frame is None:
             matched = int(table["contig_name"].isin(set(names)).sum())
         else:
+            # Typed when read, over every row (_read_contig_metadata), as
+            # create types it -- not again here over the matched rows only.
             extra_columns = [
                 c for c in frame.columns if c not in ("contig_name", "genome_id")
             ]
-            _coerce_numeric_columns(frame, extra_columns)
             index = frame["contig_name"].to_numpy()
             values = {
                 column: pd.Series(frame[column].to_numpy(), index=index)
@@ -779,22 +781,33 @@ def _write_map(
         grp = f[group.strip("/")] if group.strip("/") else f
         if _SCRATCH in grp:
             del grp[_SCRATCH]
-        for table_edit in edit.tables.values():
-            if table_edit.changed:
-                _rewrite_table(grp, table_edit)
+        changed = [t for t in edit.tables.values() if t.changed]
+        # Build every changed table before swapping any in: rebuilding them one
+        # at a time left /genomes edited and /contigs not (and no history) when
+        # the second build failed, plus the scratch group behind.
+        try:
+            for table_edit in changed:
+                _build_table(grp, table_edit)
+        except BaseException:
+            if _SCRATCH in grp:
+                del grp[_SCRATCH]
+            raise
+        for table_edit in changed:
+            del grp[table_edit.table]
+            grp.move(f"{_SCRATCH}/{table_edit.table}", table_edit.table)
         if _SCRATCH in grp:
             del grp[_SCRATCH]
         _record(grp, edit, metadata, history)
     _log_edit(edit)
 
 
-def _rewrite_table(grp: h5py.Group, edit: _TableEdit) -> None:
-    """Rebuild one table with its edit applied, then swap it into place.
+def _build_table(grp: h5py.Group, edit: _TableEdit) -> None:
+    """Build one table with its edit applied, in the scratch group.
 
     Untouched columns are copied as they are -- dtype, chunking and filters
     included -- and the column order is kept, a replaced column staying where
     it was and added ones going last.  The table is never visible half-built:
-    it is assembled in the scratch group, and only swapped in once complete.
+    the caller swaps it into place only once every changed table is built.
     """
     old = grp[edit.table]
     scratch = grp.require_group(_SCRATCH)
@@ -810,8 +823,6 @@ def _rewrite_table(grp: h5py.Group, edit: _TableEdit) -> None:
             old.copy(column, new, name=column)
     for column in edit.added:
         write_column(new, column, edit.values[column])
-    del grp[edit.table]
-    grp.move(f"{_SCRATCH}/{edit.table}", edit.table)
 
 
 def _record(

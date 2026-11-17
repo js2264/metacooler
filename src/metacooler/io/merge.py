@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -181,6 +182,33 @@ def _merged_count_dtype(uris: list[str]) -> np.dtype:
     return np.dtype(np.int64)
 
 
+def _refuse_repeated_inputs(inputs: list[str]) -> None:
+    """Refuse a map given to ``merge`` twice, which would double its counts.
+
+    ``merge A A`` summed every pixel of A with itself and exited 0. A map is
+    identified by its file (device and inode, so a symlink, ``./`` alias or
+    hard link of a listed file is caught too) and its group, so two different
+    entries of one ``.mmetacool`` still merge.
+
+    Args:
+        inputs: Input paths or ``file::group`` URIs.
+
+    Raises:
+        ValueError: If two inputs name the same map.
+    """
+    seen: dict[tuple[int, int, str], str] = {}
+    for uri in inputs:
+        file_path, group = parse_uri(uri)
+        st = os.stat(file_path)
+        key = (st.st_dev, st.st_ino, "/" + group.strip("/"))
+        if key in seen:
+            raise ValueError(
+                f"{uri!r} names the same map as {seen[key]!r}; merging a map "
+                "with itself would count every one of its contacts twice."
+            )
+        seen[key] = uri
+
+
 def merge(
     inputs: Iterable[str | Path],
     output: str | Path,
@@ -214,6 +242,7 @@ def merge(
     inputs = [str(p) for p in inputs]
     if len(inputs) < 2:
         raise ValueError("At least two input files required for merge")
+    _refuse_repeated_inputs(inputs)
     # cooler writes the output in "w" mode; refuse to truncate an input with it.
     check_output_path(output, force=True, inputs=inputs, defer_removal=True)
 

@@ -80,6 +80,20 @@
   `/contigs`. `annotate --drop` now accepts it, and `merge` reports it when
   inputs differ, as for any metadata column; both treated every `qc_*` column
   of `/contigs` as metacooler's.
+- **`merge` refuses the same map given twice.** `merge A A` summed every
+  contact of `A` with itself and exited 0. Inputs are now identified by file
+  (device and inode) and group, so an alias or a hard link of a listed input
+  is refused too; two different entries of one `.mmetacool` still merge.
+  `create pairs`' refusal of a pairs file given twice is keyed the same way, so
+  a hard link no longer slips past it.
+- **Faster genome and name selections on large maps.** On a map whose genomes
+  are not stored contiguously (`--contig-order alpha` or `fasta`, or a
+  `reassign --layout keep`), each of a genome's bin ranges was read with
+  cooler's selector naming every contig of the map: at 200 k contigs,
+  `bins_for_genome` of a 97-contig genome took 7.7 s (now 0.3 s) and
+  `extract --genomes` 15 s (now 1 s). Lists of names (`dump`/`extract`
+  `--contigs` and `--genomes`, `show`) scanned the contigs table once per name:
+  5 000 contigs took 7 s, now 0.16 s. Output is unchanged.
 
 ### Fixed
 
@@ -109,6 +123,52 @@
   deleted the map before reading it (as did `annotate`, `collect`,
   `create cool` and `create pairs` given such an input). It is now refused
   before anything is read, as an output that is an input always was.
+- **A `"` in a user table no longer swallows rows.** Genomes and contigs
+  tables were read with CSV quote handling, so `"draft` on one row and
+  `curated"` a few rows later became one field spanning every row between them:
+  those rows vanished without a warning (in `create`, their contigs went to
+  `__unbinned__`). Every user table, and the bins BED, is now read with quoting
+  off; a quote is stored verbatim.
+- **`network` no longer wraps large integer weights.** Edge weights were summed
+  in the stored `int32`, so a node pair with more than 2³¹ contacts (the
+  `__unbinned__` self-edge of a deep library) printed a negative weight. They
+  are summed in `int64`.
+- **`collect -f` can no longer delete one of its own inputs**, nor the previous
+  output when the run then fails: `collect A.cool B.cool --genomes g.tsv -o
+  g.tsv -f` deleted `g.tsv` before reading it. Every command now names its
+  inputs to the output guard (checked by a test over every `cmd_*.py`).
+- **A user's `qc_*` genome column survives.** Every `qc_*` column of `/genomes`
+  is metacooler's, but only the five exact QC names were renamed on the way
+  in, so a `qc_pass` from a `--genomes` table was stored as is and then dropped
+  by the next `reassign`, `binnify` or `merge`. It is now stored as
+  `user_qc_pass`, with the usual warning.
+- **A column named `.` or `..`** (which HDF5 cannot store) is stored as `colN`
+  with a warning, instead of failing after `create`'s whole pairs pass.
+- **`annotate --inplace` is all or nothing.** It swapped each rebuilt table in
+  as soon as it was built, so a failure on `/contigs` left `/genomes` already
+  edited, no history recorded and the scratch group behind. Every table is now
+  built before any is swapped in, and a failure leaves the map as it was.
+- **Pairs files: upper-case suffixes and blank header lines.** The codec was
+  chosen by pyarrow's case-sensitive suffix match, so `R1.PAIRS.GZ` was parsed
+  as raw gzip bytes into an empty map; suffixes are now matched
+  case-insensitively, and `.zstd` is read as `.zst`. A blank line inside the
+  `#` header made the read fail on the first pair (and hid the `#chromsize`
+  lines after it); blank lines are now part of the header.
+- **One contigs table gives one column type, whichever command stores it.**
+  `create` types a metadata column over every row of the table, so one `N/A` —
+  even on a row naming a contig the map lacks — keeps it text; `collect` and
+  `annotate` typed only the matched rows and stored the same column as
+  numbers, and `reassign` re-typed a stored text column the same way. The
+  table is now typed once, as read, by every command.
+- **`collect` accepts an input whose every contig is a single bin** (a phage, a
+  few short plasmids). cooler infers no bin size for it and calls it variable,
+  but its bins are the grid of any bin size at least as long as its longest
+  contig, so it joins such a collection instead of being refused.
+- **Docs:** `metacooler validate` (which never existed) is `metacooler check`;
+  `contact_qc`, `contact_probability` and `plot_ps` are in the API reference;
+  the `reassign` and `annotate` history blocks of the `metadata` attribute are
+  in the format specification; `network` and `aggregate` `--chunksize`
+  defaults read 50 000 000, as they are.
 
 ## 0.2.0 - 2026-11-16
 

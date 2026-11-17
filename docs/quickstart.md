@@ -178,7 +178,7 @@ metacooler.network("gut_T0.metacool", out="genome_network.tsv", level="genome")
     `MetaCooler()` checks the file's *structure* on every construction (format
     attributes, groups, columns, offset index lengths and endpoints), which
     costs milliseconds at any size. The full O(n_bins) check is
-    `metacooler validate` / `metacooler.schema.validate()`, which every
+    `metacooler check` / `metacooler.schema.validate()`, which every
     metacooler writer also runs on its output. `validate=False` skips even the
     structural checks — use it only on a file you know to be well-formed:
 

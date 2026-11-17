@@ -74,6 +74,7 @@ from metacooler.io.create import (
     _staged_output,
     _tally_pixel_qc,
     _total_time_str,
+    _type_contig_metadata,
 )
 from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD, ContactQC, bin_maps
 from metacooler.schema import (
@@ -374,6 +375,17 @@ def _check_resolutions(inputs: Sequence[_Input]) -> int | None:
     Args:
         inputs: Every input.
 
+    An input whose every contig is a single bin has no ``bin-size`` of its own
+    -- cooler infers one from the bins *before* each contig's last, and there
+    are none -- so cooler calls it variable.  Its bins are nonetheless exactly
+    the grid of any bin size at least as long as its longest contig, so it
+    joins a collection of that bin size instead of being refused: a small
+    phage or plasmid genome binned with the rest of a sample at 10 kb is just
+    such an input.
+
+    Args:
+        inputs: Every input.
+
     Returns:
         The common bin size, or ``None`` when every input is variable-binned.
 
@@ -381,9 +393,22 @@ def _check_resolutions(inputs: Sequence[_Input]) -> int | None:
         ValueError: If the inputs do not all share one bin size (or all have
             variable bins).
     """
-    binsizes = {inp.binsize for inp in inputs}
-    if len(binsizes) == 1:
-        return next(iter(binsizes))
+    fixed = {inp.binsize for inp in inputs if inp.binsize is not None}
+    if len(fixed) == 1:
+        (binsize,) = fixed
+        unsized = [inp for inp in inputs if inp.binsize is None]
+        if all(_fits_one_bin_per_contig(inp, binsize) for inp in unsized):
+            for inp in unsized:
+                logger.info(
+                    "%s has one bin per contig, all at most %d bp: collected "
+                    "as %d bp bins.",
+                    inp.source,
+                    binsize,
+                    binsize,
+                )
+            return binsize
+    elif not fixed:
+        return None
     detail = "\n".join(
         f"  {inp.source}: "
         + (f"{inp.binsize} bp" if inp.binsize is not None else "variable bins")
@@ -394,6 +419,25 @@ def _check_resolutions(inputs: Sequence[_Input]) -> int | None:
         f"table:\n{detail}\nCollect maps of one resolution — pick the same "
         "resolution from each .mcool (file.mcool::resolutions/<binsize>), or "
         "coarsen the finer ones first ('cooler coarsen')."
+    )
+
+
+def _fits_one_bin_per_contig(inp: _Input, binsize: int) -> bool:
+    """Whether *inp*'s bins are the *binsize* grid: one whole bin per contig.
+
+    Args:
+        inp: An input.
+        binsize: A bin size.
+
+    Returns:
+        ``True`` when every contig of *inp* is covered by a single bin starting
+        at 0 and no contig is longer than *binsize*.
+    """
+    counts = np.bincount(inp.chrom, minlength=len(inp.chrom_names))
+    return (
+        bool((counts <= 1).all())
+        and not bool(inp.start.any())
+        and int(inp.lengths.max(initial=0)) <= binsize
     )
 
 
@@ -596,6 +640,7 @@ def _read_contig_metadata(
             keys[labels.index("genome_name")] = "genome_name"
     # Positional, never by name: see rename_key_columns.
     table = rename_key_columns(table, keys, kind="Contigs table")
+    _type_contig_metadata(table, keys=("contig_name", "genome_name"))
     return table, "genome_name" in keys.values()
 
 

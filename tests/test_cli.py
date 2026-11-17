@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 
 import pytest
@@ -190,8 +191,11 @@ class TestShow:
 class TestMerge:
     def test_merge(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "merged.metacool"
+        # A byte-identical replicate: merge refuses the *same* file twice.
+        replica = tmp_path / "replica.metacool"
+        shutil.copy(tiny_metacooler, replica)
         result = runner.invoke(
-            cli, ["merge", "-o", str(out), str(tiny_metacooler), str(tiny_metacooler)]
+            cli, ["merge", "-o", str(out), str(tiny_metacooler), str(replica)]
         )
         assert result.exit_code == 0
         assert out.exists()

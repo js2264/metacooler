@@ -14,6 +14,7 @@ is present on PATH (e.g. when running ``pytest`` directly inside a venv).
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -73,6 +74,13 @@ def _make_text_file(path: Path, content: str = "not hdf5\n") -> None:
 # ===========================================================================
 # Global CLI
 # ===========================================================================
+
+
+def _replica(path, tmp_path, n=1):
+    """A byte-identical replicate: merge refuses the *same* file twice."""
+    copy = tmp_path / f"replica{n}_{path.name}"
+    shutil.copy(path, copy)
+    return copy
 
 
 class TestGlobalCLI:
@@ -1448,7 +1456,15 @@ class TestMergeCLI:
 
     def test_merge_two_identical_files(self, tiny_metacooler, tmp_path):
         out = tmp_path / "merged.metacool"
-        r = _run(["merge", "-o", str(out), str(tiny_metacooler), str(tiny_metacooler)])
+        r = _run(
+            [
+                "merge",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+                str(_replica(tiny_metacooler, tmp_path)),
+            ]
+        )
         assert r.exit_code == 0, r.output
         assert out.exists()
 
@@ -1457,7 +1473,15 @@ class TestMergeCLI:
         from metacooler.api import MetaCooler
 
         out = tmp_path / "merged_double.metacool"
-        r = _run(["merge", "-o", str(out), str(tiny_metacooler), str(tiny_metacooler)])
+        r = _run(
+            [
+                "merge",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+                str(_replica(tiny_metacooler, tmp_path)),
+            ]
+        )
         assert r.exit_code == 0, r.output
 
         orig = MetaCooler(tiny_metacooler)
@@ -1467,7 +1491,14 @@ class TestMergeCLI:
     def test_merge_verbose(self, tiny_metacooler, tmp_path):
         out = tmp_path / "merged_v.metacool"
         r = _run(
-            ["merge", "-o", str(out), "-v", str(tiny_metacooler), str(tiny_metacooler)]
+            [
+                "merge",
+                "-o",
+                str(out),
+                "-v",
+                str(tiny_metacooler),
+                str(_replica(tiny_metacooler, tmp_path)),
+            ]
         )
         assert r.exit_code == 0, r.output
 
@@ -1479,8 +1510,8 @@ class TestMergeCLI:
                 "-o",
                 str(out),
                 str(tiny_metacooler),
-                str(tiny_metacooler),
-                str(tiny_metacooler),
+                str(_replica(tiny_metacooler, tmp_path)),
+                str(_replica(tiny_metacooler, tmp_path, 2)),
             ]
         )
         assert r.exit_code == 0, r.output
@@ -1490,13 +1521,29 @@ class TestMergeCLI:
         from metacooler.schema import is_metacooler
 
         out = tmp_path / "merged_valid.metacool"
-        r = _run(["merge", "-o", str(out), str(tiny_metacooler), str(tiny_metacooler)])
+        r = _run(
+            [
+                "merge",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+                str(_replica(tiny_metacooler, tmp_path)),
+            ]
+        )
         assert r.exit_code == 0, r.output
         assert is_metacooler(out)
 
     def test_merge_stores_command_in_metadata(self, tiny_metacooler, tmp_path):
         out = tmp_path / "merged_cmd.metacool"
-        r = _run(["merge", "-o", str(out), str(tiny_metacooler), str(tiny_metacooler)])
+        r = _run(
+            [
+                "merge",
+                "-o",
+                str(out),
+                str(tiny_metacooler),
+                str(_replica(tiny_metacooler, tmp_path)),
+            ]
+        )
         assert r.exit_code == 0, r.output
         list_r = _run(["metadata", "list", str(out)])
         assert list_r.exit_code == 0
