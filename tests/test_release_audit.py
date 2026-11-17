@@ -984,10 +984,12 @@ class TestUncoveredEdges:
 
         with_body = tmp_path / "a.pairs"
         with_body.write_bytes(b"#h1\n#h2\n\n  \nr\tc\t1\tc\t2\n")
-        assert _scan_pairs_header(with_body) == (2, True)
+        # Blank and whitespace-only lines are counted with the header, since
+        # pyarrow's skip_rows counts them as rows (and would parse "  " as one).
+        assert _scan_pairs_header(with_body) == (4, True)
         header_only = tmp_path / "b.pairs"
         header_only.write_bytes(b"#h1\n\n\n")
-        assert _scan_pairs_header(header_only) == (1, False)
+        assert _scan_pairs_header(header_only) == (3, False)
 
     def test_a_chunk_entirely_past_the_contig_ends(self, tmp_path: Path):
         from metacooler.io.create import _decode_pairs_chunk, _PairsDropStats
