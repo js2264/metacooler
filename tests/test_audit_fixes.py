@@ -11,6 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cooler
+import numpy as np
+import pandas as pd
+import pytest
 from click.testing import CliRunner
 
 from metacooler.api import MetaCooler
@@ -73,3 +77,51 @@ class TestQuotedFieldsInUserTables:
         assert genomes.to_dict() == {"MAG_1": 2, "MAG_2": 2}
         notes = MetaCooler(out).contigs.set_index("name")["note"]
         assert notes["contig_A"] == '"draft'
+
+
+class TestNetworkIntegerOverflow:
+    """``network`` summed int32 counts in int32, printing negative edge weights.
+
+    The 0.2.0 rewrite routed the sum through ``aggregate_pixels``, which keeps
+    the input dtype, so a contig or genome pair totalling more than 2**31
+    contacts -- the ``__unbinned__`` self-edge of a deep library, say -- wrapped
+    to a negative number while ``aggregate`` reported the right total.
+    """
+
+    @pytest.fixture
+    def heavy(self, tmp_path: Path) -> Path:
+        bins = pd.DataFrame(
+            {
+                "chrom": ["c1"] * 3 + ["c2"] * 2,
+                "start": [0, 10, 20, 0, 10],
+                "end": [10, 20, 30, 10, 20],
+            }
+        )
+        pixels = pd.DataFrame(
+            {
+                "bin1_id": [0, 1, 3],
+                "bin2_id": [1, 2, 4],
+                "count": np.array([1_500_000_000, 1_500_000_000, 7], dtype=np.int32),
+            }
+        )
+        src = tmp_path / "heavy.cool"
+        cooler.create_cooler(
+            str(src), bins, pixels, dtypes={"count": np.int32}, ordered=True
+        )
+        table = tmp_path / "c.tsv"
+        table.write_text("contig_name\tgenome_name\nc1\tG1\nc2\tG2\n")
+        out = tmp_path / "heavy.metacool"
+        result = _run(
+            "create", "cool", "--cool", src, "--contigs", table, "-o", out, "--no-qc"
+        )
+        assert result.exit_code == 0, result.output
+        assert cooler.Cooler(str(out)).pixels()[:]["count"].dtype == np.int32
+        return out
+
+    @pytest.mark.parametrize(("level", "node"), [("genome", "G1"), ("contig", "c1")])
+    def test_edge_weight_is_not_wrapped(self, heavy: Path, level: str, node: str):
+        result = _run("network", heavy, "--level", level)
+        assert result.exit_code == 0, result.output
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        edges = {(r[0], r[1]): int(r[2]) for r in rows if len(r) == 3}
+        assert edges[(node, node)] == 3_000_000_000
