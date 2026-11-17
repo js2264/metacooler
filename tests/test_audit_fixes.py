@@ -203,3 +203,82 @@ def test_every_command_names_its_inputs_to_the_output_guard():
             ):
                 missing.append(f"{path.name}:{node.lineno}")
     assert not missing, f"check_output without inputs=: {missing}"
+
+
+class TestUserQcColumns:
+    """A user's ``qc_*`` column in ``/genomes`` was accepted, then silently lost.
+
+    Every ``qc_*`` column of ``/genomes`` is metacooler's QC namespace -- the
+    writers that derive one map from another strip it -- yet ``create``,
+    ``collect`` and ``annotate`` stored a user's ``qc_pass`` there under its own
+    name. The next ``reassign`` (even one changing nothing) deleted it without
+    a word, and ``annotate --drop genomes.qc_pass`` refused it as derived. It is
+    now renamed ``user_qc_pass`` on the way in, like any other reserved name.
+    """
+
+    @pytest.fixture
+    def tables(self, tmp_path: Path, tiny_contigs_table: Path) -> tuple[Path, Path]:
+        genomes = tmp_path / "g.tsv"
+        genomes.write_text(
+            "genome_name\tqc_pass\tphylum\nMAG_1\tyes\tA\nMAG_2\tno\tB\n"
+        )
+        contigs = tmp_path / "c.tsv"
+        contigs.write_text(
+            "contig_name\tgenome_name\tqc_flag\n"
+            "contig_A\tMAG_1\tok\ncontig_B\tMAG_1\tok\ncontig_C\tMAG_2\tlow\n"
+        )
+        return genomes, contigs
+
+    @pytest.fixture
+    def created(
+        self, tmp_path: Path, tables, tiny_pairs: Path, tiny_bins_bed: Path
+    ) -> Path:
+        genomes, contigs = tables
+        out = tmp_path / "a.metacool"
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--bins", tiny_bins_bed,
+            "--contigs", contigs, "--genomes", genomes, "-o", out, "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        return out
+
+    def test_create_renames_it_out_of_the_qc_namespace(self, created: Path):
+        columns = set(MetaCooler(created).genomes.columns)
+        assert "user_qc_pass" in columns
+        assert "qc_pass" not in columns
+        assert (
+            MetaCooler(created).genomes.set_index("name").loc["MAG_1", "user_qc_pass"]
+            == "yes"
+        )
+
+    @pytest.mark.parametrize("layout", ["auto", "keep"])
+    def test_user_columns_survive_reassign(
+        self, tmp_path: Path, created: Path, tables, layout: str
+    ):
+        _, contigs = tables
+        moved = tmp_path / "moved.tsv"
+        moved.write_text(
+            contigs.read_text().replace("contig_C\tMAG_2", "contig_C\tMAG_1")
+        )
+        out = tmp_path / f"r_{layout}.metacool"
+        result = _run(
+            "reassign", created, "--contigs", moved, "--layout", layout, "-o", out
+        )
+        assert result.exit_code == 0, result.output
+        mc = MetaCooler(out)
+        assert "user_qc_pass" in mc.genomes.columns
+        assert mc.contigs.set_index("name").loc["contig_C", "qc_flag"] == "low"
+
+    def test_annotate_renames_it_and_can_drop_it(self, tmp_path: Path, created):
+        extra = tmp_path / "x.tsv"
+        extra.write_text("genome_name\tqc_checked\nMAG_1\t1\nMAG_2\t0\n")
+        out = tmp_path / "ann.metacool"
+        result = _run("annotate", created, "--genomes", extra, "-o", out)
+        assert result.exit_code == 0, result.output
+        assert "user_qc_checked" in MetaCooler(out).genomes.columns
+        dropped = tmp_path / "dropped.metacool"
+        result = _run(
+            "annotate", out, "--drop", "genomes.user_qc_checked", "-o", dropped
+        )
+        assert result.exit_code == 0, result.output
+        assert "user_qc_checked" not in MetaCooler(dropped).genomes.columns

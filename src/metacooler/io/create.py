@@ -56,6 +56,7 @@ from metacooler.ps import (
 )
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
+    QC_COLUMN_PREFIX,
     QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
     BinMaps,
@@ -118,6 +119,11 @@ _GENOMES_RESERVED_COLUMNS = frozenset(
 _CONTIGS_RESERVED_COLUMNS = frozenset(
     {"name", "length", "genome_id"} | set(QC_CONTIG_COLUMNS)
 )
+# In /genomes the whole qc_* namespace is metacooler's (see qc.is_qc_column):
+# every writer that derives a map from another strips it. A user column there
+# would vanish at the first reassign/binnify/merge, so it is renamed on the way
+# in instead. /contigs reserves only its two QC names; a user qc_* stays.
+_GENOMES_RESERVED_PREFIXES = (QC_COLUMN_PREFIX,)
 # How many distinct unknown contig names to remember for the dropped-pair report.
 _MAX_REPORTED_UNKNOWN_CONTIGS = 10
 # How many genome names to name when the contigs and genomes tables diverge.
@@ -603,6 +609,7 @@ def _protect_reserved_columns(
     reserved: frozenset[str],
     keys: frozenset[str],
     context: str,
+    reserved_prefixes: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Rename user columns that collide with metacooler's reserved column names.
 
@@ -618,6 +625,8 @@ def _protect_reserved_columns(
         reserved: Column names metacooler writes itself.
         keys: Column names in *df* that are merge keys and must be left alone.
         context: Human-readable table name used in the warning.
+        reserved_prefixes: Name prefixes metacooler owns outright, such as
+            ``qc_`` in ``/genomes``: a user column with one is renamed too.
 
     Returns:
         *df* unchanged, or a renamed copy.
@@ -625,7 +634,9 @@ def _protect_reserved_columns(
     renames: dict[str, str] = {}
     taken = set(df.columns)
     for col in df.columns:
-        if col in keys or col not in reserved:
+        if col in keys:
+            continue
+        if col not in reserved and not str(col).startswith(reserved_prefixes):
             continue
         new = f"user_{col}"
         while new in taken:
@@ -785,6 +796,7 @@ def _build_genomes_table(
             reserved=_GENOMES_RESERVED_COLUMNS,
             keys=frozenset({"genome_id"}),
             context="Genomes table",
+            reserved_prefixes=_GENOMES_RESERVED_PREFIXES,
         )
         extra_cols = [c for c in extra_genomes_df.columns if c != "genome_id"]
         extra = extra_genomes_df.rename(columns={"genome_id": "name"})[

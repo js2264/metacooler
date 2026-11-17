@@ -389,6 +389,7 @@ def _read_genomes(
     """Read a genomes table as ``create`` does: deduplicated, typed, renamed."""
     from metacooler.io.create import (
         _GENOMES_RESERVED_COLUMNS,
+        _GENOMES_RESERVED_PREFIXES,
         _coerce_numeric_columns,
         _load_extra_genomes_table,
         _protect_reserved_columns,
@@ -402,6 +403,7 @@ def _read_genomes(
         reserved=_GENOMES_RESERVED_COLUMNS,
         keys=frozenset({"genome_id"}),
         context="Genomes table",
+        reserved_prefixes=_GENOMES_RESERVED_PREFIXES,
     )
     extra = extra.drop_duplicates(subset="genome_id", keep="last")
     _coerce_numeric_columns(extra, [c for c in extra.columns if c != "genome_id"])
