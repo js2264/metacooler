@@ -28,6 +28,11 @@ from metacooler.io.merge import merge
 from metacooler.schema import validate
 
 
+def _ids(ranges: np.ndarray) -> np.ndarray:
+    """The bin ids of ``[lo, hi)`` *ranges*, concatenated."""
+    return np.concatenate([np.arange(lo, hi) for lo, hi in ranges])
+
+
 def _run(*args: object):
     return CliRunner().invoke(cli, [str(a) for a in args])
 
@@ -599,3 +604,98 @@ class TestCollectSingleBinInputs:
         odd = make_cool(tmp_path / "odd.cool", {"p1": 90}, bins=bins)
         with pytest.raises(ValueError, match="not binned alike"):
             collect([ecoli, odd], tmp_path / "out.metacool")
+
+
+class TestScatteredGenomeReads:
+    """A genome scattered over a non-grouped map cost ranges x contigs to read.
+
+    Each range was read with cooler's bin selector, which decodes the whole
+    ``/chroms`` table on every read to name the contigs: a 97-contig genome of
+    a 200 k-contig ``--contig-order alpha`` map took 7.7 s, ``extract
+    --genomes`` 15 s. Contig ids are now read and named once per call. Name
+    lists (``--contigs`` with thousands of names) scanned the contigs table
+    once per name, which is gone as well.
+    """
+
+    @pytest.fixture
+    def scattered(self, tmp_path: Path, tiny_pairs: Path, tiny_fasta: Path) -> Path:
+        from metacooler.io.create import from_pairs
+
+        table = tmp_path / "scattered.tsv"
+        table.write_text(
+            "contig_name\tgenome_name\n"
+            "contig_A\tMAG_1\ncontig_B\tMAG_2\ncontig_C\tMAG_1\ncontig_D\tMAG_2\n"
+        )
+        out = tmp_path / "alpha.metacool"
+        from_pairs(
+            uri=out, pairs=tiny_pairs, fasta=tiny_fasta, binsize=100,
+            contig_genome_map=table, contig_ordering="alpha", qc=False, ps=False,
+        )  # fmt: skip
+        return out
+
+    def _expected(self, path: Path, genome: str) -> pd.DataFrame:
+        mc = MetaCooler(path)
+        return mc.bins().iloc[_ids(mc.genome_bin_ranges(genome))]
+
+    def test_genome_bins_are_cooler_s_rows(self, scattered: Path):
+        mc = MetaCooler(scattered)
+        assert len(mc.genome_bin_ranges("MAG_1")) == 2  # really scattered
+        pd.testing.assert_frame_equal(
+            mc.bins_for_genome("MAG_1"), self._expected(scattered, "MAG_1")
+        )
+
+    def test_the_span_read_gives_the_same_rows(self, scattered: Path, monkeypatch):
+        import metacooler.api as api
+
+        monkeypatch.setattr(api, "_MAX_RANGE_READS", 1)
+        pd.testing.assert_frame_equal(
+            MetaCooler(scattered).bins_for_genome("MAG_2"),
+            self._expected(scattered, "MAG_2"),
+        )
+
+    def test_a_cached_bin_table_is_sliced(self, scattered: Path):
+        mc = MetaCooler(scattered)
+        mc.bins()
+        pd.testing.assert_frame_equal(
+            mc.bins_for_genome("MAG_1"), self._expected(scattered, "MAG_1")
+        )
+
+    def test_no_range_gives_an_empty_frame_of_the_same_shape(self, scattered: Path):
+        mc = MetaCooler(scattered)
+        empty = mc._bins_in_ranges(np.empty((0, 2), dtype=np.int64))
+        assert len(empty) == 0
+        assert list(empty.columns) == list(mc.bins().columns)
+        assert empty["chrom"].dtype == mc.bins()["chrom"].dtype
+
+    def test_the_contig_names_are_decoded_once_per_call(
+        self, scattered: Path, monkeypatch
+    ):
+        import cooler.api
+
+        mc = MetaCooler(scattered)
+        assert mc._clr is not None  # building the Cooler reads /chroms itself
+        calls = []
+        real = cooler.api.chroms
+        monkeypatch.setattr(
+            cooler.api, "chroms", lambda *a, **k: calls.append(1) or real(*a, **k)
+        )
+        ranges = mc.genome_bin_ranges("MAG_1")
+        assert len(ranges) == 2
+        mc._bins_in_ranges(ranges)
+        mc._bins_in_ranges(ranges)
+        assert len(calls) <= 1
+
+    def test_name_lists_resolve_as_before(self, scattered: Path):
+        from metacooler.io._utils import resolve_contig_selection
+        from metacooler.ops.show import _contig_ids, _genome_contig_ids, _genome_ids
+
+        mc = MetaCooler(scattered)
+        assert resolve_contig_selection(mc, contigs=["contig_D", "contig_A"]) == {
+            0,
+            3,
+        }
+        assert resolve_contig_selection(mc, genomes=["MAG_1"]) == {0, 2}
+        assert _contig_ids(mc, ["contig_D", "contig_A"]) == [3, 0]
+        g1, g2 = _genome_ids(mc, ["MAG_1", "MAG_2"])
+        assert _genome_contig_ids(mc, ["MAG_2", "MAG_1"]) == [[1, 3], [0, 2]]
+        assert mc.genomes["name"].iloc[[g1, g2]].tolist() == ["MAG_1", "MAG_2"]

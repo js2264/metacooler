@@ -1349,29 +1349,31 @@ def _filter_by_genomes_and_contigs(
     all_genomes = mc.genomes
     all_contigs = mc.contigs
     selected: set[int] = set()
-    known_genomes = set(all_genomes["name"])
-    known_contigs = set(all_contigs["name"])
 
+    # One membership test over each table for the whole list, never one scan
+    # per name: that made a list of 5 000 contigs cost 7 s at 200 k contigs.
     if genomes:
+        known_genomes = set(all_genomes["name"])
         for g in genomes:
             if g not in known_genomes:
                 available = all_genomes["name"].tolist()
                 raise KeyError(
                     f"Genome {g!r} not found. Available ({len(available)} total): {available[:20]}..."
                 )
-            gid = int(all_genomes.loc[all_genomes["name"] == g].index[0])
-            cids = all_contigs.index[all_contigs["genome_id"] == gid].tolist()
-            selected.update(cids)
+        gids = all_genomes.index[all_genomes["name"].isin(set(genomes))]
+        selected.update(all_contigs.index[all_contigs["genome_id"].isin(gids)].tolist())
 
     if contigs:
+        known_contigs = set(all_contigs["name"])
         for c in contigs:
             if c not in known_contigs:
                 available = all_contigs["name"].tolist()
                 raise KeyError(
                     f"Contig {c!r} not found. Available ({len(available)} total): {available[:20]}..."
                 )
-            cid = int(all_contigs.loc[all_contigs["name"] == c].index[0])
-            selected.add(cid)
+        selected.update(
+            all_contigs.index[all_contigs["name"].isin(set(contigs))].tolist()
+        )
 
     return selected
 
