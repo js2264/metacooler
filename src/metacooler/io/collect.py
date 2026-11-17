@@ -70,6 +70,7 @@ from metacooler.io.create import (
     _load_extra_genomes_table,
     _normalize_genome_name,
     _protect_reserved_columns,
+    _refuse_staging_an_input,
     _staged_output,
     _tally_pixel_qc,
     _total_time_str,
@@ -1134,6 +1135,8 @@ def collect(
     if chunksize < 1:
         raise ValueError(f"chunksize must be a positive integer, got {chunksize}.")
     check_output_not_an_input(output, sources)
+    read = [*sources, genomes_table, contigs_table]
+    _refuse_staging_an_input(output, read)
     genome_names = _genome_names(sources, names)
 
     # --- Read every input's bins before a single pixel ---
@@ -1254,7 +1257,11 @@ def collect(
         )
     pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
     ordered = ordered or was_empty
-    with _staged_output(output, keep_partial=keep_partial) as staged:
+    with _staged_output(
+        output,
+        keep_partial=keep_partial,
+        inputs=read,
+    ) as staged:
         write_cooler(
             staged,
             bins_df,

@@ -2456,6 +2456,32 @@ def _partial_path(path: Path) -> Path:
     return path.with_name(path.name + ".partial")
 
 
+def _refuse_staging_an_input(
+    final: str | Path,
+    inputs: Iterable[str | Path | None],
+    companions: Sequence[Path] = (),
+) -> None:
+    """Refuse, up front, a run whose staged output would be one of its inputs.
+
+    :func:`_staged_output` refuses it too, but only once the run gets there --
+    after every pair is binned, or the whole QC pass of ``reassign``.  Each
+    writer calls this where it checks its output path, before it reads
+    anything.
+
+    Args:
+        final: The output path.
+        inputs: What the run reads, as paths or URIs.
+        companions: Files staged beside *final* (see :func:`_staged_output`).
+
+    Raises:
+        ValueError: If ``<final>.partial`` (or a companion's) is an input.
+    """
+    for path in (Path(final), *companions):
+        check_output_path(
+            _partial_path(path), force=True, inputs=inputs, defer_removal=True
+        )
+
+
 def _move_into_place(
     companions: Sequence[tuple[Path, Path]], partial: Path, final: Path
 ) -> None:
@@ -2553,6 +2579,7 @@ def _staged_output(
     final: Path,
     *,
     keep_partial: bool = True,
+    inputs: Iterable[str | Path | None] = (),
     companions: Sequence[Path] = (),
 ) -> Generator[Path, None, None]:
     """Build the output at a sibling temp path, moving it into place on success.
@@ -2574,6 +2601,10 @@ def _staged_output(
             own output and only wants the finished file or nothing.  The final
             path is never written either way, and a failure before the temp
             file exists has nothing to keep or remove, so it says nothing.
+        inputs: What the caller reads, as paths or URIs.  A temp file left by
+            an earlier run is removed before writing, unless it is one of
+            these -- a partial map given as input, to be rescued into the very
+            path it was staged for -- which is refused instead.
         companions: Files the caller writes beside *final*, each at its
             :func:`_partial_path`, and moved into place with it, before it
             (:func:`_move_into_place`): ``from_pairs``' ``.ps.tsv`` table.
@@ -2582,11 +2613,14 @@ def _staged_output(
 
     Yields:
         The temporary path to write to.
+
+    Raises:
+        ValueError: If a temp path is one of *inputs*.
     """
     tmp = _partial_path(final)
     staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
     for partial, _ in staged:
-        check_output_path(partial, force=True)
+        check_output_path(partial, force=True, inputs=inputs)
     try:
         yield tmp
         _move_into_place(staged[1:], tmp, final)
@@ -2852,6 +2886,15 @@ def from_pairs(
     ps_path = ps_table_path(uri) if ps else None
     if ps_path is not None:
         check_output_path(ps_path, force, defer_removal=True)
+    inputs = [
+        *pairs_paths,
+        bins if isinstance(bins, str | Path) else None,
+        fasta,
+        contig_genome_map if isinstance(contig_genome_map, str | Path) else None,
+        genomes_table,
+    ]
+    companions = () if ps_path is None else (ps_path,)
+    _refuse_staging_an_input(uri, inputs, companions)
     timer = time.perf_counter()
 
     # --- Parse contig map and optional genomes metadata table ---
@@ -3044,9 +3087,7 @@ def from_pairs(
     # The map and its P(s) sidecar are staged together, and both moved into
     # place only once both are written and the map has validated.
     with _staged_output(
-        uri,
-        keep_partial=keep_partial,
-        companions=() if ps_path is None else (ps_path,),
+        uri, keep_partial=keep_partial, inputs=inputs, companions=companions
     ) as staged:
         write_cooler(
             staged,
@@ -3204,6 +3245,8 @@ def from_cool(
     """
     cool_path = Path(cool_uri)
     output_path = Path(output)
+    inputs = [cool_uri, contig_genome_map, genomes_table]
+    _refuse_staging_an_input(output_path, inputs)
     timer = time.perf_counter()
     _check_no_binning(
         contig_genome_map,
@@ -3374,7 +3417,11 @@ def from_cool(
         ordered = False
     pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
     ordered = ordered or was_empty
-    with _staged_output(output_path, keep_partial=keep_partial) as staged:
+    with _staged_output(
+        output_path,
+        keep_partial=keep_partial,
+        inputs=inputs,
+    ) as staged:
         write_cooler(
             staged,
             bins_remapped,

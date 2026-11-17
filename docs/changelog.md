@@ -102,6 +102,13 @@
   or the QC block it recomputes. The message names each, and is an INFO line
   rather than a warning when the caller asked for one of them; a table that
   moves nothing, and nothing else asked for, still warns.
+- **A left-over `<output>.partial` given as the input is no longer deleted.**
+  Every writer that stages its output removes a stale `<output>.partial`
+  before it starts, and it did so even when that file was its input:
+  `reassign out.metacool.partial -o out.metacool`, rescuing a partial run,
+  deleted the map before reading it (as did `annotate`, `collect`,
+  `create cool` and `create pairs` given such an input). It is now refused
+  before anything is read, as an output that is an input always was.
 
 ## 0.2.0 - 2026-11-16
 

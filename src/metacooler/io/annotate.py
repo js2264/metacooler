@@ -239,13 +239,12 @@ def annotate(
                 f"columns names {table} column(s) "
                 f"({', '.join(wanted[table])}) but no {table} table was given."
             )
+    inputs = [uri, genomes_table, contigs_table]
     if output is not None:
-        check_output_path(
-            output,
-            force,
-            inputs=[uri, genomes_table, contigs_table],
-            defer_removal=True,
-        )
+        from metacooler.io.create import _refuse_staging_an_input
+
+        check_output_path(output, force, inputs=inputs, defer_removal=True)
+        _refuse_staging_an_input(output, inputs)
 
     # --- Read the tables once; they do not depend on the map ---
     genomes_extra = (
@@ -303,7 +302,7 @@ def annotate(
 
     assert output is not None  # guaranteed by the argument checks above
     target = Path(output)
-    with _staged_output(target, keep_partial=keep_partial) as staged:
+    with _staged_output(target, keep_partial=keep_partial, inputs=inputs) as staged:
         if group_path.strip("/") and len(groups) == 1:
             # One entry out of a collection: a standalone map, as reassign does.
             from metacooler.io.reassign import _materialise_copy

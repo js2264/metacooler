@@ -13,6 +13,7 @@ import inspect
 import logging
 import os
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -524,3 +525,110 @@ def test_a_failed_qc_pass_leaves_the_previous_output(
 
     assert out.read_bytes() == b"previous output"
     assert not _partial(out).exists()
+
+
+# ---------------------------------------------------------------------------
+# A partial file given as the input: rescued, never removed as stale
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", ["reassign", "annotate"])
+def test_a_partial_file_given_as_input_is_never_removed(
+    tmp_path: Path, tiny_metacooler: Path, table: Path, genomes: Path, command: str
+):
+    """``<output>.partial`` used to be removed as stale before it was read."""
+    out = tmp_path / "out.metacool"
+    rescued = _partial(out)
+    rescued.write_bytes(tiny_metacooler.read_bytes())
+    before = rescued.read_bytes()
+
+    with pytest.raises(ValueError, match="same file as the input"):
+        if command == "reassign":
+            reassign(rescued, table, out)
+        else:
+            annotate(rescued, out, genomes_table=genomes)
+
+    assert rescued.read_bytes() == before
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("command", ["reassign", "annotate"])
+def test_the_cli_refuses_a_partial_file_as_input(
+    tmp_path: Path, tiny_metacooler: Path, table: Path, genomes: Path, command: str
+):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    out = tmp_path / "out.metacool"
+    rescued = _partial(out)
+    rescued.write_bytes(tiny_metacooler.read_bytes())
+    before = rescued.read_bytes()
+    option = ["--contigs", str(table)] if command == "reassign" else []
+    option += ["--genomes", str(genomes)] if command == "annotate" else []
+
+    result = CliRunner().invoke(cli, [command, str(rescued), *option, "-o", str(out)])
+
+    assert result.exit_code != 0
+    assert rescued.read_bytes() == before
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_a_partial_file_given_as_input_is_refused_before_any_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tiny_pairs: Path,
+    tiny_bins_bed: Path,
+    tiny_contigs_table: Path,
+    tiny_cool: Path,
+    tiny_metacooler: Path,
+    table: Path,
+    genomes: Path,
+    writer: str,
+):
+    """Where the output path is checked, before a pair, a bin or a pixel is read.
+
+    ``_staged_output`` refuses it too, but only once a run gets there: after
+    every pair is binned, after reassign's whole QC pass.
+    """
+    out = tmp_path / "out.metacool"
+    rescued = _partial(out)
+
+    def never(*args, **kwargs):
+        raise AssertionError("read before the refusal")
+
+    if writer == "from_pairs":
+        rescued.write_bytes(tiny_pairs.read_bytes())
+        monkeypatch.setattr(create_mod, "_stream_pairs", never)
+        run = partial(
+            from_pairs,
+            uri=out,
+            bins=tiny_bins_bed,
+            pairs=rescued,
+            contig_genome_map=tiny_contigs_table,
+        )
+    elif writer == "from_cool":
+        rescued.write_bytes(tiny_cool.read_bytes())
+        monkeypatch.setattr(create_mod, "_stream_remapped_pixels", never)
+        run = partial(from_cool, rescued, out, contig_genome_map=tiny_contigs_table)
+    elif writer == "collect":
+        rescued.write_bytes(make_cool(tmp_path / "E.cool", ECOLI, seed=1).read_bytes())
+        other = make_cool(tmp_path / "B.cool", BSUB, seed=2)
+        monkeypatch.setattr(collect_mod, "_read_input", never)
+        run = partial(collect, [rescued, other], out, names=["E", "B"])
+    elif writer == "reassign":
+        rescued.write_bytes(tiny_metacooler.read_bytes())
+        monkeypatch.setattr(ContactQC, "tally_pixels", never)
+        run = partial(reassign, rescued, table, out)
+    else:
+        rescued.write_bytes(tiny_metacooler.read_bytes())
+        monkeypatch.setattr(annotate_mod, "_plan_map", never)
+        run = partial(annotate, rescued, out, genomes_table=genomes)
+    before = rescued.read_bytes()
+
+    with pytest.raises(ValueError, match="same file as the input"):
+        run()
+
+    assert rescued.read_bytes() == before
+    assert not out.exists()

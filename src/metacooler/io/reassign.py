@@ -71,6 +71,7 @@ from metacooler.io.create import (
     _compute_all_offsets,
     _load_extra_genomes_table,
     _parse_contig_map,
+    _refuse_staging_an_input,
     _remap_bins,
     _staged_output,
     _stream_remapped_pixels,
@@ -1032,20 +1033,18 @@ def reassign(
             "An output path is required. Pass output=... to write a new file, "
             "or inplace=True to rewrite the input."
         )
+    inputs = [
+        uri,
+        genomes_table,
+        None if isinstance(contig_genome_map, dict) else contig_genome_map,
+    ]
     if output is not None:
-        # Before anything is read: an output that is one of the inputs is
-        # refused even under force, and an existing output is left in place
-        # for _staged_output to replace once the new file has validated.
-        check_output_path(
-            output,
-            force,
-            inputs=[
-                uri,
-                genomes_table,
-                None if isinstance(contig_genome_map, dict) else contig_genome_map,
-            ],
-            defer_removal=True,
-        )
+        # Before anything is read: an output (or the partial file it is staged
+        # as) that is one of the inputs is refused even under force, and an
+        # existing output is left in place for _staged_output to replace once
+        # the new file has validated.
+        check_output_path(output, force, inputs=inputs, defer_removal=True)
+        _refuse_staging_an_input(output, inputs)
 
     mc = MetaCooler(uri)
     old_contigs = mc.contigs
@@ -1189,7 +1188,7 @@ def reassign(
     else:
         assert output is not None  # guaranteed by the argument check above
         target = Path(output)
-        with _staged_output(target, keep_partial=keep_partial) as staged:
+        with _staged_output(target, keep_partial=keep_partial, inputs=inputs) as staged:
             if reorder:
                 logger.info(
                     "Re-ordering %d contigs into %r layout: the bins move with "
