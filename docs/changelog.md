@@ -25,6 +25,23 @@
   `annotate` always gave; `ignore` says nothing about them (a debug line);
   `error` refuses the tables before anything is written. A table that matches
   nothing at all is still refused in every case.
+- **`keep_partial`** on every writer that stages its output — `from_pairs`,
+  `from_cool`, `collect`, `reassign` and `annotate`. When the write fails,
+  `keep_partial=False` removes `<output>.partial`, whatever stopped the run
+  (`KeyboardInterrupt` included), and logs that at INFO, where the default,
+  `True`, leaves it for inspection and logs at ERROR as before. For callers
+  that stage their own output; see [A failed write](api/io.md#keep-partial).
+  `from_pairs` now stages its `.ps.tsv` table with the map and moves it into
+  place just before it, the previous table set aside until the map is in place
+  and put back if the map cannot be moved: written after the map was in place, a
+  failure there left the new map behind. Once the map is in place the set-aside
+  table is removed, and one that cannot be is left, with a warning, not put
+  back: the new map and table match, and the run succeeds unless it was
+  interrupted. A `<name>.ps.tsv.previous` left behind, by that failure or by a
+  run killed during the moves, makes `from_pairs` refuse to start, before it
+  reads anything, until someone checks which table matches the map (a file
+  of the user's own of that name is refused alike: rename it).
+  `reassign` and `annotate` are now in the I/O API reference.
 
 ### Changed
 

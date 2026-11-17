@@ -891,6 +891,7 @@ def reassign(
     qc: bool = True,
     chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
+    keep_partial: bool = True,
 ) -> None:
     """Reassign the contigs of a metacool file to different genomes.
 
@@ -950,6 +951,12 @@ def reassign(
         force: Replace *output* if it exists.  The existing file is only
             replaced once the new one has been written and validated, so a
             failed run leaves it untouched.
+        keep_partial: On a failure while the output is being written, leave
+            ``<output>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run.  Unused
+            with *inplace*, which stages nothing.
 
     Raises:
         ValueError: If the output arguments are inconsistent, if *output* is
@@ -1118,7 +1125,7 @@ def reassign(
     else:
         assert output is not None  # guaranteed by the argument check above
         target = Path(output)
-        with _staged_output(target) as staged:
+        with _staged_output(target, keep_partial=keep_partial) as staged:
             if reorder:
                 logger.info(
                     "Re-ordering %d contigs into %r layout: the bins move with "

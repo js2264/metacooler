@@ -150,6 +150,7 @@ def annotate(
     inplace: bool = False,
     metadata: dict | None = None,
     force: bool = False,
+    keep_partial: bool = True,
 ) -> None:
     """Add, replace or drop metadata columns of ``/genomes`` and ``/contigs``.
 
@@ -191,6 +192,12 @@ def annotate(
             ``commands`` list is appended to the provenance already there.
         force: Replace *output* if it exists (only once the new file
             validates).
+        keep_partial: On a failure while the output is being written, leave
+            ``<output>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run.  Unused
+            with *inplace*, which stages nothing.
 
     Raises:
         ValueError: On inconsistent arguments, a table that matches nothing (or,
@@ -296,7 +303,7 @@ def annotate(
 
     assert output is not None  # guaranteed by the argument checks above
     target = Path(output)
-    with _staged_output(target) as staged:
+    with _staged_output(target, keep_partial=keep_partial) as staged:
         if group_path.strip("/") and len(groups) == 1:
             # One entry out of a collection: a standalone map, as reassign does.
             from metacooler.io.reassign import _materialise_copy

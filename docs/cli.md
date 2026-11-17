@@ -189,7 +189,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 | `--chunksize` | `50000000` | Pairs processed per chunk. This is chunk *granularity*, not read memory (the pyarrow read block is capped separately). Under `external` sorting each chunk becomes a temporary cooler at a fixed per-call cost that scales with contig count, so smaller chunks cost disproportionately more. |
 | `--sort-strategy` | `auto` | Pixel sort strategy: `auto` (`memory` unless the binned pixels exceed 100 M rows), `memory` (sort in RAM — fast for small files), or `external` (stream to cooler's external sort — scalable). |
 | `--nproc` | `1` | Threads binning pairs while the file is read and decompressed (which stays on one thread: one gzip stream). The output, QC block, P(s) table and drop report are identical whatever the value; each thread holds one more batch of pairs. Two threads take ~15 % off a 30 M-pair run; more add little. |
-| `-f, --force` | off | Overwrite the output if it already exists. |
+| `-f, --force` | off | Overwrite the output if it already exists. A `<output>.ps.tsv.previous`, which a run leaves when it is killed while it moves the map and its table into place or cannot remove that table afterwards, stops the command before it reads anything, with or without `--ps` and even with `-f`: check which table matches the map, keep it as `<output>.ps.tsv`, and remove the other (a file of your own of that name: rename it). See [A failed write](api/io.md#keep-partial). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
 !!! warning "`--contig-order fasta` needs a source of order"

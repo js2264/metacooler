@@ -1036,6 +1036,7 @@ def collect(
     qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
     genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
     contigs_table_format: str = CONTIG_METADATA_FORMAT_DEFAULT,
+    keep_partial: bool = True,
 ) -> None:
     """Collect single-genome cool files into one metacool file, one genome each.
 
@@ -1096,6 +1097,11 @@ def collect(
             a table without a header line.  Defaults to ``genome_name``.
         contigs_table_format: Which column of *contigs_table* holds the contig
             names, in the same grammar.  Defaults to ``contig_name``.
+        keep_partial: On a failure while the output is being written, leave
+            ``<output>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run.
 
     Raises:
         ValueError: On an empty or ill-formed input list, inputs of different
@@ -1248,7 +1254,7 @@ def collect(
         )
     pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
     ordered = ordered or was_empty
-    with _staged_output(output) as staged:
+    with _staged_output(output, keep_partial=keep_partial) as staged:
         write_cooler(
             staged,
             bins_df,

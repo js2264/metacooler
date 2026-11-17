@@ -2451,8 +2451,110 @@ def _stream_remapped_pixels(
             progress.update(task, advance=1)
 
 
+def _partial_path(path: Path) -> Path:
+    """Where a writer builds *path* before moving it into place."""
+    return path.with_name(path.name + ".partial")
+
+
+def _move_into_place(
+    companions: Sequence[tuple[Path, Path]], partial: Path, final: Path
+) -> None:
+    """Move staged *companions*, then *partial*, into place -- all or none.
+
+    A companion's previous file is moved aside, to ``<name>.previous``, before
+    its new one takes its place, and if a later move fails -- *final*'s
+    included -- every new companion goes back to its partial name and every
+    previous file comes back, so a failed run leaves the previous files as
+    they were.  Once *final* is in place the previous files are removed; one
+    that cannot be is left where it is, with a WARNING (and an interrupt is
+    re-raised), never put back: the new files are complete and match.  Only a
+    process killed during the moves, where nothing can undo them, leaves them
+    half done: a previous companion still at ``<name>.previous``, or a new
+    companion beside the previous *final*.  Either way, a ``<name>.previous``
+    left behind makes the next run refuse to start
+    (:func:`_refuse_a_set_aside_file`).
+
+    Args:
+        companions: ``(partial, final)`` pairs, moved first.
+        partial: The main output, as staged.
+        final: Where it goes, last.
+    """
+    aside: list[tuple[Path, Path]] = []
+    placed: list[tuple[Path, Path]] = []
+    try:
+        for staged, path in companions:
+            if path.exists():
+                previous = _set_aside_path(path)
+                os.replace(path, previous)
+                aside.append((previous, path))
+            os.replace(staged, path)
+            placed.append((staged, path))
+        os.replace(partial, final)
+    except BaseException:
+        for staged, path in reversed(placed):
+            os.replace(path, staged)
+        for previous, path in reversed(aside):
+            os.replace(previous, path)
+        raise
+    for previous, path in aside:
+        try:
+            previous.unlink(missing_ok=True)
+        except BaseException as error:
+            logger.warning(
+                "%s is in place with %s, but the previous %s, set aside as %s, "
+                "could not be removed (%r). Remove it: the next run refuses to "
+                "start while it is there.",
+                final,
+                path,
+                path.name,
+                previous,
+                error,
+            )
+            if not isinstance(error, Exception):
+                raise
+
+
+def _set_aside_path(path: Path) -> Path:
+    """Where :func:`_move_into_place` keeps *path*'s previous file meanwhile."""
+    return path.with_name(path.name + ".previous")
+
+
+def _refuse_a_set_aside_file(final: Path, companions: Iterable[Path]) -> None:
+    """Refuse to start while a companion's previous file is still set aside.
+
+    :func:`_move_into_place` leaves ``<name>.previous`` behind only when it was
+    killed during its moves, or could not remove that file afterwards.  Which
+    of the two files then matches *final* cannot be told from here, and
+    setting the companion aside again would overwrite one of them, so the run
+    stops before it reads anything.
+
+    Args:
+        final: The output path.
+        companions: Files moved into place with *final*.
+
+    Raises:
+        FileExistsError: If ``<companion>.previous`` exists.
+    """
+    for path in companions:
+        previous = _set_aside_path(path)
+        if previous.exists():
+            raise FileExistsError(
+                f"{str(previous)!r} exists. A run leaves such a file when it "
+                "was killed while it moved its map and table into place, or "
+                "could not remove the previous table afterwards. If so, check "
+                f"which table matches {str(final)!r}, {str(path)!r} or "
+                f"{str(previous)!r}: keep that one as {str(path)!r} and remove "
+                "the other. If the file is one of yours, rename it."
+            )
+
+
 @contextlib.contextmanager
-def _staged_output(final: Path) -> Generator[Path, None, None]:
+def _staged_output(
+    final: Path,
+    *,
+    keep_partial: bool = True,
+    companions: Sequence[Path] = (),
+) -> Generator[Path, None, None]:
     """Build the output at a sibling temp path, moving it into place on success.
 
     Writing straight to the final path meant a partial or invalid file could sit
@@ -2464,23 +2566,49 @@ def _staged_output(final: Path) -> Generator[Path, None, None]:
 
     Args:
         final: Path the caller wants the finished file to have.
+        keep_partial: What a failure does with the temp file.  ``True`` leaves
+            it for inspection and says so at ERROR (an exception) or silently
+            (``KeyboardInterrupt``) -- right for a person at a terminal.
+            ``False`` removes it whatever stopped the run, ``KeyboardInterrupt``
+            included, and says so at INFO -- for an API caller that stages its
+            own output and only wants the finished file or nothing.  The final
+            path is never written either way, and a failure before the temp
+            file exists has nothing to keep or remove, so it says nothing.
+        companions: Files the caller writes beside *final*, each at its
+            :func:`_partial_path`, and moved into place with it, before it
+            (:func:`_move_into_place`): ``from_pairs``' ``.ps.tsv`` table.
+            On failure their partial files are kept or removed like
+            *final*'s.
 
     Yields:
         The temporary path to write to.
     """
-    tmp = final.with_name(final.name + ".partial")
-    check_output_path(tmp, force=True)
+    tmp = _partial_path(final)
+    staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
+    for partial, _ in staged:
+        check_output_path(partial, force=True)
     try:
         yield tmp
-    except Exception:
-        logger.error(
-            "Creation failed. The partial file was left at %s for inspection; "
-            "%s was not written.",
-            tmp,
-            final,
-        )
+        _move_into_place(staged[1:], tmp, final)
+    except BaseException as error:
+        left = [(partial, path) for partial, path in staged if partial.exists()]
+        for partial, path in left:
+            if not keep_partial:
+                partial.unlink()
+                logger.info(
+                    "Creation failed; the partial file %s was removed and %s "
+                    "was not written.",
+                    partial,
+                    path,
+                )
+            elif isinstance(error, Exception):
+                logger.error(
+                    "Creation failed. The partial file was left at %s for "
+                    "inspection; %s was not written.",
+                    partial,
+                    path,
+                )
         raise
-    os.replace(tmp, final)
 
 
 def _remap_bins(
@@ -2566,6 +2694,7 @@ def from_pairs(
     ps_bins_per_decade: int = DEFAULT_BINS_PER_DECADE,
     force: bool = False,
     nproc: int = 1,
+    keep_partial: bool = True,
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
@@ -2653,6 +2782,20 @@ def from_pairs(
             decompressed (which stays on one thread, being one gzip stream).
             Results are folded in file order, so the output and every tally
             are those of ``nproc=1``; memory grows by one batch per thread.
+        keep_partial: On a failure while the output is being written, leave
+            ``<uri>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run, nor is
+            the ``.ps.tsv`` table, staged as ``<name>.ps.tsv.partial`` and
+            moved into place just before the map: the previous table is set
+            aside (as ``<name>.ps.tsv.previous``) until the map is in place,
+            and put back if the map cannot be.  Once the map is in place the
+            set-aside table is removed; if that fails it is left, with a
+            WARNING, and not put back: the new map and table match, and the
+            run succeeds unless it was interrupted.  Only a process killed
+            during those moves can leave them half done: the previous table
+            still set aside, or the new table beside the previous map.
 
     Raises:
         ValueError: If *nproc* is below 1, no pairs file is given, the pairs
@@ -2661,6 +2804,12 @@ def from_pairs(
         FileNotFoundError: If a pairs file does not exist -- checked before
             any is read, so a typo in the last of several libraries does not
             cost a binning pass over the others.
+        FileExistsError: If ``<name>.ps.tsv.previous`` exists, with or
+            without *ps*.  A run leaves it when it was killed while it moved
+            its map and table into place, or could not remove that table
+            afterwards, and which table matches the map is for the user to
+            check; a file of the user's own of that name is refused alike.
+            Checked before anything is read.
     """
     if nproc < 1:
         raise ValueError(f"nproc must be at least 1, got {nproc}")
@@ -2695,6 +2844,9 @@ def from_pairs(
         genomes_table=genomes_table,
         drop_unassigned=drop_unassigned,
     )
+    # A P(s) table still set aside: an earlier run was killed while it moved its
+    # map and table into place, and which table matches the map is unknown.
+    _refuse_a_set_aside_file(uri, (ps_table_path(uri),))
     # Guard the P(s) sidecar before the streaming pass, not after it: finding
     # out that the table cannot be written is worth seconds, not hours.
     ps_path = ps_table_path(uri) if ps else None
@@ -2889,7 +3041,13 @@ def from_pairs(
         ordered = False
     pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
     ordered = ordered or was_empty
-    with _staged_output(uri) as staged:
+    # The map and its P(s) sidecar are staged together, and both moved into
+    # place only once both are written and the map has validated.
+    with _staged_output(
+        uri,
+        keep_partial=keep_partial,
+        companions=() if ps_path is None else (ps_path,),
+    ) as staged:
         write_cooler(
             staged,
             bins_df,
@@ -2935,22 +3093,20 @@ def from_pairs(
         logger.info("Validating created metacool file")
         validate(staged)
 
-    # --- P(s) sidecar ---
-    # Outside the staged block: it is a companion file, not part of the
-    # .metacool, and the atomic rename above has already happened.
-    if ps_tally is not None and ps_edges is not None and ps_path is not None:
-        write_ps_table(
-            ps_path,
-            assemble(
-                genomes_df["name"].to_numpy(),
-                ps_edges,
-                ps_tally.matrix,
-                position_pair_denominators(
-                    contig_length, contig_genome_id, len(genomes_df), ps_edges
+        # --- P(s) sidecar: a companion file, not part of the .metacool ---
+        if ps_tally is not None and ps_edges is not None and ps_path is not None:
+            write_ps_table(
+                _partial_path(ps_path),
+                assemble(
+                    genomes_df["name"].to_numpy(),
+                    ps_edges,
+                    ps_tally.matrix,
+                    position_pair_denominators(
+                        contig_length, contig_genome_id, len(genomes_df), ps_edges
+                    ),
                 ),
-            ),
-            force=force,
-        )
+                force=True,
+            )
 
     with h5py.File(uri, "r") as f:
         nnz = int(f.attrs.get("nnz"))
@@ -2983,6 +3139,7 @@ def from_cool(
     qc: bool = True,
     qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
     genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
+    keep_partial: bool = True,
 ) -> None:
     """Create a metacool file from an existing cool file.
 
@@ -3034,6 +3191,11 @@ def from_cool(
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
             a table without a header line.  Defaults to ``genome_name``.
+        keep_partial: On a failure while the output is being written, leave
+            ``<output>.partial`` behind for inspection, as the default does
+            (logged at ERROR).  ``False`` removes it instead, whatever stopped
+            the run (``KeyboardInterrupt`` included), and logs that at INFO.
+            The output path itself is never written by a failed run.
 
     Raises:
         ValueError: If ``cool_uri`` is not a valid cooler file, or
@@ -3212,7 +3374,7 @@ def from_cool(
         ordered = False
     pixel_source, was_empty = _ensure_nonempty_pixel_stream(pixel_source)
     ordered = ordered or was_empty
-    with _staged_output(output_path) as staged:
+    with _staged_output(output_path, keep_partial=keep_partial) as staged:
         write_cooler(
             staged,
             bins_remapped,
