@@ -1,12 +1,15 @@
 name: Deploy docs
 
+# Deploys from branches only. The github-pages environment refuses any other
+# ref ("Tag ... is not allowed to deploy to github-pages due to environment
+# protection rules"), and a tag adds nothing: a release is cut with
+# `git push --follow-tags`, so devel's push of the release commit deploys it.
+# benchmarks.yml starts this workflow on the default branch for the same reason.
 on:
   push:
     branches:
       - devel
       - main
-    tags:
-      - "v*"
   workflow_dispatch: # also started by benchmarks.yml once it publishes a page
 
 permissions:
