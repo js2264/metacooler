@@ -51,6 +51,13 @@ def _run(*args: object):
     return CliRunner().invoke(cli, [str(a) for a in args])
 
 
+def _replica(path: Path, tmp_path: Path) -> Path:
+    """A byte-identical second replicate: merge refuses the *same* file twice."""
+    copy = tmp_path / f"replica_{path.name}"
+    shutil.copy(path, copy)
+    return copy
+
+
 class TestOutputNeverDestroysInput:
     """``-o <input> -f`` deleted the input, then failed with "File not found".
 
@@ -199,7 +206,7 @@ class TestMerge:
 
     def test_integer_counts_widen_to_int64(self, tmp_path: Path, tiny_metacooler):
         out = tmp_path / "m.metacool"
-        merge([tiny_metacooler, tiny_metacooler], out)
+        merge([tiny_metacooler, _replica(tiny_metacooler, tmp_path)], out)
         with h5py.File(out, "r") as f:
             assert f["pixels"]["count"].dtype == np.int64
 
@@ -214,7 +221,9 @@ class TestMerge:
         """
         assert "qc" in MetaCooler(tiny_metacooler).metadata
         out = tmp_path / "m.metacool"
-        result = _run("merge", tiny_metacooler, tiny_metacooler, "-o", out)
+        result = _run(
+            "merge", tiny_metacooler, _replica(tiny_metacooler, tmp_path), "-o", out
+        )
         assert result.exit_code == 0, result.output
         meta = MetaCooler(out).metadata
         assert "qc" not in meta
@@ -232,7 +241,7 @@ class TestMerge:
         binnify(tiny_metacooler, coarse, binsize=2000)
         assert MetaCooler(coarse).info["bin-size"] == 2000
         out = tmp_path / "m.metacool"
-        merge([coarse, coarse], out)
+        merge([coarse, _replica(coarse, tmp_path)], out)
         info = MetaCooler(out).info
         assert info["bin-size"] == 2000
         assert info["bin-type"] == "fixed"
@@ -270,7 +279,10 @@ class TestMerge:
 
         monkeypatch.setattr(module, "write_bins", spy)
         monkeypatch.setattr(module, "get_binsize", forbidden)
-        merge([tiny_metacooler, tiny_metacooler], tmp_path / "m.metacool")
+        merge(
+            [tiny_metacooler, _replica(tiny_metacooler, tmp_path)],
+            tmp_path / "m.metacool",
+        )
         assert seen and not any(seen)
 
     def test_api_refuses_an_input_as_output(self, tmp_path: Path, tiny_metacooler):

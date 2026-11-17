@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from metacooler.io.merge import merge
 
 
+def _replica(path, tmp_path):
+    """A byte-identical second replicate: merge refuses the *same* file twice."""
+    copy = tmp_path / f"replica_{path.name}"
+    shutil.copy(path, copy)
+    return copy
+
+
 class TestMerge:
     def test_merge_identical(self, tiny_metacooler, tmp_path):
         out = tmp_path / "merged.metacool"
-        merge([tiny_metacooler, tiny_metacooler], out)
+        merge([tiny_metacooler, _replica(tiny_metacooler, tmp_path)], out)
         assert out.exists()
 
     def test_merge_single_file_fails(self, tiny_metacooler, tmp_path):
@@ -54,7 +63,7 @@ class TestMerge:
         import h5py
 
         out = tmp_path / "merged.metacool"
-        merge([tiny_metacooler, tiny_metacooler], out)
+        merge([tiny_metacooler, _replica(tiny_metacooler, tmp_path)], out)
         with h5py.File(out, "r") as f:
             chrom_dtype = f["bins"]["chrom"].dtype
         assert chrom_dtype == "int32", (
@@ -66,7 +75,7 @@ class TestMerge:
         import h5py
 
         out = tmp_path / "merged.metacool"
-        merge([tiny_metacooler, tiny_metacooler], out)
+        merge([tiny_metacooler, _replica(tiny_metacooler, tmp_path)], out)
         with h5py.File(tiny_metacooler, "r") as f:
             orig_sum = int(f["pixels"]["count"][:].sum())
         with h5py.File(out, "r") as f:

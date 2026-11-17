@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -58,7 +59,10 @@ def test_merge_compresses_bins_chrom(tiny_metacooler: Path, tmp_path: Path):
     from metacooler.io.merge import merge
 
     out = tmp_path / "merged.metacool"
-    merge([tiny_metacooler, tiny_metacooler], out)
+    # A byte-identical replicate: merge refuses the *same* file twice.
+    replica = tmp_path / "replica.metacool"
+    shutil.copy(tiny_metacooler, replica)
+    merge([tiny_metacooler, replica], out)
     _assert_compressed(out)
     validate(out)
 

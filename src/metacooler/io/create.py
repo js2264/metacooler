@@ -435,11 +435,17 @@ def _pairs_paths(
         paths = [Path(p) for p in pairs]
     if not paths:
         raise ValueError("pairs file path required: got an empty list")
-    # Keyed on the resolved path, so an alias (``./x``, ``sub/../x``, a symlink)
-    # of a file already listed is caught too.
-    seen: dict[Path, Path] = {}
+    # Keyed on the file itself (device and inode), so an alias (``./x``,
+    # ``sub/../x``, a symlink) or a hard link of a file already listed is caught
+    # too; a path that does not exist falls back to its resolved form and is
+    # reported missing by the reader.
+    seen: dict[object, Path] = {}
     for path in paths:
-        key = path.resolve()
+        try:
+            st = path.stat()
+            key: object = (st.st_dev, st.st_ino)
+        except OSError:
+            key = path.resolve()
         first = seen.get(key)
         if first is not None:
             also = "" if first == path else f" (also as {str(first)!r})"

@@ -10,6 +10,7 @@ on how the fix is implemented.
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
 import cooler
@@ -23,6 +24,7 @@ import metacooler.cli
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
 from metacooler.io._utils import read_user_table
+from metacooler.io.merge import merge
 from metacooler.schema import validate
 
 
@@ -359,3 +361,54 @@ class TestAnnotateInplaceIsAllOrNothing:
         with h5py.File(target, "r") as f:
             assert annotate_mod._SCRATCH not in f
         validate(target)
+
+
+class TestRepeatedInputs:
+    """``merge A A`` summed a map with itself and exited 0.
+
+    ``create pairs`` already refused the same pairs file given twice for this
+    reason. Both now identify a file by device and inode, so an alias, symlink
+    or hard link of a listed input is caught too.
+    """
+
+    def test_merge_refuses_the_same_map_twice(self, tmp_path: Path, tiny_metacooler):
+        result = _run("merge", tiny_metacooler, tiny_metacooler, "-o", tmp_path / "m")
+        assert result.exit_code != 0
+        assert "same map" in flat(result.output)
+
+    def test_merge_refuses_a_hard_link(self, tmp_path: Path, tiny_metacooler):
+        link = tmp_path / "link.metacool"
+        os.link(tiny_metacooler, link)
+        with pytest.raises(ValueError, match="same map"):
+            merge([tiny_metacooler, link], tmp_path / "m.metacool")
+
+    def test_two_entries_of_one_collection_still_merge(
+        self, tmp_path: Path, tiny_mmetacool: Path
+    ):
+        out = tmp_path / "m.metacool"
+        merge(
+            [f"{tiny_mmetacool}::entries/entry1", f"{tiny_mmetacool}::entries/entry2"],
+            out,
+        )
+        assert (
+            MetaCooler(out).info["sum"]
+            == 2 * MetaCooler(f"{tiny_mmetacool}::entries/entry1").info["sum"]
+        )
+
+    def test_merge_refuses_one_entry_twice(self, tmp_path: Path, tiny_mmetacool):
+        uri = f"{tiny_mmetacool}::entries/entry1"
+        with pytest.raises(ValueError, match="same map"):
+            merge([uri, uri.replace("::entries", "::/entries")], tmp_path / "m")
+
+    def test_create_refuses_a_hard_linked_pairs_file(
+        self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path, tiny_contigs_table
+    ):
+        link = tmp_path / "link.pairs"
+        os.link(tiny_pairs, link)
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--pairs", link,
+            "--bins", tiny_bins_bed, "--contigs", tiny_contigs_table,
+            "-o", tmp_path / "o.metacool", "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code != 0
+        assert "given twice" in flat(result.output)
