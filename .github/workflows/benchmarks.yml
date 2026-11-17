@@ -8,8 +8,9 @@ name: Benchmarks
 # A run on a release tag, or on the default branch with `publish-page` set (the
 # default), also publishes them on the documentation site, at /benchmarks/:
 # they replace the assets of the `benchmark-page` release, and the run starts
-# docs.yml, whose every build serves that release's assets. A run in which a
-# command failed publishes nothing.
+# docs.yml on the default branch (Pages refuses a deployment from a tag), whose
+# every build serves that release's assets. A run in which a command failed
+# publishes nothing.
 #
 # The datasets are deterministic: they are fetched from the release
 # `benchmark-data-v<GENERATOR_VERSION of benchmarks/simulate.py>` when it holds
@@ -183,6 +184,7 @@ jobs:
           (inputs.publish-page && github.ref_name == github.event.repository.default_branch)
         env:
           TAG: benchmark-page
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           site=$(sed -n 's/^site_url = "\(.*\)"$/\1/p' zensical.toml)/benchmarks/
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -204,6 +206,8 @@ jobs:
           fi
           gh release upload "$TAG" benchmarks/benchmarks.html \
             "$RUNNER_TEMP/benchmark-results.zip" --clobber
-          gh workflow run docs.yml --ref "$GITHUB_REF_NAME"
+          # On the default branch, not on this run's ref: the github-pages
+          # environment refuses a deployment from a tag.
+          gh workflow run docs.yml --ref "$DEFAULT_BRANCH"
           echo "Published: the documentation deploy now running serves it at <$site>." \
             >> "$GITHUB_STEP_SUMMARY"

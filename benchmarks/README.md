@@ -74,8 +74,9 @@ also publishes the page on the documentation site, at
 <https://js2264.github.io/metacooler/benchmarks/>, with `_results/` beside it.
 Each Pages deployment replaces the whole site, so the run does not deploy the
 page itself. It replaces the two assets of the `benchmark-page` release and
-starts [`docs.yml`](../.github/workflows/docs.yml), which fetches them on
-every build. A run in which a command failed publishes nothing. Untick
+starts [`docs.yml`](../.github/workflows/docs.yml) on `devel` (the
+`github-pages` environment refuses a deployment from a tag), which fetches
+them on every build. A run in which a command failed publishes nothing. Untick
 *publish-page* for a run that should not replace the published page.
 
 The datasets are deterministic, so they are only generated once per generator
