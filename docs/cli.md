@@ -169,7 +169,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, or `.zst`). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
+| `--pairs` | *required* | Pairs file (plain text, `.gz`, `.bgz`, `.bz2`, `.zst`/`.zstd`, or `.lz4`; the suffix is matched case-insensitively). A blank line inside the `#` header is allowed. **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
 | `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--contigs` | — | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`, and its other columns land in `/contigs`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). Leave it out to build a map with no binning yet. |
@@ -1217,7 +1217,7 @@ same MAG or not) are what [`qc`](#qc) counts instead.
 |--------|---------|-------------|
 | `-o, --output` | stdout | TSV destination. |
 | `--plot` | — | Also render the curve here (`.png`, `.pdf`, `.svg`). |
-| `--pairs` | — | Measure from this pairs file instead of the binned pixel table (plain text, `.gz`, `.bgz` — read by the same streamer `create pairs` uses). See [Two sources](#ps-sources). |
+| `--pairs` | — | Measure from this pairs file instead of the binned pixel table (any codec `create pairs` reads — read by the same streamer). See [Two sources](#ps-sources). |
 | `--by` | `all` | `all` pools every selected contig into one curve; `genome` emits one curve per MAG. |
 | `--genomes` | — | Restrict to these genomes, **comma-separated or repeated**. |
 | `--contigs` | — | Restrict to these contigs, same syntax. |

@@ -412,3 +412,66 @@ class TestRepeatedInputs:
         )  # fmt: skip
         assert result.exit_code != 0
         assert "given twice" in flat(result.output)
+
+
+class TestPairsFileReading:
+    """Two pairs-file shapes that read as something other than what they hold.
+
+    The codec was left to pyarrow's own detection, which matches suffixes
+    case-sensitively: ``R1.PAIRS.GZ`` reached the CSV parser as raw gzip bytes.
+    And a blank line inside the ``#`` header threw off the ``skip_rows`` count,
+    since pyarrow counts blank lines as rows: the last header line was parsed as
+    a one-field data row and the read died on the first real pair. The header's
+    ``#chromsize:`` lines after the blank were ignored as well.
+    """
+
+    BODY = (
+        "r1\tcA\t10\tcA\t900\n"
+        "r2\tcA\t150\tcB\t20\n"
+        "r3\tcB\t5\tcB\t550\n"
+    )  # fmt: skip
+
+    def _create(self, tmp_path: Path, pairs: Path) -> MetaCooler:
+        from metacooler.io.create import from_pairs
+
+        out = tmp_path / f"{pairs.name}.metacool"
+        from_pairs(uri=out, bins=None, binsize=100, pairs=str(pairs))
+        validate(out)
+        return MetaCooler(out)
+
+    def _plain(self, tmp_path: Path) -> MetaCooler:
+        plain = tmp_path / "plain.pairs"
+        plain.write_text("#chromsize: cA 1000\n#chromsize: cB 600\n" + self.BODY)
+        return self._create(tmp_path, plain)
+
+    @pytest.mark.parametrize("name", ["R1.PAIRS.GZ", "r1.Pairs.Gz", "r1.pairs.BGZ"])
+    def test_an_upper_case_suffix_is_decompressed(self, tmp_path: Path, name: str):
+        import gzip
+
+        raw = "#chromsize: cA 1000\n#chromsize: cB 600\n" + self.BODY
+        path = tmp_path / name
+        path.write_bytes(gzip.compress(raw.encode()))
+        mc = self._create(tmp_path, path)
+        expected = self._plain(tmp_path)
+        assert mc.info["sum"] == expected.info["sum"] == 3
+        assert mc.contigs["name"].tolist() == ["cA", "cB"]
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "#chromsize: cA 1000\n\n#chromsize: cB 600\n",
+            "#chromsize: cA 1000\n#chromsize: cB 600\n\n\n",
+            "\n#chromsize: cA 1000\n \t\n#chromsize: cB 600\n",
+        ],
+        ids=["inside", "after", "leading-and-whitespace"],
+    )
+    def test_a_blank_line_in_the_header(self, tmp_path: Path, header: str):
+        path = tmp_path / "blank.pairs"
+        path.write_text(header + self.BODY)
+        mc = self._create(tmp_path, path)
+        assert mc.info["sum"] == 3
+        assert dict(zip(mc.contigs["name"], mc.contigs["length"], strict=True)) == {
+            "cA": 1000,
+            "cB": 600,
+        }
+        pd.testing.assert_frame_equal(mc.pixels(), self._plain(tmp_path).pixels())

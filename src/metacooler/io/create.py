@@ -300,6 +300,18 @@ def _drop_nonpositive_contigs(
     return contig_lengths, bins_df
 
 
+#: Pairs-file suffix (lower-cased) -> pyarrow codec name.  Any other suffix is
+#: read as plain text.
+_PAIRS_CODECS = {
+    ".gz": "gzip",
+    ".bgz": "gzip",
+    ".bz2": "bz2",
+    ".zst": "zstd",
+    ".zstd": "zstd",
+    ".lz4": "lz4",
+}
+
+
 def _pairs_input_stream(path: Path):
     """Open a pairs file as a binary stream, decompressing by file extension.
 
@@ -311,9 +323,12 @@ def _pairs_input_stream(path: Path):
     ``UnicodeDecodeError`` before a single pair was read, and ``.bz2`` failed
     whenever ``#chromsize`` lines were needed.
 
-    pyarrow's codec table has no ``.bgz`` entry, and would hand a bgzipped file
-    to the CSV parser as raw binary (zero recognisable contigs, a structurally
-    valid but empty map); bgzf is gzip-compatible, so it is named explicitly.
+    The codec is chosen here from :data:`_PAIRS_CODECS`, never left to
+    pyarrow's own detection: that table has no ``.bgz`` entry and matches
+    suffixes case-sensitively, and a file it does not recognise is handed to the
+    CSV parser as raw compressed bytes -- zero recognisable contigs, a
+    structurally valid but empty map.  ``R1.PAIRS.GZ`` came out that way.  bgzf
+    is gzip-compatible, so ``.bgz`` maps to ``gzip``.
 
     Args:
         path: Pairs file path.
@@ -323,9 +338,8 @@ def _pairs_input_stream(path: Path):
     """
     import pyarrow as pa
 
-    if path.suffix == ".bgz":
-        return pa.input_stream(str(path), compression="gzip")
-    return pa.input_stream(str(path))
+    codec = _PAIRS_CODECS.get(path.suffix.lower())
+    return pa.input_stream(str(path), compression=codec)
 
 
 def _iter_pairs_lines(path: Path, block_size: int = 1 << 20) -> Iterator[str]:
@@ -392,6 +406,9 @@ def _parse_pairs_header(pairs_path: str | Path) -> dict[str, int] | None:
     path = Path(pairs_path)
     lengths = {}
     for raw in _iter_pairs_raw_lines(path):
+        if not raw.strip():
+            # A blank line does not end the header (see _scan_pairs_header).
+            continue
         if not raw.startswith(b"#"):
             break
         if raw.startswith(b"#chromsize:"):
@@ -1417,20 +1434,23 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
         path: Path to the pairs file.
 
     Returns:
-        ``(n_header, has_data_rows)`` — the count of consecutive leading ``#``
-        lines, and whether at least one non-empty data row follows them.  The
-        second element lets the caller recognise a header-only file *before*
-        handing the stream to pyarrow, instead of pattern-matching pyarrow's
-        error message (which would also swallow genuine parse failures).
+        ``(n_header, has_data_rows)`` — the number of leading lines to skip
+        (every ``#`` line and every blank line before the first data row), and
+        whether at least one data row follows them.  The second element lets
+        the caller recognise a header-only file *before* handing the stream to
+        pyarrow, instead of pattern-matching pyarrow's error message (which
+        would also swallow genuine parse failures).
+
+    Blank lines are counted, not just tolerated: pyarrow's ``skip_rows``
+    counts them as rows, so a blank line *inside* the header used to leave the
+    last ``#`` line unskipped -- parsed as a one-field data row, and the read
+    died on the first real pair.
     """
     n = 0
     has_data = False
     for raw in _iter_pairs_raw_lines(path):
-        if raw.startswith(b"#"):
+        if raw.startswith(b"#") or not raw.strip():
             n += 1
-            continue
-        if not raw.strip():
-            # Tolerate stray blank lines between the header and the body.
             continue
         has_data = True
         break
