@@ -23,6 +23,7 @@ import metacooler.cli
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
 from metacooler.io._utils import read_user_table
+from metacooler.schema import validate
 
 
 def _run(*args: object):
@@ -282,3 +283,79 @@ class TestUserQcColumns:
         )
         assert result.exit_code == 0, result.output
         assert "user_qc_checked" not in MetaCooler(dropped).genomes.columns
+
+
+class TestHdf5InvalidColumnNames:
+    """A user column named ``.`` passed every check, then failed at write time.
+
+    ``rename_key_columns`` rewrote ``/`` and integer labels but not ``.``,
+    which names the HDF5 group itself: ``create`` failed only after its whole
+    pairs pass, and an in-place ``annotate`` failed halfway through writing.
+    """
+
+    @pytest.mark.parametrize("bad", [".", ".."])
+    def test_create_stores_it_under_a_safe_name(
+        self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path, bad: str
+    ):
+        contigs = tmp_path / "c.tsv"
+        contigs.write_text(
+            f"contig_name\tgenome_name\t{bad}\n"
+            "contig_A\tMAG_1\t1\ncontig_B\tMAG_1\t2\ncontig_C\tMAG_2\t3\n"
+        )
+        genomes = tmp_path / "g.tsv"
+        genomes.write_text(f"genome_name\t{bad}\nMAG_1\tx\nMAG_2\ty\n")
+        out = tmp_path / "o.metacool"
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--bins", tiny_bins_bed,
+            "--contigs", contigs, "--genomes", genomes, "-o", out, "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        assert "col3" in MetaCooler(out).contigs.columns
+        assert "col2" in MetaCooler(out).genomes.columns
+
+
+class TestAnnotateInplaceIsAllOrNothing:
+    """A failure while ``annotate --inplace`` wrote its second table half-edited the map.
+
+    Tables were rebuilt and swapped in one at a time, so a failure building
+    ``/contigs`` left ``/genomes`` already edited, no history recorded, and
+    the ``.annotate-scratch`` group behind.
+    """
+
+    def test_a_failed_build_leaves_the_map_untouched(
+        self, tmp_path: Path, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import h5py
+
+        import metacooler.io.annotate as annotate_mod
+
+        target = tmp_path / "m.metacool"
+        target.write_bytes(tiny_metacooler.read_bytes())
+        genomes = tmp_path / "g.tsv"
+        genomes.write_text("genome_name\tphylum\nMAG_1\tA\nMAG_2\tB\n")
+        contigs = tmp_path / "c.tsv"
+        contigs.write_text("contig_name\tdepth\ncontig_A\t3.5\ncontig_B\t1.0\n")
+        real = annotate_mod.write_column
+
+        def failing(group, name, values):
+            if name == "depth":
+                raise OSError("disk full")
+            return real(group, name, values)
+
+        monkeypatch.setattr(annotate_mod, "write_column", failing)
+        before = {
+            "genomes": list(MetaCooler(target).genomes.columns),
+            "contigs": list(MetaCooler(target).contigs.columns),
+            "metadata": MetaCooler(target).metadata,
+        }
+        with pytest.raises(OSError, match="disk full"):
+            annotate_mod.annotate(
+                target, genomes_table=genomes, contigs_table=contigs, inplace=True
+            )
+        mc = MetaCooler(target)
+        assert list(mc.genomes.columns) == before["genomes"]
+        assert list(mc.contigs.columns) == before["contigs"]
+        assert mc.metadata == before["metadata"]
+        with h5py.File(target, "r") as f:
+            assert annotate_mod._SCRATCH not in f
+        validate(target)

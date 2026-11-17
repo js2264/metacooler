@@ -286,6 +286,21 @@ def rename_key_columns(
                 fixed,
             )
             name = fixed
+        if name.strip(".") == "":
+            # "." names the group itself and ".." its parent: h5py refuses both
+            # (and an empty name) as a dataset name -- but only at write time,
+            # after create's whole pairs pass or halfway through an in-place
+            # annotate. Every '/' was handled above, so this is the rest.
+            fixed = f"col{i + 1}"
+            logger.warning(
+                "%s column %d is named %r, which HDF5 cannot store as a "
+                "dataset name; stored as %r.",
+                kind,
+                i + 1,
+                name,
+                fixed,
+            )
+            name = fixed
         if name in taken:
             fixed = f"{name}_col{i + 1}"
             logger.warning(
