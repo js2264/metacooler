@@ -414,6 +414,52 @@ class TestPerContigTally:
         with pytest.raises(ValueError, match="expected 2 contig name"):
             tally.contig_table(["c1"])
 
+    def test_set_intra_contig_rebuilds_both_categories(self):
+        tally = ContactQC(3, distance_threshold=1000, unbinned_genome=0)
+        # Two inter-contig contacts, and one intra-contig one to be replaced.
+        tally.tally(
+            np.array([0, 1, 3]),
+            np.array([2, 2, 3]),
+            np.array([0, 0, 1]),
+            np.array([2, 2, 1]),
+            np.array([0, 0, 0]),
+        )
+        inter = tally.per_genome[:, 2:].copy()
+        per_contig = np.array([[5, 1], [0, 2], [3, 0], [1, 1]])
+        tally.set_intra_contig(per_contig, np.array([0, 0, 2, 1]))
+
+        summary = tally.summary()
+        assert summary["intra_contig_short"] == 9
+        assert summary["intra_contig_long"] == 4
+        assert summary["inter_genome"] == 2
+        assert summary["n_contacts"] == 15
+        assert tally.per_genome[:, 0].tolist() == [5, 1, 3]
+        assert tally.per_genome[:, 1].tolist() == [3, 1, 0]
+        np.testing.assert_array_equal(tally.per_genome[:, 2:], inter)
+        assert tally.per_contig is not None
+        np.testing.assert_array_equal(tally.per_contig, per_contig)
+        assert tally.per_genome.dtype == np.int64
+
+    def test_set_intra_contig_takes_float_counts(self):
+        tally = ContactQC(2, distance_threshold=1000)
+        tally.set_intra_contig(np.array([[0.5, 1.0], [2.0, 0.25]]), np.array([1, 1]))
+        assert tally.counts.dtype == np.float64
+        assert tally.per_genome[:, :2].tolist() == [[0.0, 0.0], [2.5, 1.25]]
+
+    @pytest.mark.parametrize(
+        ("per_contig", "genome", "match"),
+        [
+            (np.zeros((3, 2)), np.zeros(2, dtype=np.int64), "one \\(short, long\\)"),
+            (np.zeros((2, 3)), np.zeros(2, dtype=np.int64), "one \\(short, long\\)"),
+            (np.zeros((2, 2)), np.array([0, 2]), "genome ids must lie in"),
+            (np.zeros((2, 2)), np.array([-1, 0]), "genome ids must lie in"),
+        ],
+    )
+    def test_set_intra_contig_refuses_misaligned_input(self, per_contig, genome, match):
+        tally = ContactQC(2, distance_threshold=1000)
+        with pytest.raises(ValueError, match=match):
+            tally.set_intra_contig(per_contig, genome)
+
 
 # ----------------------------------------------------------------------
 # create pairs: the exact, position-based tally

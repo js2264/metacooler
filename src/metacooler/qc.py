@@ -40,9 +40,12 @@ metagenome — and is by construction
 
 The first two categories do not depend on the contig→genome assignment: a
 contact inside one contig stays inside it whichever genome the contig is given
-to.  They are therefore also counted per *contig* (:data:`QC_CONTIG_COLUMNS`,
-stored in ``/contigs``), and the per-genome columns of the same names are
-their sums over each genome's contigs.
+to.  They are therefore also counted per *contig*
+(:data:`QC_CONTIG_COLUMNS`, stored in ``/contigs``), which is what lets
+:func:`metacooler.io.reassign.reassign` keep a ``source="pairs"`` split after a
+re-binning: it sums them per new genome (:meth:`ContactQC.set_intra_contig`)
+and re-measures only the two inter-contig categories, which the pixels
+classify exactly at any bin size.
 """
 
 from __future__ import annotations
@@ -579,6 +582,62 @@ class ContactQC:
             frame[column] = per_contig[:, i]
         return frame
 
+    def set_intra_contig(
+        self, per_contig: np.ndarray, contig_genome: np.ndarray
+    ) -> None:
+        """Take both intra-contig categories from per-contig counts.
+
+        Neither category depends on the genome assignment, so a tally of the
+        pixels under a *new* assignment can take them from the per-contig
+        counts of an earlier, finer tally -- the read positions ``create
+        pairs`` measured -- and keep only its own two inter-contig categories,
+        which a pixel classifies exactly at any bin size.  The two categories'
+        totals and per-genome cells are rebuilt from *per_contig*, summed over
+        each genome's contigs, and *per_contig* becomes the per-contig table.
+
+        Args:
+            per_contig: ``(n_contigs, 2)`` short/long counts, one row per
+                contig of the tallied file, in its ``/contigs`` order (the
+                :data:`QC_CONTIG_COLUMNS` of ``/contigs``).
+            contig_genome: Genome id of every contig, same order.
+
+        Raises:
+            ValueError: If the arrays do not describe the same contigs, or a
+                genome id is not a row of the tally.
+        """
+        per_contig = np.asarray(per_contig)
+        contig_genome = np.asarray(contig_genome, dtype=np.int64)
+        if (
+            per_contig.ndim != 2
+            or per_contig.shape[1] != len(QC_CONTIG_COLUMNS)
+            or len(per_contig) != len(contig_genome)
+        ):
+            raise ValueError(
+                f"expected one (short, long) row per contig for "
+                f"{len(contig_genome)} contig(s), got shape {per_contig.shape}"
+            )
+        if len(contig_genome) and (
+            contig_genome.min() < 0 or contig_genome.max() >= self.n_genomes
+        ):
+            raise ValueError(
+                f"genome ids must lie in [0, {self.n_genomes}), got "
+                f"[{contig_genome.min()}, {contig_genome.max()}]"
+            )
+        self._promote_for(per_contig)
+        dtype = self.counts.dtype
+        per_contig = per_contig.astype(dtype)
+        for k in range(len(QC_CONTIG_COLUMNS)):
+            # Exact for integers below 2**53, as in `_tally_block`.
+            sums = np.bincount(
+                contig_genome,
+                weights=per_contig[:, k].astype(np.float64),
+                minlength=self.n_genomes,
+            )
+            self.per_genome[:, k] = sums[: self.n_genomes].astype(dtype)
+            self.counts[k] = per_contig[:, k].sum()
+        self._contig_queue, self._contig_queued = [], 0
+        self._per_contig = per_contig
+
 
 def is_qc_column(table: str, column: object) -> bool:
     """Whether a column of ``/genomes`` or ``/contigs`` belongs to the QC block.
@@ -611,7 +670,8 @@ def strip_qc_columns(frame: pd.DataFrame) -> pd.DataFrame:
     grid, a different pixel table or different genomes, so counts copied
     across would describe contacts the output does not contain — a stale
     number is worse than no number, because nothing about it looks stale.
-    (``reassign`` then stores a block measured on its own output.)
+    (``reassign`` then stores a block for its own output, carrying the
+    per-contig :data:`QC_CONTIG_COLUMNS` over when it can.)
 
     For ``/contigs``, see :func:`strip_contig_qc_columns`.
 

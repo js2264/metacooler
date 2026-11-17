@@ -269,6 +269,17 @@ only `qc_*` columns metacooler writes to `/contigs`: any other (`qc_pass`, from
 a `--contigs` table) is user metadata — every writer keeps it, `annotate` can
 drop it, and `merge` compares it like any metadata column.
 
+These two categories are the only ones that do not depend on the
+contig-to-genome assignment, which is why they are kept per contig:
+[`reassign`](cli.md#reassign) carries them over, sums them per new genome and
+re-measures only the two inter-contig categories from the pixels — exactly, at
+any bin size — so a `source="pairs"` block keeps its split measured on read
+positions, and every other key of the block (`source`, `distance_threshold`,
+`binsize`, `n_pairs_read`, `n_pairs_discarded`) is kept as it was. A source
+without these columns (or whose columns no longer add up to its block) has
+its block recomputed from the pixels instead, and loses the split measured on
+read positions.
+
 All three are statements about one specific pixel table, so `binnify` and
 `merge` drop them from their output instead of carrying them forward, and
 `merge` ignores `qc_*` columns when it compares the inputs' `/genomes` and
