@@ -96,6 +96,12 @@
   `import metacooler` costs what it did. The package also ships a `py.typed`
   marker, without which mypy does not read an installed metacooler at all
   (`import-untyped`).
+- **`reassign` no longer claims that only provenance differs when no contig
+  moves** although the output differs in more: a `--genomes` table, a
+  re-grouped layout or a new `contig-ordering`, `--no-qc`, `--metadata` keys,
+  or the QC block it recomputes. The message names each, and is an INFO line
+  rather than a warning when the caller asked for one of them; a table that
+  moves nothing, and nothing else asked for, still warns.
 
 ## 0.2.0 - 2026-11-16
 
