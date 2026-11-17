@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import cooler
 import numpy as np
+import pandas as pd
 import pytest
 
 from metacooler.api import MetaCooler
@@ -138,6 +139,81 @@ class TestMetaCooler:
         assert cooler.fileops.is_cooler(str(out))
         clr = cooler.Cooler(str(out))
         assert len(clr.chroms()) == 3
+
+
+class TestIterPixels:
+    """The pixel table one bounded chunk at a time, through cooler's selector."""
+
+    @pytest.mark.parametrize("size", ["1", "2", "7", "nnz", "nnz+5"])
+    def test_the_chunks_are_the_pixel_table(self, tiny_metacooler, size):
+        mc = MetaCooler(tiny_metacooler)
+        whole = mc.pixels()
+        nnz = len(whole)
+        chunksize = {"1": 1, "2": 2, "7": 7, "nnz": nnz, "nnz+5": nnz + 5}[size]
+
+        chunks = list(mc.iter_pixels(chunksize=chunksize))
+
+        assert len(chunks) == -(-nnz // chunksize)
+        assert all(0 < len(chunk) <= chunksize for chunk in chunks)
+        pd.testing.assert_frame_equal(pd.concat(chunks), whole)
+
+    def test_no_read_is_larger_than_a_chunk(self, tiny_metacooler, monkeypatch):
+        mc = MetaCooler(tiny_metacooler)
+        selector = mc._clr.pixels()
+        reads: list[int] = []
+
+        class Spy:
+            def __len__(self) -> int:
+                return len(selector)
+
+            def __getitem__(self, rows: slice):
+                reads.append(rows.stop - rows.start)
+                return selector[rows]
+
+        monkeypatch.setattr(mc._clr, "pixels", lambda *args, **kwargs: Spy())
+        assert sum(len(c) for c in mc.iter_pixels(chunksize=3)) == len(selector)
+        assert reads
+        assert max(reads) <= 3
+
+    def test_contig_ids(self, tiny_metacooler):
+        mc = MetaCooler(tiny_metacooler)
+        pixels = pd.concat(mc.iter_pixels(chunksize=4, contig_ids=True))
+
+        assert list(pixels.columns[-2:]) == ["contig1_id", "contig2_id"]
+        assert pixels["contig1_id"].dtype == np.int64
+        # The contigs cooler's own join names, as rows of /contigs.
+        joined = mc.pixels(join=True)
+        names = mc.contigs["name"].to_numpy()
+        for end in ("1", "2"):
+            np.testing.assert_array_equal(
+                names[pixels[f"contig{end}_id"].to_numpy()],
+                joined[f"chrom{end}"].astype(str).to_numpy(),
+            )
+        pd.testing.assert_frame_equal(
+            pixels.drop(columns=["contig1_id", "contig2_id"]), mc.pixels()
+        )
+
+    def test_an_entry_of_a_collection(self, tiny_mmetacool):
+        mc = MetaCooler(f"{tiny_mmetacool}::entries/entry1")
+        pd.testing.assert_frame_equal(
+            pd.concat(mc.iter_pixels(chunksize=5, contig_ids=True))[
+                ["bin1_id", "bin2_id", "count"]
+            ],
+            mc.pixels()[["bin1_id", "bin2_id", "count"]],
+        )
+
+    def test_a_map_without_pixels_yields_nothing(self, tmp_path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        out = tmp_path / "empty.metacool"
+        collect([make_cool(tmp_path / "E_coli.cool", ECOLI, n_contacts=0)], out)
+        assert list(MetaCooler(out).iter_pixels(contig_ids=True)) == []
+
+    def test_chunksize_must_be_positive(self, tiny_metacooler):
+        with pytest.raises(ValueError, match="at least 1"):
+            next(MetaCooler(tiny_metacooler).iter_pixels(chunksize=0))
 
 
 class TestMetaCoolerErrors:

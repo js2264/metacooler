@@ -243,6 +243,43 @@ class MetaCooler:
         coords = self._bins_cache[["chrom", "start", "end"]]
         return cooler.api.annotate(pixels, coords, replace=True)
 
+    def iter_pixels(
+        self, chunksize: int = DEFAULT_CHUNKSIZE, *, contig_ids: bool = False
+    ) -> Iterator[pd.DataFrame]:
+        """Yield the pixel table in consecutive chunks, never all of it at once.
+
+        Each chunk is the next *chunksize* rows of ``/pixels``, read with
+        cooler's pixel selector and indexed by pixel row as :meth:`pixels` is,
+        so the chunks put together are :meth:`pixels` exactly, in file order
+        (sorted by ``bin1_id``, then ``bin2_id``).  Memory stays at one chunk
+        whatever the size of the map.
+
+        Args:
+            chunksize: Most pixel rows per chunk.
+            contig_ids: Also give each pixel ``contig1_id`` and ``contig2_id``,
+                the contigs (rows of :attr:`contigs`) its two bins belong to,
+                looked up through ``indexes/chrom_offset``.  The bin table is
+                not read.
+
+        Yields:
+            DataFrames with every column of ``/pixels`` (``bin1_id``,
+            ``bin2_id``, ``count``, ...), then ``contig1_id`` and ``contig2_id``
+            (``int64``) when asked for.  Nothing for a map without pixels.
+
+        Raises:
+            ValueError: If *chunksize* is below 1.
+        """
+        if chunksize < 1:
+            raise ValueError(f"chunksize must be at least 1, got {chunksize}")
+        pixels = self._clr.pixels()
+        contig_of_bin = self._bin_contig_ids if contig_ids else None
+        for lo in range(0, len(pixels), chunksize):
+            chunk = cast(pd.DataFrame, pixels[lo : lo + chunksize])
+            if contig_of_bin is not None:
+                chunk["contig1_id"] = contig_of_bin[chunk["bin1_id"].to_numpy()]
+                chunk["contig2_id"] = contig_of_bin[chunk["bin2_id"].to_numpy()]
+            yield chunk
+
     def matrix(self, **kw):
         """Return a cooler matrix selector for slicing the contact matrix.
 
@@ -451,6 +488,12 @@ class MetaCooler:
     @functools.cached_property
     def _bin1_offset(self) -> np.ndarray:
         return self._read_index("bin1_offset")
+
+    @functools.cached_property
+    def _bin_contig_ids(self) -> np.ndarray:
+        """Contig id of every bin, from ``chrom_offset`` alone (one ``repeat``)."""
+        offsets = self._chrom_offset
+        return np.repeat(np.arange(len(offsets) - 1, dtype=np.int64), np.diff(offsets))
 
     @functools.cached_property
     def _contig_genome_ids(self) -> np.ndarray:

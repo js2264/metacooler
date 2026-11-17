@@ -42,6 +42,12 @@
   reads anything, until someone checks which table matches the map (a file
   of the user's own of that name is refused alike: rename it).
   `reassign` and `annotate` are now in the I/O API reference.
+- **`MetaCooler.iter_pixels(chunksize=, contig_ids=False)`** yields the pixel
+  table in consecutive chunks of at most `chunksize` rows, read with cooler's
+  selector, so a caller can stream a large map without `pixels()` reading all
+  of it at once. `contig_ids=True` adds `contig1_id`/`contig2_id`, looked up
+  through `indexes/chrom_offset`. See
+  [Reading pixels in chunks](api/metacooler.md#reading-pixels-in-chunks).
 
 ### Changed
 
