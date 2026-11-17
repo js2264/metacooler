@@ -86,6 +86,16 @@
 - **`reassign` no longer crashes on a non-object `qc` metadata value** when it
   recomputes the block; it measures at the default distance threshold, as
   `qc --store` does without `--threshold`.
+- **Type checkers see what every top-level name is.** `metacooler.from_pairs`,
+  `metacooler.MetaCooler` and the rest of `__all__` are loaded lazily through
+  the module's `__getattr__`, so pyright and ty typed each of them as `object`
+  and flagged every call in client code as not callable, while mypy typed each
+  as `Any` (`import-untyped`). An `if TYPE_CHECKING:` block in
+  `metacooler/__init__.py` now names each one at its source for type checkers
+  only: nothing more is imported at run time, so
+  `import metacooler` costs what it did. The package also ships a `py.typed`
+  marker, without which mypy does not read an installed metacooler at all
+  (`import-untyped`).
 
 ## 0.2.0 - 2026-11-16
 
