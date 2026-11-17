@@ -492,18 +492,23 @@ class TestUnorderedWrites:
 class TestBuildContigsTableExtra:
     """Tests for _build_contigs_table with extra columns."""
 
-    def test_extra_columns_numeric_conversion(self):
-        """Test that numeric string columns in the contigs table are converted."""
+    def test_extra_columns_numeric_conversion(self, tmp_path):
+        """Numeric columns of a contigs table are typed as it is read.
+
+        Over every row of the table, before any is matched -- so the builder
+        stores them as they come (see ``TestOneTableOneType``).
+        """
+        from metacooler.io.create import _parse_contig_map
+
         genomes_df = pd.DataFrame(
             {"name": ["MAG_1", "__unbinned__"], "length": [300, 0], "n_contigs": [2, 0]}
         )
-        contig_df = pd.DataFrame(
-            {
-                "contig_name": ["a", "b"],
-                "genome_id": ["MAG_1", "MAG_1"],
-                "gc_content": ["0.52", "0.48"],
-            }
+        table = tmp_path / "c.tsv"
+        table.write_text(
+            "contig_name\tgenome_name\tgc_content\na\tMAG_1\t0.52\nb\tMAG_1\t0.48\n"
         )
+        _, contig_df = _parse_contig_map(table, "contigs")
+        assert contig_df is not None
         df = _build_contigs_table(
             contig_order=["a", "b"],
             contig_lengths={"a": 200, "b": 100},

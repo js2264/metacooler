@@ -475,3 +475,127 @@ class TestPairsFileReading:
             "cB": 600,
         }
         pd.testing.assert_frame_equal(mc.pixels(), self._plain(tmp_path).pixels())
+
+
+class TestOneTableOneType:
+    """One contigs table gave a metadata column different types per command.
+
+    ``create`` types a column over every row of the table as read, so a single
+    ``N/A`` -- even on a row naming a contig the assembly lacks -- keeps the
+    column text. ``collect`` and ``annotate`` typed only the rows that matched,
+    and stored the same column as numbers; ``reassign`` re-typed the stored
+    text column the same way and turned it numeric.
+    """
+
+    TABLE = (
+        "contig_name\tgenome_name\tgc\n"
+        "contig_A\tMAG_1\t0.5\n"
+        "contig_B\tMAG_1\t0.4\n"
+        "contig_C\tMAG_2\t0.6\n"
+        "contig_Z\tMAG_9\tN/A\n"
+    )
+
+    @staticmethod
+    def _gc(path: Path, group: str = "/") -> np.ndarray:
+        import h5py
+
+        with h5py.File(path, "r") as f:
+            return f[group]["contigs"]["gc"][:]
+
+    def _created(self, tmp_path: Path, tiny_cool: Path) -> Path:
+        from metacooler.io.create import from_cool
+
+        table = tmp_path / "c.tsv"
+        table.write_text(self.TABLE)
+        out = tmp_path / "created.metacool"
+        from_cool(tiny_cool, out, contig_genome_map=table, qc=False)
+        return out
+
+    def test_annotate_types_the_column_as_create_does(
+        self, tmp_path: Path, tiny_cool: Path, tiny_contigs_table: Path
+    ):
+        from metacooler.io.annotate import annotate
+        from metacooler.io.create import from_cool
+
+        created = self._created(tmp_path, tiny_cool)
+        annotated = tmp_path / "annotated.metacool"
+        from_cool(tiny_cool, annotated, contig_genome_map=tiny_contigs_table, qc=False)
+        annotate(annotated, inplace=True, contigs_table=tmp_path / "c.tsv")
+        assert self._gc(created).dtype.kind == "S"
+        assert self._gc(annotated).dtype.kind == "S"
+        assert self._gc(annotated).tolist() == self._gc(created).tolist()
+
+    def test_collect_types_the_column_over_every_row(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        cool = make_cool(tmp_path / "E_coli.cool", ECOLI)
+        table = tmp_path / "m.tsv"
+        table.write_text(
+            "contig_name\tgc\n"
+            "chromosome\t0.5\nplasmid1\t0.4\nplasmid2\t0.6\nnot_here\tN/A\n"
+        )
+        out = tmp_path / "out.metacool"
+        collect([cool], out, contigs_table=table)
+        gc = self._gc(out)
+        assert gc.dtype.kind == "S"
+        assert gc.tolist() == [b"0.5", b"0.4", b"0.6"]
+
+    def test_reassign_keeps_a_stored_text_column_text(
+        self, tmp_path: Path, tiny_cool: Path
+    ):
+        from metacooler.io.reassign import reassign
+
+        created = self._created(tmp_path, tiny_cool)
+        out = tmp_path / "reassigned.metacool"
+        reassign(created, {"contig_D": "MAG_2"}, out, qc=False)
+        validate(out)
+        assert self._gc(out).dtype.kind == "S"
+
+
+class TestCollectSingleBinInputs:
+    """An input whose every contig is one bin was refused as variable-binned.
+
+    cooler infers ``bin-size`` from the bins before each contig's last; a cool
+    of a phage or a set of short plasmids has none, so it reads as variable
+    even though its bins are exactly the grid of the sample's bin size.
+    """
+
+    def test_it_joins_the_collection_bin_size(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, 100)
+        phage = make_cool(tmp_path / "phage.cool", {"p1": 60, "p2": 100}, 100)
+        assert cooler.Cooler(str(phage)).binsize is None
+        out = tmp_path / "out.metacool"
+        collect([ecoli, phage], out)
+        validate(out)
+        mc = MetaCooler(out)
+        assert mc.binsize == 100
+        assert mc.info["sum"] == sum(
+            cooler.Cooler(str(p)).info["sum"] for p in (ecoli, phage)
+        )
+
+    def test_a_contig_longer_than_the_bin_size_is_still_refused(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, 100)
+        phage = make_cool(tmp_path / "phage.cool", {"p1": 60, "p2": 150}, 200)
+        with pytest.raises(ValueError, match="not binned alike"):
+            collect([ecoli, phage], tmp_path / "out.metacool")
+
+    def test_a_variable_binned_input_is_still_refused(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, 100)
+        bins = pd.DataFrame({"chrom": ["p1", "p1"], "start": [0, 30], "end": [30, 90]})
+        odd = make_cool(tmp_path / "odd.cool", {"p1": 90}, bins=bins)
+        with pytest.raises(ValueError, match="not binned alike"):
+            collect([ecoli, odd], tmp_path / "out.metacool")

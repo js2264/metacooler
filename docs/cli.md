@@ -449,7 +449,12 @@ file stem (`E_coli.cool` → `E_coli`) unless `--names` says otherwise, and
     is 1, by construction.
 
 **All inputs must share one bin size** — or all have variable
-(restriction-fragment) bins — because a metacool file has a single bin table:
+(restriction-fragment) bins — because a metacool file has a single bin table.
+An input whose every contig is a single bin (a phage, or a handful of short
+plasmids) has no bin size of its own, and cooler reports it as variable; it
+joins a collection of any bin size at least as long as its longest contig,
+since its bins are exactly that grid.
+
 
 ```console
 $ metacooler collect E_coli_1kb.cool B_subtilis_5kb.cool -o species.metacool

@@ -477,7 +477,6 @@ def _plan_map(
 ) -> _MapEdit:
     """Work out, without writing, what annotating does to one map."""
     from metacooler.io.collect import _resolve_contig_metadata
-    from metacooler.io.create import _coerce_numeric_columns
 
     edit = _MapEdit(uri=mc.uri, group=group)
     genomes = mc.genomes
@@ -525,10 +524,11 @@ def _plan_map(
         if frame is None:
             matched = int(table["contig_name"].isin(set(names)).sum())
         else:
+            # Typed when read, over every row (_read_contig_metadata), as
+            # create types it -- not again here over the matched rows only.
             extra_columns = [
                 c for c in frame.columns if c not in ("contig_name", "genome_id")
             ]
-            _coerce_numeric_columns(frame, extra_columns)
             index = frame["contig_name"].to_numpy()
             values = {
                 column: pd.Series(frame[column].to_numpy(), index=index)

@@ -698,6 +698,26 @@ def _coerce_numeric_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
                 df[col] = pd.to_numeric(df[col], errors="raise")
 
 
+def _type_contig_metadata(table: pd.DataFrame, keys: Sequence[str]) -> None:
+    """Type the metadata columns of a contigs table as read, in place.
+
+    The typing step of every command that stores a contigs table (``create``,
+    ``collect``, ``annotate``), and it runs over *every* row of the table, before
+    any is matched to a contig, deduplicated or filtered.  So one table gives one
+    column type whichever command stores it and whichever map it lands in: a
+    row about a contig the map lacks still decides, as it always did in
+    ``create``.  ``collect`` and ``annotate`` used to type only the rows that
+    matched, so a column one unmatched ``N/A`` kept text under ``create`` came
+    out numeric under the other two -- and differed between the entries of one
+    ``.mmetacool`` that a single ``annotate`` call wrote.
+
+    Args:
+        table: The table, its key columns already relabelled.
+        keys: Its key columns, which are never typed.
+    """
+    _coerce_numeric_columns(table, [c for c in table.columns if c not in keys])
+
+
 def _report_genome_table_divergence(
     derived: list[str], extra_genomes_df: pd.DataFrame
 ) -> None:
@@ -911,7 +931,11 @@ def _build_contigs_table(
             # desync attrs['nchroms'] from len(/contigs)).  Last row wins,
             # matching the last-wins semantics of the contig→genome mapping.
             extra = extra.drop_duplicates(subset="name", keep="last")
-            _coerce_numeric_columns(extra, extra_cols)
+            # Typed already, over every row of the table as read (see
+            # _type_contig_metadata): typing here again would look only at
+            # the rows that survived, and a column one unmatched row kept text
+            # would turn numeric -- in collect, which passes matched rows only,
+            # and in reassign, which passes the stored columns back in.
             df = df.merge(extra, on="name", how="left")
 
     # Ensure column order: name, length, genome_id, then extras
@@ -2025,6 +2049,7 @@ def _parse_contig_map(
         cg_map, contig_df = parse_contigs_table(
             contig_genome_map, fmt=contig_table_format
         )
+        _type_contig_metadata(contig_df, keys=("contig_name", "genome_id"))
         logger.info(
             f"Parsed contig-genome map for {len(cg_map)} contigs from {contig_genome_map}"
         )
