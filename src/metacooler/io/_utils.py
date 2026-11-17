@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import gzip
 import importlib
 import itertools
@@ -175,12 +176,22 @@ def read_user_table(
         raise ValueError(f"{kind} has no non-blank lines: {path}")
 
     # Every read below passes keep_default_na=False so that a genome or contig
-    # literally named "NA", "nan" or "None" is not turned into a missing value.
+    # literally named "NA", "nan" or "None" is not turned into a missing value,
+    # and quoting=QUOTE_NONE so that a '"' is an ordinary character. These are
+    # tab-separated tables, not CSV: honouring quotes let one stray '"' in a
+    # free-text column (CheckM2's Additional_Notes, say) swallow every row up
+    # to the next '"' into a single field -- rows the raw field count above
+    # cannot see, so they vanished silently and their contigs went unbinned.
     if not header:
         widest = max(counts)
         _warn_ragged_rows(counts, widest, kind, path, first_line=1)
         return pd.read_csv(
-            path, sep="\t", header=None, dtype=str, keep_default_na=False
+            path,
+            sep="\t",
+            header=None,
+            dtype=str,
+            keep_default_na=False,
+            quoting=csv.QUOTE_NONE,
         )
 
     n_header, data_counts = counts[0], counts[1:]
@@ -196,7 +207,14 @@ def read_user_table(
         )
 
     df = _drop_trailing_unnamed_columns(
-        pd.read_csv(path, sep="\t", header=0, dtype=str, keep_default_na=False),
+        pd.read_csv(
+            path,
+            sep="\t",
+            header=0,
+            dtype=str,
+            keep_default_na=False,
+            quoting=csv.QUOTE_NONE,
+        ),
         kind,
     )
     n_named = df.shape[1]

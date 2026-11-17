@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import dataclasses
 import gzip
 import itertools
@@ -1265,7 +1266,14 @@ def _read_bins_bed(path: str | Path) -> pd.DataFrame:
     Raises:
         ValueError: If the file has fewer than three tab-separated columns.
     """
-    df = pd.read_csv(path, sep="\t", header=None, dtype=str, keep_default_na=False)
+    df = pd.read_csv(
+        path,
+        sep="\t",
+        header=None,
+        dtype=str,
+        keep_default_na=False,
+        quoting=csv.QUOTE_NONE,
+    )
     if df.shape[1] < 3:
         raise ValueError(
             "Bins BED file requires at least 3 tab-separated columns "
