@@ -4,6 +4,33 @@
 
 ### Added
 
+- **`normalize`** (alias `normalise`): normalizations for metagenomic Hi-C,
+  one subcommand per family, each stored as a weight column of `/bins` the way
+  `cooler balance` stores one — multiplicative, `NaN` for a masked bin, the
+  pixels untouched — so cooler, cooltools and HiGlass read them too.
+  - `ice`: iterative correction, by default **per genome** (each MAG's block
+    balanced on its own, contacts between genomes out of the fit, the MAD
+    filter's medians taken per genome); `--scope contig|global` are cooler's.
+    Where the groupings coincide the weights are cooler's, bit for bit.
+  - `metator`: MetaTOR's five network normalizations (`empirical_hit`,
+    `abundance`, `length`, `rs`, `theoretical_hit`), with its constants.
+  - `mge`: the score MetaTOR's `mge` module bins mobile elements with
+    (Bignaud et al., *Nat. Microbiol.* 2025), x<sub>ij</sub> /
+    √(x<sub>ii</sub> x<sub>jj</sub>), exact from the QC block when it was
+    measured at the same threshold.
+  - `normcc`: MetaCC's negative binomial regression (Du & Sun 2023).
+  - `hiczin`: HiCzin's zero-inflated negative binomial regression (Du et al.
+    2022), fitted on the pairs of contigs of one genome.
+  - `list`: the weight columns of a map and how they were computed.
+
+  Restriction sites come from a `/contigs` column (`--sites`) or are counted
+  from `--enzyme` in `--fasta`. Python: `metacooler.normalize_ice`,
+  `normalize_metator`, `normalize_mge`, `normalize_normcc`,
+  `normalize_hiczin`; `metacooler.io.weights` reads and writes the columns.
+- **`--balance NAME`** on `show`, `dump` (a `balanced` column, as
+  `cooler dump --balanced`) and `network`; **`network --drop-spurious`** drops
+  the contig pairs below the spurious-contact cutoff NormCC and HiCzin store.
+
 - **Per-contig QC columns.** Every command that stores the contact-quality
   block — `create pairs`, `create cool`, `collect`, `qc --store`, `reassign` —
   now also writes `qc_intra_contig_short` and `qc_intra_contig_long` to
@@ -50,6 +77,12 @@
   [Reading pixels in chunks](api/metacooler.md#reading-pixels-in-chunks).
 
 ### Changed
+
+- **Normalization weights are dropped when they go stale.** A weight records
+  what it was computed from (`depends_on`): `reassign` drops the weights
+  computed per genome when a contig changes genome — and, when it rewrites the
+  map, restores the attributes of the weights it carries, which cooler does not
+  write — and `annotate` drops those that read a `/contigs` column it changes.
 
 - **`reassign` keeps the QC block instead of recomputing it from the pixels.**
   The per-contig intra-contig counts are carried over and summed per new

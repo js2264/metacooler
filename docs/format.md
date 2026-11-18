@@ -94,6 +94,37 @@ rather than a string chromosome name or categorical code.
 | `chrom` | `int32` | Index into `/contigs`. |
 | `start` | `int32` | Zero-based start position (inclusive). |
 | `end` | `int32` | Zero-based end position (exclusive). |
+| *weight columns* | `float64` | Optional normalization weights, one per bin — see [Normalization weights](#weights). |
+
+#### Normalization weights { #weights }
+
+A normalization is stored as cooler stores a balancing vector: one `float64`
+column of `/bins`, one **multiplicative** weight per bin, `NaN` for a masked
+bin. The normalized value of a pixel is `count × w[bin1_id] × w[bin2_id]`, which
+is what `cooler.Cooler.matrix(balance=NAME)` computes. Several columns may
+coexist; `metacooler normalize` writes them (`weight` for ICE, by default) and
+`show`, `dump` and `network --balance NAME` read them. Pixels are never
+rewritten.
+
+A column metacooler wrote carries HDF5 attributes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `normalization` | The method: `ice`, `metator`, `mge`, `normcc` or `hiczin`. |
+| `divisive_weights` | Always `false`, as `cooler balance` writes it. |
+| `depends_on` | What the weights were computed from: `pixels`, plus `genome_id` for a weight computed per genome (or fitted on the pairs of contigs of one genome), plus `contigs/<column>` for every `/contigs` column read (a coverage, a site count). |
+| `spurious_cutoff`, `spurious_rule` | NormCC and HiCzin: a contig pair whose normalized contact is below the cutoff (`<`) or at most the cutoff (`<=`) is spurious. |
+| *parameters* | The method's parameters and fit statistics: `scope`, `mode`, `converged`, `coefficients`, … |
+| `metacooler_version` | The version that computed them. |
+
+A column without these attributes — one `cooler balance` wrote — is read as
+depending on the pixels alone. Names cooler reads as divisive (`KR`, `VC`,
+`VC_SQRT`) are inverted on read, and refused as names for a metacooler weight.
+
+Weights are derived data: `reassign` drops the columns whose `depends_on`
+includes `genome_id` when a contig changes genome, and `annotate` those that
+name a `/contigs` column it changes. Writers that rebuild the pixels or the
+bins (`binnify`, `merge`, `collect`, `extract`, `flatten`) write none.
 
 ### `/pixels` group
 
