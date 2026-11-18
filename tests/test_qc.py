@@ -1119,26 +1119,31 @@ class TestAUserQcColumn:
         return out
 
     @staticmethod
-    def _assert_kept(path: Path) -> None:
+    def _assert_kept(path: Path) -> pd.DataFrame:
         contigs = MetaCooler(path).contigs.set_index("name")
         assert contigs["qc_pass"].dropna().to_dict() == {"c1": 1, "c2": 0, "c3": 1}
-        assert not set(QC_CONTIG_COLUMNS) & set(contigs.columns)
+        return contigs
 
     def test_merge_keeps_it(self, tmp_path: Path, source: Path):
+        """Kept as it is, beside the two QC columns, which merge sums."""
         from metacooler.io.merge import merge
 
         copy = tmp_path / "copy.metacool"
         copy.write_bytes(source.read_bytes())
         out = tmp_path / "merged.metacool"
         merge([source, copy], out)
-        self._assert_kept(out)
+        counts = list(QC_CONTIG_COLUMNS)
+        pd.testing.assert_frame_equal(
+            self._assert_kept(out)[counts],
+            2 * MetaCooler(source).contigs.set_index("name")[counts],
+        )
 
     def test_binnify_keeps_it(self, tmp_path: Path, source: Path):
         from metacooler.ops.binnify import binnify
 
         out = tmp_path / "rebinned.metacool"
         binnify(uri=source, output=out, binsize=2000)
-        self._assert_kept(out)
+        assert not set(QC_CONTIG_COLUMNS) & set(self._assert_kept(out).columns)
 
 
 # ----------------------------------------------------------------------

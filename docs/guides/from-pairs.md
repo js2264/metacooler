@@ -56,7 +56,7 @@ The files are read back to back in one pass, as if concatenated, so the map,
 the contact-quality block, the P(s) table and the dropped-pairs report all
 cover every library exactly. That is what sets this apart from creating one map
 per library and [merging](../cli.md#merge) them, which sums the same contacts
-but drops the QC block and yields no P(s) table.
+and the same [QC block](../cli.md#merge-qc), but yields no P(s) table.
 
 Their `#chromsize:` headers are united; a file may lack one, but a contig given
 two different lengths by two files is an error, as is the same file given

@@ -65,7 +65,12 @@ logger = logging.getLogger("metacooler")
 
 # Version of the ``metadata["qc"]`` block written by this module.  Bump it if
 # the meaning of a key changes, so a reader can tell an old block apart from a
-# new one rather than silently comparing two different quantities.
+# new one rather than silently comparing two different quantities.  Bump it
+# too for a new key that adds up over libraries, as the four categories and
+# the pairs counts do: ``merge`` sums only the counts it knows of, and carries
+# any other key once, as every input records it, so a release that did not
+# know the key would keep one library's value where the sum belongs.  It sums
+# blocks of its own version only, so the bump has it drop them instead.
 #   2: contacts between two different __unbinned__ contigs moved from
 #      inter_contig_intra_genome to inter_genome.
 QC_VERSION = 2
@@ -106,6 +111,12 @@ QC_GENOME_COLUMNS = tuple(f"{QC_COLUMN_PREFIX}{c}" for c in QC_CATEGORIES) + (
 # in ``/genomes``.
 QC_CONTIG_COLUMNS = QC_GENOME_COLUMNS[:2]
 
+# The extra keys a ``create pairs`` block records that count something: the
+# pairs read and the pairs discarded while binning.  Like the four categories,
+# they add up over libraries; every other extra key (``binsize``) says how the
+# contacts were counted.
+QC_PAIRS_COUNT_KEYS = ("n_pairs_read", "n_pairs_discarded")
+
 # Records classified per pass.  Every temporary of one block -- a handful of
 # int64 and bool arrays this long -- stays in a core's L2 cache, where a whole
 # 50 M-row chunk at once streams gigabytes of them through main memory: the
@@ -142,10 +153,13 @@ def _is_count(value: object) -> bool:
     return isinstance(value, float | np.floating) and math.isfinite(value)
 
 
-def _counts_problem(block: dict, keys: Sequence[str]) -> str | None:
+def _counts_problem(
+    block: dict, keys: Sequence[str], *, whole: bool = False
+) -> str | None:
     """Why the values of *keys* in *block* are not counts, or ``None``.
 
-    A count is a finite number, not negative.
+    A count is a finite number, not negative; with *whole*, an integer too,
+    as a count of pairs (:data:`QC_PAIRS_COUNT_KEYS`) is.
     """
     not_numbers = [key for key in keys if not _is_count(block.get(key))]
     if not_numbers:
@@ -153,6 +167,9 @@ def _counts_problem(block: dict, keys: Sequence[str]) -> str | None:
     negative = [key for key in keys if block[key] < 0]
     if negative:
         return f"negative: {', '.join(negative)}"
+    fractional = [key for key in keys if whole and not _is_integer(block[key])]
+    if fractional:
+        return f"not an integer, as a count of pairs is: {', '.join(fractional)}"
     return None
 
 
@@ -948,12 +965,13 @@ def strip_qc_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Drop every ``qc_*`` column from a genomes table.
 
     Called by the writers that derive a new file from an existing one
-    (``binnify``, ``merge``, ``reassign``).  Their output has a different bin
-    grid, a different pixel table or different genomes, so counts copied
-    across would describe contacts the output does not contain — a stale
-    number is worse than no number, because nothing about it looks stale.
-    (``reassign`` then stores a block for its own output, carrying the
-    per-contig :data:`QC_CONTIG_COLUMNS` over when it can.)
+    (``binnify``, ``reassign``).  Their output has a different bin grid or
+    different genomes, so counts copied across would describe contacts the
+    output does not contain — a stale number is worse than no number, because
+    nothing about it looks stale.  (``reassign`` then stores a block for its
+    own output, carrying the per-contig :data:`QC_CONTIG_COLUMNS` over when it
+    can.  ``merge`` drops each input's columns too, and stores their sum: see
+    :meth:`ContactQC.add`.)
 
     For ``/contigs``, see :func:`strip_contig_qc_columns`.
 

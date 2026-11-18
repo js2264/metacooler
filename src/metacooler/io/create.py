@@ -2814,7 +2814,7 @@ def from_pairs(
             in one pass, as if they were one concatenated file: their contacts
             are summed, and the QC block, the P(s) table and the drop report
             cover them all, exactly -- where per-library maps joined by
-            ``merge`` lose the QC block and have no P(s) table.  Their
+            ``merge`` have the same QC block but no P(s) table.  Their
             ``#chromsize:`` headers are united, and one contig given two
             different lengths is refused, as is the same file given twice.
         contig_genome_map: Either a ``dict[contig_name → genome_name]`` or a path
