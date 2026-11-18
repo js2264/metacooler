@@ -344,18 +344,6 @@ def compact_groups(keys: np.ndarray) -> np.ndarray:
 # ----------------------------------------------------------------------------
 
 
-def _nb_deviance(y: np.ndarray, mu: np.ndarray, alpha: float) -> float:
-    """Deviance of a negative binomial fit with variance ``mu + alpha mu**2``."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        term = np.where(y > 0, y * np.log(y / mu), 0.0)
-    return float(
-        2.0
-        * np.sum(
-            term - (y + 1.0 / alpha) * np.log((1.0 + alpha * y) / (1.0 + alpha * mu))
-        )
-    )
-
-
 def fit_nb_glm(
     y: np.ndarray,
     X: np.ndarray,
@@ -371,11 +359,18 @@ def fit_nb_glm(
     an observation is ``mu + alpha * mu**2``.  IRLS and the L-BFGS fit MetaCC
     runs maximise the same likelihood, so they reach the same coefficients.
 
+    With a known dispersion that likelihood is strictly concave in the
+    coefficients, so it has one maximum.  IRLS is Fisher scoring, which on
+    this non-canonical link converges only linearly: once the deviance stops
+    moving, the coefficients can still be ~1e-5 off.  The fit therefore stops
+    on the coefficients themselves.
+
     Args:
         y: Non-negative responses.
         X: Design matrix, intercept column included.
         alpha: The fixed dispersion.
-        tol: Relative change in deviance at which the fit has converged.
+        tol: Largest change of a coefficient in one iteration, relative to the
+            largest coefficient, at which the fit has converged.
         max_iter: Iteration limit.
 
     Returns:
@@ -390,22 +385,21 @@ def fit_nb_glm(
         raise ValueError("Every response is zero; there is no signal to fit.")
     mu = (y + y.mean()) / 2.0
     eta = np.log(mu)
-    beta = np.zeros(X.shape[1])
-    deviance = np.inf
+    beta = np.full(X.shape[1], np.inf)
     for _ in range(max_iter):
         weights = mu / (1.0 + alpha * mu)
         z = eta + (y - mu) / mu
         xtw = X.T * weights
         try:
-            beta = np.linalg.solve(xtw @ X, xtw @ z)
+            new = np.linalg.solve(xtw @ X, xtw @ z)
         except np.linalg.LinAlgError:
-            beta = np.linalg.lstsq(xtw @ X, xtw @ z, rcond=None)[0]
+            new = np.linalg.lstsq(xtw @ X, xtw @ z, rcond=None)[0]
+        change = np.max(np.abs(new - beta))
+        beta = new
         eta = X @ beta
         mu = np.exp(eta)
-        new = _nb_deviance(y, mu, alpha)
-        if abs(new - deviance) <= tol * (abs(new) + 0.1):
+        if change <= tol * (1.0 + np.max(np.abs(beta))):
             return beta
-        deviance = new
     logger.warning(
         "The negative binomial fit did not converge in %d iterations.", max_iter
     )

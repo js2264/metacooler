@@ -247,16 +247,41 @@ def _nb_negloglik(beta, y, X, alpha=1.0):
     )
 
 
-def test_nb_glm_reaches_the_maximum_likelihood():
-    from scipy.optimize import minimize
+def _nb_mle(y, X, alpha=1.0):
+    """Maximum likelihood of a log-link NB model of known dispersion, by Newton.
 
+    The log-likelihood is strictly concave in the coefficients (its second
+    derivative in the linear predictor, -mu (1 + alpha y) / (1 + alpha mu)**2,
+    is negative), so the one stationary point Newton's method converges to,
+    quadratically, is the maximum -- to machine precision, where a quasi-Newton
+    optimiser stops "due to precision loss" wherever its scipy version does.
+    """
+    beta = np.zeros(X.shape[1])
+    beta[0] = np.log(y.mean())
+    for _ in range(100):
+        mu = np.exp(X @ beta)
+        score = X.T @ ((y - mu) / (1 + alpha * mu))
+        info = (X.T * (mu * (1 + alpha * y) / (1 + alpha * mu) ** 2)) @ X
+        step = np.linalg.solve(info, score)
+        t = 1.0
+        while (
+            _nb_negloglik(beta + t * step, y, X, alpha)
+            > _nb_negloglik(beta, y, X, alpha)
+            and t > 1e-8
+        ):
+            t /= 2
+        beta = beta + t * step
+        if np.max(np.abs(t * step)) < 1e-13 * (1 + np.max(np.abs(beta))):
+            break
+    return beta
+
+
+def test_nb_glm_reaches_the_maximum_likelihood():
     rng = np.random.default_rng(2)
     X = np.column_stack([np.ones(2000), rng.normal(size=(2000, 2))])
     mu = np.exp(X @ np.array([1.5, 0.4, -0.7]))
     y = rng.negative_binomial(1.0, 1.0 / (1.0 + mu)).astype(float)
-    irls = engine.fit_nb_glm(y, X)
-    ml = minimize(_nb_negloglik, np.zeros(3), args=(y, X), method="BFGS").x
-    assert_allclose(irls, ml, rtol=1e-4, atol=1e-6)
+    assert_allclose(engine.fit_nb_glm(y, X), _nb_mle(y, X), rtol=1e-7)
 
 
 def test_nb_glm_refuses_an_all_zero_response():
@@ -559,12 +584,39 @@ def test_ice_by_genome_is_cooler_global_when_there_is_one_genome(
     tmp_path: Path, community: MetaHiC
 ):
     path = _rebuild(tmp_path, community, lambda n: "G", "one_genome")
-    # cooler's MAD filter takes its medians per contig, ours per genome.
-    ours = N.normalize_ice(path, store=False, mad_max=0, tol=1e-12, max_iters=2000)
+    # cooler's MAD filter takes its medians per contig, ours per genome, so it
+    # is off.  And one diagonal: cooler before 0.12 also dropped the pixel
+    # between the last bin of a contig and the first of the next, which is
+    # |bin2 - bin1| = 1 but not a diagonal of either (cooler #211); with a
+    # single diagonal ignored, every cooler version drops the same pixels.
+    ours = N.normalize_ice(
+        path, store=False, mad_max=0, ignore_diags=1, tol=1e-12, max_iters=2000
+    )
     ref, _ = cooler.balance_cooler(
-        cooler.Cooler(str(path)), mad_max=0, tol=1e-12, max_iters=2000
+        cooler.Cooler(str(path)), mad_max=0, ignore_diags=1, tol=1e-12, max_iters=2000
     )
     assert_allclose(ours.weights, ref, rtol=1e-9)
+
+
+def test_ice_ignore_diags_stops_at_a_contig_boundary(community: MetaHiC):
+    # As cooler does since 0.12: two adjacent bins of two contigs are not on
+    # a diagonal of the matrix of either contig, so their pixel is kept.
+    mc = MetaCooler(community.metacool)
+    contig = mc._bin_contig_ids
+    groups = N._contig_groups(mc)[contig]
+    kept = N._GroupPixels(mc, groups, contig, ignore_diags=2, chunksize=97)
+    parts = list(kept._chunks())
+    b1 = np.concatenate([part[0] for part in parts])
+    b2 = np.concatenate([part[1] for part in parts])
+    px = mc.pixels()
+    p1, p2 = px["bin1_id"].to_numpy(), px["bin2_id"].to_numpy()
+    same_group = groups[p1] == groups[p2]
+    near = (np.abs(p2 - p1) < 2) & (contig[p1] == contig[p2])
+    expected = same_group & ~near
+    assert_array_equal(b1, p1[expected])
+    assert_array_equal(b2, p2[expected])
+    across = (np.abs(b2 - b1) == 1) & (contig[b1] != contig[b2])
+    assert across.any()
 
 
 def test_ice_by_genome_ignores_contacts_between_genomes(
@@ -902,8 +954,6 @@ def test_mge_refuses_bad_parameters(mapfile: Path):
 
 def _normcc_reference(mc: MetaCooler, sites, min_length=1000, min_signal=2):
     """MetaCC's NormCC, written out on a dense contig matrix."""
-    from scipy.optimize import minimize
-
     dense = _contig_matrix(mc)
     lengths = mc.contigs["length"].to_numpy(float)
     intra = np.diag(dense).copy()
@@ -918,13 +968,7 @@ def _normcc_reference(mc: MetaCooler, sites, min_length=1000, min_signal=2):
     columns += [np.log(lengths), np.log(np.where(keep, intra, 1))]
     X = np.column_stack(columns)[keep]
     signal = (off[:, keep]).sum(axis=1)[keep]
-    beta = minimize(
-        _nb_negloglik,
-        np.zeros(X.shape[1]),
-        args=(signal, X),
-        method="BFGS",
-        options={"gtol": 1e-10},
-    ).x
+    beta = _nb_mle(signal, X)
     mu = np.exp(X @ beta)
     w = np.full(len(lengths), np.nan)
     w[keep] = np.sqrt(mu.max() / mu)
@@ -943,8 +987,8 @@ def test_normcc_matches_metaccs_model(mapfile: Path, community: MetaHiC):
         ["DpnII", "HinfI"],
     ).astype(float)
     beta, w, off, keep = _normcc_reference(mc, sites)
-    assert_allclose(_floats(result.attrs["coefficients"]), beta, rtol=1e-4, atol=1e-6)
-    assert_allclose(result.weights, w[mc._bin_contig_ids], rtol=1e-4)
+    assert_allclose(_floats(result.attrs["coefficients"]), beta, rtol=1e-7)
+    assert_allclose(result.weights, w[mc._bin_contig_ids], rtol=1e-7)
     assert result.attrs["covariates"] == [
         "intercept",
         "log_sites",
@@ -955,7 +999,7 @@ def test_normcc_matches_metaccs_model(mapfile: Path, community: MetaHiC):
     sel = keep[i] & keep[j] & (off[i, j] > 0)
     normalized = off[i, j][sel] * w[i][sel] * w[j][sel]
     assert result.attrs["spurious_cutoff"] == pytest.approx(
-        np.percentile(normalized, 5), rel=1e-4
+        np.percentile(normalized, 5), rel=1e-7
     )
     assert result.attrs["spurious_rule"] == "<"
 
@@ -968,7 +1012,7 @@ def test_normcc_without_sites(mapfile: Path):
         "log_length",
         "log_intra_contacts",
     ]
-    assert_allclose(_floats(result.attrs["coefficients"]), beta, rtol=1e-4, atol=1e-6)
+    assert_allclose(_floats(result.attrs["coefficients"]), beta, rtol=1e-7)
 
 
 def test_normcc_needs_contigs_to_fit(mapfile: Path):

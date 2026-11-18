@@ -891,7 +891,9 @@ Every method takes:
 
 Where the groupings coincide, the result is cooler's own, to the bit: with every
 contig a genome of its own it is `cooler balance --cis-only`, and with a single
-genome (and `--mad-max 0`) it is `cooler balance`.
+genome (and `--mad-max 0`) it is `cooler balance`. That is cooler 0.12's
+`--ignore-diags`, which stops at a contig boundary; before 0.12, cooler also
+dropped the pixel between the last bin of a contig and the first of the next.
 
 `normalize metator`:
 
