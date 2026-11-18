@@ -44,9 +44,12 @@ before those columns existed has its block recomputed from the pixels.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
+import signal
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -100,6 +103,8 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from metacooler.api import MetaCooler
 
 logger = logging.getLogger("metacooler")
@@ -579,6 +584,68 @@ def _materialise_copy(mc: MetaCooler, target: Path) -> None:
             dst.attrs[key] = value
 
 
+#: Where the relabel path builds the new ``/genomes``, ``/contigs`` and
+#: ``genome_offset`` before swapping them in.
+_SCRATCH = ".reassign-scratch"
+
+
+@contextlib.contextmanager
+def _sigint_deferred() -> Generator[None, None, None]:
+    """Hold a SIGINT (Ctrl-C) until the block ends, then deliver it.
+
+    The block swaps the tables of a map in: interrupted halfway, it would
+    leave a map that does not open. Python handles signals in its main thread
+    only, and only there can their handlers be set: elsewhere the block runs
+    as it is. So it does under a handler that Python did not install (one
+    that a host embedding Python set from C), which could not be restored.
+    """
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or signal.getsignal(signal.SIGINT) is None
+    ):
+        yield
+        return
+    received: list[int] = []
+    previous = signal.signal(signal.SIGINT, lambda signum, _: received.append(signum))
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if received:
+            signal.raise_signal(signal.SIGINT)
+
+
+def _build_relabelled_contigs(
+    stored: h5py.Group, new: h5py.Group, contigs: pd.DataFrame
+) -> None:
+    """Write the relabelled ``/contigs`` into *new*, in the column order of *contigs*.
+
+    ``genome_id`` is written anew, and so is a QC column the file does not hold
+    with these values; every other column is the file's, linked as stored (the
+    dataset itself, not a copy, which HDF5 would leave behind as dead space
+    once the old group is deleted). A stored QC column that *contigs* lacks is
+    left out. The group's attributes are the stored group's.
+
+    Args:
+        stored: The map's ``/contigs`` group.
+        new: The empty group to fill (created with ``track_order=True``).
+        contigs: The rebuilt ``/contigs`` table, in the file's row order.
+    """
+    for column in contigs.columns:
+        wanted = contigs[column].to_numpy()
+        if column == "genome_id":
+            write_column(new, column, wanted.astype(np.int32))
+        elif column in stored and (
+            column not in QC_CONTIG_COLUMNS
+            or np.array_equal(stored[column][()], wanted)
+        ):
+            new[column] = stored[column]
+        else:
+            write_column(new, column, wanted)
+    for key, value in stored.attrs.items():
+        new.attrs[key] = value
+
+
 def _write_relabelled(
     path: Path,
     group_path: str,
@@ -591,13 +658,24 @@ def _write_relabelled(
     """Rewrite the genome-dependent parts of a map, in place, leaving bins alone.
 
     Everything the reassignment cannot touch — ``/bins``, ``/pixels``,
-    ``chrom_offset``, ``bin1_offset``, every extra ``/contigs`` column — is left
-    exactly where it is, because the contig rows keep their positions.  Only
-    ``/genomes`` (whose rows are derived), ``/contigs/genome_id``,
-    ``indexes/genome_offset`` and the affected attributes are written, and the
-    per-contig QC columns are made to match *contigs*: written where it has
-    them and the file's differ, removed where it has none.  So the table on
-    disk is the one the regroup path would write.
+    ``chrom_offset``, ``bin1_offset``, every extra ``/contigs`` column — keeps
+    its values, because the contig rows keep their positions.  The values
+    written are ``/genomes`` (whose rows are derived), ``/contigs/genome_id``,
+    ``indexes/genome_offset`` and the affected attributes, and the per-contig
+    QC columns are made to match *contigs*: written where it has them and the
+    file's differ, removed where it has none.
+
+    ``/contigs`` is rebuilt with the columns of *contigs*, in its order, the
+    order the regroup path writes: columns are listed in creation order, so
+    rewriting ``genome_id`` alone moved it after every other column.  A column
+    the relabelling leaves alone is the stored dataset, linked into the new
+    group — dtype, chunks, filters.  So the tables on disk are the ones the
+    regroup path would write.
+
+    Both tables and ``genome_offset`` are built in a scratch group, so a
+    failure while building them leaves the map as it was; they are then
+    swapped in, with the attributes, while a SIGINT is held, so Ctrl-C does
+    not leave a map halfway between two assignments.
 
     Args:
         path: File to modify.
@@ -629,34 +707,36 @@ def _write_relabelled(
                 "rows; refusing to write genome ids that would not line up."
             )
 
-        del grp["genomes"]
-        genomes_group = grp.create_group("genomes", track_order=True)
-        for column in genomes.columns:
-            write_column(genomes_group, column, genomes[column].values)
-
-        del grp["contigs"]["genome_id"]
-        write_column(
-            grp["contigs"], "genome_id", contigs["genome_id"].to_numpy(np.int32)
-        )
-        for column in QC_CONTIG_COLUMNS:
-            stored = grp["contigs"].get(column)
-            wanted = contigs[column].to_numpy() if column in contigs else None
-            if stored is not None and (
-                wanted is None or not np.array_equal(stored[()], wanted)
-            ):
-                del grp["contigs"][column]
-                stored = None
-            if stored is None and wanted is not None:
-                write_column(grp["contigs"], column, wanted)
-
-        indexes = grp["indexes"]
-        if "genome_offset" in indexes:
-            del indexes["genome_offset"]
-        write_column(indexes, "genome_offset", genome_offset, dtype=np.int64)
-
-        grp.attrs["ngenomes"] = len(genomes)
-        grp.attrs["contig-ordering"] = ordering
-        grp.attrs["metadata"] = json.dumps(metadata)
+        if _SCRATCH in grp:
+            del grp[_SCRATCH]
+        try:
+            scratch = grp.create_group(_SCRATCH)
+            genomes_group = scratch.create_group("genomes", track_order=True)
+            for column in genomes.columns:
+                write_column(genomes_group, column, genomes[column].values)
+            for key, value in grp["genomes"].attrs.items():
+                genomes_group.attrs[key] = value
+            _build_relabelled_contigs(
+                grp["contigs"],
+                scratch.create_group("contigs", track_order=True),
+                contigs,
+            )
+            write_column(scratch, "genome_offset", genome_offset, dtype=np.int64)
+        except BaseException:
+            if _SCRATCH in grp:
+                del grp[_SCRATCH]
+            raise
+        with _sigint_deferred():
+            for table in ("genomes", "contigs"):
+                del grp[table]
+                grp.move(f"{_SCRATCH}/{table}", table)
+            if "genome_offset" in grp["indexes"]:
+                del grp["indexes"]["genome_offset"]
+            grp.move(f"{_SCRATCH}/genome_offset", "indexes/genome_offset")
+            grp.attrs["ngenomes"] = len(genomes)
+            grp.attrs["contig-ordering"] = ordering
+            grp.attrs["metadata"] = json.dumps(metadata)
+            del grp[_SCRATCH]
 
 
 def _rewrite_regrouped(

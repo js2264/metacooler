@@ -29,6 +29,7 @@ from click.testing import CliRunner
 
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
+from metacooler.io import reassign as reassign_module
 from metacooler.io.create import from_pairs
 from metacooler.io.reassign import reassign
 from metacooler.ops.qc import qc
@@ -39,7 +40,7 @@ from metacooler.qc import (
     QC_METADATA_KEY,
     ContactQC,
 )
-from metacooler.schema import Layout, validate
+from metacooler.schema import Layout, read_table, validate
 
 # Distinct lengths, so every genome-then-length layout is fully determined.
 LENGTHS = {
@@ -473,3 +474,278 @@ def test_an_interrupted_reassignment_writes_nothing(
 
     assert out.read_bytes() == b"previous output"
     assert not out.with_name(out.name + ".partial").exists()
+
+
+# ---------------------------------------------------------------------------
+# The relabel path writes the tables as a direct creation does
+# ---------------------------------------------------------------------------
+
+
+def _contigs_table(path: Path, assignment: dict[str, str]) -> Path:
+    """A contigs table of *assignment*, with an extra column, ``gc``."""
+    path.write_text(
+        "contig_name\tgenome_name\tgc\n"
+        + "".join(
+            f"{contig}\t{assignment.get(contig, 'NA')}\t0.{i}\n"
+            for i, contig in enumerate(LENGTHS, start=1)
+        )
+    )
+    return path
+
+
+def _column_order(path: Path) -> dict[str, list[str]]:
+    return {table: list(read_table(path, table).columns) for table in TABLES}
+
+
+TABLES = ("genomes", "contigs")
+
+
+@pytest.mark.parametrize("inplace", [False, True], ids=["new-file", "in-place"])
+def test_relabelled_tables_keep_the_column_order_of_a_direct_creation(
+    tmp_path: Path, pairs_file: Path, inplace: bool
+):
+    """``genome_id`` stays third, and every column where ``create`` puts it.
+
+    The relabel path deleted ``genome_id``, and every QC column it changed, and
+    wrote them again in a group listed in creation order: they moved after the
+    other columns, where ``create`` and the regroup path put ``genome_id``
+    third. The values were right; the tables differed only in their order.
+    """
+    from_pairs(
+        tmp_path / "a.metacool",
+        bins=ONE_BIN_PER_CONTIG,
+        pairs=pairs_file,
+        contig_genome_map=_contigs_table(tmp_path / "a.tsv", ASSIGNMENT_A),
+        contig_ordering="fasta",
+        qc_distance_threshold=THRESHOLD,
+        ps=False,
+    )
+    from_pairs(
+        tmp_path / "direct.metacool",
+        bins=ONE_BIN_PER_CONTIG,
+        pairs=pairs_file,
+        contig_genome_map=_contigs_table(tmp_path / "b.tsv", ASSIGNMENT_B),
+        contig_ordering="fasta",
+        qc_distance_threshold=THRESHOLD,
+        ps=False,
+    )
+    source = tmp_path / "a.metacool"
+    out = source if inplace else tmp_path / "out.metacool"
+    reassign(
+        source,
+        ASSIGNMENT_B,
+        None if inplace else out,
+        inplace=inplace,
+        missing="unbinned",
+    )
+
+    order = _column_order(out)
+    assert order["contigs"][:3] == ["name", "length", "genome_id"]
+    assert order == _column_order(tmp_path / "direct.metacool")
+    for table in TABLES:
+        pd.testing.assert_frame_equal(
+            read_table(out, table), read_table(tmp_path / "direct.metacool", table)
+        )
+    assert ".reassign-scratch" not in h5py.File(out, "r")
+    _assert_sound(out)
+
+
+def test_relabelling_keeps_the_columns_it_leaves_alone_as_stored(
+    tmp_path: Path, pairs_file: Path
+):
+    """A column the relabelling does not change keeps its storage too.
+
+    A guard: the relabel path left these columns where they were before it
+    rebuilt the table, so this passes without the rebuild too; it holds the
+    rebuild to keeping them rather than writing them again.
+    """
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    with h5py.File(source, "r+") as f:
+        # Stored otherwise than metacooler writes it: no chunks, no filter.
+        f["contigs"].create_dataset("depth", data=np.arange(len(LENGTHS)) * 1.5)
+    out = tmp_path / "out.metacool"
+    reassign(source, ASSIGNMENT_B, out, missing="unbinned")
+
+    with h5py.File(source, "r") as old, h5py.File(out, "r") as new:
+        for column in ("name", "length", "depth"):
+            stored, copied = old["contigs"][column], new["contigs"][column]
+            assert copied.dtype == stored.dtype
+            assert copied.chunks == stored.chunks
+            assert copied.compression == stored.compression
+            assert np.array_equal(copied[()], stored[()])
+
+
+def test_a_failed_relabelling_in_place_leaves_the_tables_as_they_were(
+    tmp_path: Path, pairs_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The tables are built aside and swapped in together, once both are built."""
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    before = {table: read_table(source, table) for table in TABLES}
+
+    write_column = reassign_module.write_column
+
+    def interrupted(group, name, *args, **kwargs):
+        if name == "genome_id":
+            raise KeyboardInterrupt
+        return write_column(group, name, *args, **kwargs)
+
+    # Stopped while writing the contigs' genome ids: once /genomes is written.
+    monkeypatch.setattr(reassign_module, "write_column", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+
+    for table in TABLES:
+        pd.testing.assert_frame_equal(read_table(source, table), before[table])
+    assert ".reassign-scratch" not in h5py.File(source, "r")
+    _assert_sound(source)
+
+
+def test_relabelling_in_place_clears_a_scratch_group_left_behind(
+    tmp_path: Path, pairs_file: Path
+):
+    """A run killed while building the tables leaves its scratch group: the next
+    run removes it before building its own."""
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    with h5py.File(source, "r+") as f:
+        f.create_group(".reassign-scratch/contigs")
+
+    reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+
+    assert ".reassign-scratch" not in h5py.File(source, "r")
+    _assert_sound(source)
+
+
+def test_relabelling_in_place_links_the_columns_it_leaves_alone(
+    tmp_path: Path, pairs_file: Path
+):
+    """The columns the relabelling leaves alone are the stored datasets, linked
+    into the rebuilt table, not copies: a copy leaves the old dataset behind as
+    dead space HDF5 does not reclaim, so every relabelling in place grew the
+    file by its contigs' columns. devel, which edited the table in place,
+    passes this too."""
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    rng = np.random.default_rng(0)
+    notes = rng.integers(ord("a"), ord("z") + 1, size=(len(LENGTHS), 100_000))
+    with h5py.File(source, "r+") as f:
+        # 500 kB that compression cannot shrink, stored contiguous.
+        f["contigs"].create_dataset(
+            "notes", data=notes.astype(np.uint8).view("S100000")[:, 0]
+        )
+    reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+    with h5py.File(source, "r") as f:
+        offset = f["contigs"]["notes"].id.get_offset()
+    size = source.stat().st_size
+
+    for assignment in (ASSIGNMENT_A, ASSIGNMENT_B):
+        reassign(source, assignment, inplace=True, missing="unbinned")
+    with h5py.File(source, "r") as f:
+        assert f["contigs"]["notes"].id.get_offset() == offset
+    assert source.stat().st_size - size < 100_000
+    _assert_sound(source)
+
+
+def test_the_group_attributes_of_the_tables_are_kept(tmp_path: Path, pairs_file: Path):
+    """Rebuilt, ``/contigs`` and ``/genomes`` keep the attributes of the groups
+    they replace, as ``annotate`` keeps them."""
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    with h5py.File(source, "r+") as f:
+        f["contigs"].attrs["provenance"] = "assembly v2"
+        f["genomes"].attrs["provenance"] = "binning v1"
+    reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+    with h5py.File(source, "r") as f:
+        assert f["contigs"].attrs["provenance"] == "assembly v2"
+        assert f["genomes"].attrs["provenance"] == "binning v1"
+
+
+def test_ctrl_c_while_the_tables_are_swapped_in_is_held_until_they_are(
+    tmp_path: Path, pairs_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A SIGINT that arrives while the new tables replace the old ones is
+    delivered once they all have: the map holds the new assignment, whole.
+    Delivered at once, it left a map whose ``/genomes`` was the new one and
+    whose ``ngenomes`` the old, which no command could open."""
+    import signal
+
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    expected = tmp_path / "b.metacool"
+    reassign(source, ASSIGNMENT_B, expected, missing="unbinned")
+    move = h5py.Group.move
+
+    def interrupted(self, source_name, dest_name):
+        monkeypatch.setattr(h5py.Group, "move", move)
+        move(self, source_name, dest_name)
+        signal.raise_signal(signal.SIGINT)
+
+    monkeypatch.setattr(h5py.Group, "move", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    _assert_sound(source)
+    for table in TABLES:
+        pd.testing.assert_frame_equal(
+            read_table(source, table), read_table(expected, table)
+        )
+    assert ".reassign-scratch" not in h5py.File(source, "r")
+
+
+def test_relabelling_in_place_from_a_thread(tmp_path: Path, pairs_file: Path):
+    """Only the main thread may set a signal handler: elsewhere the swap runs
+    without holding SIGINT, instead of failing with ``signal only works in main
+    thread``.
+
+    A guard: before the swap held SIGINT, nothing set a handler, so this
+    passes without it too; it holds the hold to the main thread.
+    """
+    import threading
+
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join()
+    assert errors == []
+    _assert_sound(source)
+
+
+def test_relabelling_in_place_under_a_handler_python_did_not_install(
+    tmp_path: Path, pairs_file: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A host that embeds Python (R through reticulate, say) may set the
+    SIGINT handler from C: ``getsignal`` then returns ``None``, which
+    ``signal.signal`` cannot restore. The swap runs without holding SIGINT
+    there, leaving the host's handler alone."""
+    import signal
+
+    source = _create(
+        tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
+    )
+    monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+
+    def refused(*args):
+        raise AssertionError("the SIGINT handler must be left alone")
+
+    monkeypatch.setattr(signal, "signal", refused)
+    reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
+    _assert_sound(source)
