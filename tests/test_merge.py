@@ -16,6 +16,19 @@ def _replica(path, tmp_path):
     return copy
 
 
+def _cooler_info_decodes_bytes() -> bool:
+    """Whether cooler's ``info()`` decodes an attribute stored as bytes."""
+    import io
+
+    import h5py
+    import numpy as np
+    from cooler.api import info
+
+    with h5py.File(io.BytesIO(), "w") as f:
+        f.attrs["storage-mode"] = np.bytes_(b"square")
+        return info(f)["storage-mode"] == "square"
+
+
 class TestMerge:
     def test_merge_identical(self, tiny_metacooler, tmp_path):
         out = tmp_path / "merged.metacool"
@@ -174,3 +187,164 @@ class TestMetadataColumns:
         )
         with pytest.raises(ValueError, match="Contigs table mismatch"):
             merge([tiny_metacooler, moved], tmp_path / "m.metacool")
+
+
+class TestMergeWithoutPixels:
+    """Maps that hold no pixel merge into a map that holds none.
+
+    ``cooler.merge_coolers`` concatenates the inputs' pixel chunks, and it
+    failed with "No objects to concatenate" when no input had any: libraries
+    with no contact left, or the per-library maps of an empty run.
+    """
+
+    @staticmethod
+    def _map(tmp_path, name, pairs_body=""):
+        from metacooler.io.create import from_pairs
+
+        directory = tmp_path / name
+        directory.mkdir()
+        bed = directory / "bins.bed"
+        bed.write_text("c1\t0\t1000\nc2\t0\t500\nc3\t0\t300\n")
+        table = directory / "contigs.tsv"
+        table.write_text("contig_name\tgenome_name\nc1\tMAG_1\nc2\tMAG_1\nc3\tMAG_2\n")
+        pairs = directory / "lib.pairs"
+        pairs.write_text(
+            "## pairs format v1.0\n#columns: readID chrom1 pos1 chrom2 pos2\n"
+            + pairs_body
+        )
+        path = tmp_path / f"{name}.metacool"
+        from_pairs(path, bins=bed, pairs=pairs, contig_genome_map=table, ps=False)
+        return path
+
+    def test_maps_without_pixels_merge(self, tmp_path):
+        import cooler
+
+        from metacooler.api import MetaCooler
+        from metacooler.schema import read_table, validate
+
+        a = self._map(tmp_path, "a")
+        b = self._map(tmp_path, "b")
+        out = tmp_path / "merged.metacool"
+        merge([a, b], out)
+
+        validate(out, full=True)
+        clr = cooler.Cooler(str(out))
+        assert clr.info["nnz"] == 0
+        assert clr.info["sum"] == 0
+        assert clr.pixels()[:].empty
+        source = cooler.Cooler(str(a))
+        assert clr.bins()[:].equals(source.bins()[:])
+        for table in ("contigs", "genomes"):
+            assert read_table(out, table).equals(read_table(a, table))
+        assert MetaCooler(out).metadata["qc"]["n_contacts"] == 0
+
+    @staticmethod
+    def _square(path):
+        """*path*, declared square, as a map that stores both triangles is."""
+        import h5py
+
+        with h5py.File(path, "r+") as f:
+            f.attrs["storage-mode"] = "square"
+        return path
+
+    @pytest.mark.parametrize("mode", ["symmetric-upper", "square"])
+    def test_a_merge_without_pixels_is_laid_out_as_any_merge(self, tmp_path, mode):
+        """The same groups, columns, dtypes and attribute values as a merge of
+        maps that have pixels, over the same contigs, but for what counts the
+        pixels and when the file was made."""
+        import h5py
+
+        def made(name, body=""):
+            path = self._map(tmp_path, name, body)
+            return self._square(path) if mode == "square" else path
+
+        empty = tmp_path / "empty.metacool"
+        merge([made("a"), made("b")], empty)
+        pair = "r1\tc1\t10\tc2\t20\nr2\tc3\t5\tc3\t250\n"
+        full = tmp_path / "full.metacool"
+        merge([made("c", pair), made("d", pair)], full)
+
+        def layout(path):
+            with h5py.File(path, "r") as f:
+                datasets = {}
+                f.visititems(
+                    lambda name, node: (
+                        datasets.__setitem__(name, node.dtype)
+                        if isinstance(node, h5py.Dataset)
+                        else None
+                    )
+                )
+                attrs = {
+                    key: f.attrs[key]
+                    for key in f.attrs
+                    if key not in ("creation-date", "nnz", "sum", "metadata")
+                }
+                return datasets, attrs
+
+        datasets, attrs = layout(empty)
+        assert attrs["storage-mode"] == mode
+        assert (datasets, attrs) == layout(full)
+
+    @pytest.mark.parametrize("with_pixels", [False, True])
+    def test_maps_of_two_storage_modes_are_refused(self, tmp_path, with_pixels):
+        """With or without pixels, before anything is written: cooler refused
+        them only with pixels, and the empty merge took the first one's mode."""
+        pair = "r1\tc1\t10\tc2\t20\n" if with_pixels else ""
+        a = self._map(tmp_path, "a", pair)
+        b = self._square(self._map(tmp_path, "b", pair))
+        out = tmp_path / "merged.metacool"
+        with pytest.raises(ValueError, match="storage-mode mismatch"):
+            merge([a, b], out)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("with_pixels", [False, True])
+    def test_attributes_stored_as_bytes_are_read_as_text(
+        self, tmp_path, with_pixels, request
+    ):
+        """Another writer may store ``storage-mode`` and ``contig-ordering`` as
+        bytes, which ``validate`` accepts: compared raw, they refused a merge
+        with a map that stores them as text, and made the empty merge square.
+
+        With pixels, cooler's own ``merge_coolers`` compares the storage modes
+        too, as its ``info()`` reads them: cooler 0.10's reads them raw, and
+        refuses to merge the two maps (devel does the same)."""
+        import cooler
+        import h5py
+        import numpy as np
+
+        if with_pixels and not _cooler_info_decodes_bytes():
+            request.applymarker(
+                pytest.mark.xfail(
+                    strict=True,
+                    raises=ValueError,
+                    reason="this cooler's merge_coolers compares the raw "
+                    "storage-mode: a map storing it as bytes and one storing "
+                    "it as text are not merged",
+                )
+            )
+
+        pair = "r1\tc1\t10\tc2\t20\n" if with_pixels else ""
+        a = self._map(tmp_path, "a", pair)
+        b = self._map(tmp_path, "b", pair)
+        for path in (a, b) if not with_pixels else (b,):
+            with h5py.File(path, "r+") as f:
+                for key in ("storage-mode", "contig-ordering"):
+                    f.attrs[key] = np.bytes_(str(f.attrs[key]).encode())
+        out = tmp_path / "merged.metacool"
+        merge([a, b], out)
+        assert cooler.Cooler(str(out)).info["storage-mode"] == "symmetric-upper"
+
+    def test_the_cli_merges_maps_without_pixels(self, tmp_path):
+        from click.testing import CliRunner
+
+        from metacooler.api import MetaCooler
+        from metacooler.cli.main import cli
+        from metacooler.schema import validate
+
+        a = self._map(tmp_path, "a")
+        b = self._map(tmp_path, "b")
+        out = tmp_path / "merged.metacool"
+        result = CliRunner().invoke(cli, ["merge", str(a), str(b), "-o", str(out)])
+        assert result.exit_code == 0, result.output
+        validate(out, full=True)
+        assert MetaCooler(out).metadata["commands"]
