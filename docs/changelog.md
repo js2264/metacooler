@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-11-18
+
 ### Added
 
 - **Per-contig QC columns.** Every command that stores the contact-quality
