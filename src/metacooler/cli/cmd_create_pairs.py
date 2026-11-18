@@ -27,7 +27,8 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     required=True,
     multiple=True,
     help=(
-        "Pairs file (plain text or gzipped). Repeat the option to read several "
+        "Pairs file: plain text, or compressed with gzip, bgzip, bzip2, zstd or "
+        "lz4, read from its content. Repeat the option to read several "
         "files — one per Hi-C library of the same assembly — in one pass, as if "
         "concatenated: their contacts are summed, and the QC block, the P(s) "
         "table and the dropped-pairs report cover them all. Not comma-split: a "
