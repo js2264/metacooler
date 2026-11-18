@@ -247,4 +247,5 @@ metacooler merge rep1.metacool rep2.metacool -o merged.metacool
 
 Both files must have **identical** contigs and genomes tables, and the same
 `contig-ordering` attribute. Pixels are concatenated and re-sorted. Metadata
-from all inputs is merged.
+from all inputs is merged, and their [QC blocks](../cli.md#merge-qc) are
+summed when they were counted alike.

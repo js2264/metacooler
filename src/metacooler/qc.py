@@ -51,6 +51,7 @@ classify exactly at any bin size.
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import numpy as np
@@ -64,7 +65,12 @@ logger = logging.getLogger("metacooler")
 
 # Version of the ``metadata["qc"]`` block written by this module.  Bump it if
 # the meaning of a key changes, so a reader can tell an old block apart from a
-# new one rather than silently comparing two different quantities.
+# new one rather than silently comparing two different quantities.  Bump it
+# too for a new key that adds up over libraries, as the four categories and
+# the pairs counts do: ``merge`` sums only the counts it knows of, and carries
+# any other key once, as every input records it, so a release that did not
+# know the key would keep one library's value where the sum belongs.  It sums
+# blocks of its own version only, so the bump has it drop them instead.
 #   2: contacts between two different __unbinned__ contigs moved from
 #      inter_contig_intra_genome to inter_genome.
 QC_VERSION = 2
@@ -105,6 +111,12 @@ QC_GENOME_COLUMNS = tuple(f"{QC_COLUMN_PREFIX}{c}" for c in QC_CATEGORIES) + (
 # in ``/genomes``.
 QC_CONTIG_COLUMNS = QC_GENOME_COLUMNS[:2]
 
+# The extra keys a ``create pairs`` block records that count something: the
+# pairs read and the pairs discarded while binning.  Like the four categories,
+# they add up over libraries; every other extra key (``binsize``) says how the
+# contacts were counted.
+QC_PAIRS_COUNT_KEYS = ("n_pairs_read", "n_pairs_discarded")
+
 # Records classified per pass.  Every temporary of one block -- a handful of
 # int64 and bool arrays this long -- stays in a core's L2 cache, where a whole
 # 50 M-row chunk at once streams gigabytes of them through main memory: the
@@ -127,6 +139,99 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, np.floating):
         return float(value)
     return value
+
+
+def _is_integer(value: object) -> bool:
+    """Whether a value read back from a block is an integer (a bool is not)."""
+    return isinstance(value, int | np.integer) and not isinstance(value, bool)
+
+
+def _is_count(value: object) -> bool:
+    """Whether a value read back from a block is a finite number, not a bool."""
+    if _is_integer(value):
+        return True
+    return isinstance(value, float | np.floating) and math.isfinite(value)
+
+
+def _counts_problem(
+    block: dict, keys: Sequence[str], *, whole: bool = False
+) -> str | None:
+    """Why the values of *keys* in *block* are not counts, or ``None``.
+
+    A count is a finite number, not negative; with *whole*, an integer too,
+    as a count of pairs (:data:`QC_PAIRS_COUNT_KEYS`) is.
+    """
+    not_numbers = [key for key in keys if not _is_count(block.get(key))]
+    if not_numbers:
+        return f"not a finite number: {', '.join(not_numbers)}"
+    negative = [key for key in keys if block[key] < 0]
+    if negative:
+        return f"negative: {', '.join(negative)}"
+    fractional = [key for key in keys if whole and not _is_integer(block[key])]
+    if fractional:
+        return f"not an integer, as a count of pairs is: {', '.join(fractional)}"
+    return None
+
+
+def _sums_match(columns: np.ndarray, totals: Sequence[object]) -> bool:
+    """Whether the columns of *columns* sum to *totals*, one total per column.
+
+    Exactly for integers; to a relative ``1e-9`` when a column or a total is a
+    float, since floats summed in another order differ in their last bits.
+    ``False`` when *columns* holds anything but numbers -- columns read
+    straight from a file can hold text -- or a total is not a finite number.
+    """
+    array = np.asarray(columns)
+    if (
+        array.ndim != 2
+        or array.dtype.kind not in "iuf"
+        or array.shape[1] != len(totals)
+        or not all(_is_count(total) for total in totals)
+    ):
+        return False
+    sums = array.sum(axis=0)
+    if sums.dtype.kind == "f" or not all(_is_integer(total) for total in totals):
+        expected = np.asarray(totals, dtype=np.float64)
+        return bool(np.allclose(sums, expected, rtol=1e-9, atol=0))
+    return sums.tolist() == list(totals)
+
+
+def _refuse_unlike_counts(
+    name: str, array: np.ndarray, totals: list, *, integers: bool, note: str = ""
+) -> None:
+    """Refuse *array*, stored counts, unless they are a tally's: what it sums to.
+
+    Args:
+        name: What *array* is, for the message.
+        array: The counts, a 2-D array of numbers.
+        totals: What its columns must sum to, from the block.
+        integers: Whether the block counts in integers, which its columns
+            must then do too.
+        note: Said after the totals when they do not match.
+    """
+    if integers and array.dtype.kind == "f":
+        raise ValueError(f"{name} holds floats, where the block counts in integers")
+    if array.dtype.kind == "f" and not np.isfinite(array).all():
+        raise ValueError(f"{name} holds a count that is not finite")
+    if (array < 0).any():
+        raise ValueError(f"{name} holds a negative count")
+    if not _sums_match(array, totals):
+        sums = [_jsonable(value) for value in array.sum(axis=0)]
+        raise ValueError(
+            f"{name} does not add up to the block: its columns sum to {sums}, "
+            f"not {totals}{note}"
+        )
+
+
+def _count_matrix(values: np.ndarray, n_columns: int, name: str) -> np.ndarray:
+    """*values* as a 2-D array of numbers with *n_columns* columns, or refuse it."""
+    array = np.asarray(values)
+    if array.ndim != 2 or array.shape[1] != n_columns or array.dtype.kind not in "iuf":
+        raise ValueError(
+            f"{name} must be a 2-D array of numbers with {n_columns} columns, "
+            f"got {array.dtype} of shape {array.shape}"
+        )
+    return array
 
 
 class BinMaps(NamedTuple):
@@ -212,8 +317,9 @@ class ContactQC:
         self.distance_threshold = int(distance_threshold)
         self.source = source
         self.unbinned_genome = unbinned_genome
-        self.counts = np.zeros(len(QC_CATEGORIES), dtype=np.int64)
-        # int64 until `_promote_for` widens it to float64 for fractional weights.
+        # Both int64 until `_promote_for` widens them to float64 for fractional
+        # weights.
+        self.counts: np.ndarray = np.zeros(len(QC_CATEGORIES), dtype=np.int64)
         self.per_genome: np.ndarray = np.zeros(
             (self.n_genomes, len(QC_CATEGORIES)), dtype=np.int64
         )
@@ -638,6 +744,199 @@ class ContactQC:
         self._contig_queue, self._contig_queued = [], 0
         self._per_contig = per_contig
 
+    # ------------------------------------------------------------------
+    # Stored tallies
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_stored(
+        cls,
+        block: dict,
+        per_genome: np.ndarray,
+        per_contig: np.ndarray | None = None,
+        *,
+        unbinned_genome: int | None = None,
+    ) -> ContactQC:
+        """Rebuild the tally a stored QC block and its count columns describe.
+
+        The inverse of storing one: :meth:`summary` of the result gives back
+        the block's counts and every key it derives from them,
+        :meth:`genome_table` the ``/genomes`` ``qc_*`` columns, and
+        :meth:`contig_table` the ``/contigs`` ones.  Keys the block records
+        besides the tally (``binsize``, ``n_pairs_read``, ...) are not part of
+        it: pass them to :meth:`summary` again.  The counts stay ``int64``
+        unless one of them is a float, as a float weight would have made them.
+
+        What is stored is checked first, since nothing else would catch a
+        column edited after its block was stored, or a block from another
+        map: the counts must be finite and not negative; an integer block's
+        columns must hold integers too; and the columns must add up to the
+        block.  Per genome, the first three sum to its first three categories
+        and the fourth to twice ``inter_genome``, since an inter-genome
+        contact counts for both its genomes; per contig, the two sum to the
+        two intra-contig categories.  A block measured on pairs may count in
+        floats: ``reassign`` keeps one and re-measures its two inter-contig
+        categories from the pixels, which a rescaled map holds as floats.
+
+        Args:
+            block: A ``metadata["qc"]`` block of version :data:`QC_VERSION`.
+            per_genome: ``(n_genomes, 4)`` counts, one row per genome in
+                ``/genomes`` order: its ``qc_<category>`` columns, in
+                :data:`QC_CATEGORIES` order.
+            per_contig: ``(n_contigs, 2)`` short/long counts, one row per
+                contig in ``/contigs`` order (its :data:`QC_CONTIG_COLUMNS`),
+                or ``None`` for a tally that does not count per contig.
+            unbinned_genome: Row of ``__unbinned__`` in ``/genomes`` (see
+                :func:`unbinned_genome_id`), or ``None`` if there is none.
+
+        Returns:
+            A new tally; *per_genome* and *per_contig* are copied, not shared.
+
+        Raises:
+            ValueError: If *block* is not a JSON object of version
+                :data:`QC_VERSION` with a ``source`` of ``"pairs"`` or
+                ``"pixels"``, a non-negative integer ``distance_threshold``
+                and a count for each category, if an array is not shaped and
+                typed as above, or if the counts are not those of one tally:
+                negative, not finite, or not adding up.
+        """
+        if not isinstance(block, dict):
+            raise ValueError(
+                f"a QC block is a JSON object, not a {type(block).__name__}"
+            )
+        version = block.get("version")
+        if version != QC_VERSION:
+            raise ValueError(f"a version {version!r} QC block, not {QC_VERSION}")
+        source = block.get("source")
+        if source not in ("pairs", "pixels"):
+            raise ValueError(f"source must be 'pairs' or 'pixels', not {source!r}")
+        threshold = block.get("distance_threshold")
+        if not isinstance(threshold, int) or isinstance(threshold, bool):
+            raise ValueError(
+                f"distance_threshold must be an integer, not {threshold!r}"
+            )
+        problem = _counts_problem(block, QC_CATEGORIES)
+        if problem:
+            raise ValueError(problem)
+        per_genome = _count_matrix(per_genome, len(QC_CATEGORIES), "per_genome")
+        if per_contig is not None:
+            per_contig = _count_matrix(per_contig, len(QC_CONTIG_COLUMNS), "per_contig")
+        short, long_range, inter_contig_cis, inter_genome = (
+            block[key] for key in QC_CATEGORIES
+        )
+        integers = all(_is_integer(block[key]) for key in QC_CATEGORIES)
+        _refuse_unlike_counts(
+            "per_genome",
+            per_genome,
+            [short, long_range, inter_contig_cis, 2 * inter_genome],
+            integers=integers,
+            note=" (the last is twice inter_genome: an inter-genome contact "
+            "counts for both its genomes)",
+        )
+        if per_contig is not None:
+            _refuse_unlike_counts(
+                "per_contig", per_contig, [short, long_range], integers=integers
+            )
+
+        tally = cls(
+            len(per_genome),
+            threshold,
+            source=source,
+            unbinned_genome=unbinned_genome,
+            n_contigs=None if per_contig is None else len(per_contig),
+        )
+        counts = np.asarray([block[key] for key in QC_CATEGORIES])
+        for array in (counts, per_genome, per_contig):
+            tally._promote_for(array)
+        dtype = tally.counts.dtype
+        tally.counts = counts.astype(dtype)
+        tally.per_genome = per_genome.astype(dtype)
+        if per_contig is not None:
+            tally._per_contig = per_contig.astype(dtype)
+        return tally
+
+    def _measurement(self) -> str:
+        """How the contacts were counted, as :meth:`add` compares tallies."""
+        return f"source={self.source!r}, distance_threshold={self.distance_threshold}"
+
+    def _layout(self) -> str:
+        """The genomes and contigs counted, as :meth:`add` compares tallies."""
+        unbinned = (
+            "no __unbinned__"
+            if self.unbinned_genome is None
+            else f"__unbinned__ at row {self.unbinned_genome}"
+        )
+        per_contig = self.per_contig
+        contigs = (
+            "no per-contig counts"
+            if per_contig is None
+            else f"{len(per_contig)} contig(s)"
+        )
+        return f"{self.n_genomes} genome(s) ({unbinned}), {contigs}"
+
+    def add(self, other: ContactQC) -> None:
+        """Add another tally of the same genomes and contigs to this one.
+
+        For another library of the same map: every cell adds up -- the four
+        totals, every genome's counts and, when both count per contig, every
+        contig's -- so the sum of the libraries' tallies is the tally of all
+        their contacts at once, exactly for integer counts.  Float counts add
+        up to the same value, though not always to the same bits: float
+        addition does not associate.  An integer tally becomes a float one
+        when *other* is float, as it would on a float weight.
+
+        Args:
+            other: The tally to add, left as it was.
+
+        Raises:
+            ValueError: If *other* was counted differently (another ``source``
+                or ``distance_threshold``), or counts other genomes or contigs
+                (another number of either, another ``__unbinned__`` row, or
+                per contig where this tally does not, or the reverse).
+        """
+        for describe in (ContactQC._measurement, ContactQC._layout):
+            if describe(other) != describe(self):
+                raise ValueError(
+                    f"cannot add a tally of {describe(other)} to one of "
+                    f"{describe(self)}"
+                )
+        self._promote_for(other.counts)
+        dtype = self.counts.dtype
+        self.counts += other.counts.astype(dtype, copy=False)
+        self.per_genome += other.per_genome.astype(dtype, copy=False)
+        theirs = other.per_contig
+        if self._per_contig is not None and theirs is not None:
+            self._per_contig += theirs.astype(dtype, copy=False)
+
+
+# Every key ContactQC.summary() writes itself: the tally's parameters (version,
+# source, distance_threshold), its four counts and what it derives from them.
+# Any other key of a stored block is an ``**extra`` it was given, recording how
+# the counts were measured (binsize, n_pairs_read, n_pairs_discarded, ...).
+QC_SUMMARY_KEYS = frozenset(ContactQC(0).summary())
+
+
+def _contig_counts_add_up(block: dict, per_contig: np.ndarray) -> bool:
+    """Whether per-contig QC counts add up to a block's intra-contig totals.
+
+    They do when the block and the ``/contigs`` columns were stored together.
+    A ``qc --store`` from a release without per-contig columns (0.2.0 and
+    earlier) rewrites the block and leaves older columns behind, which no
+    longer describe it.
+
+    Args:
+        block: A ``metadata["qc"]`` block.
+        per_contig: ``(n_contigs, 2)`` short/long counts: the
+            :data:`QC_CONTIG_COLUMNS` of ``/contigs``.
+
+    Returns:
+        Whether the two column totals are the block's ``intra_contig_short``
+        and ``intra_contig_long``: exactly for integer counts, to a relative
+        ``1e-9`` for float ones.  ``False`` when a total is missing or not a
+        number, or when the columns are not numbers.
+    """
+    totals = [block.get("intra_contig_short"), block.get("intra_contig_long")]
+    return _sums_match(per_contig, totals)
+
 
 def is_qc_column(table: str, column: object) -> bool:
     """Whether a column of ``/genomes`` or ``/contigs`` belongs to the QC block.
@@ -666,12 +965,13 @@ def strip_qc_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Drop every ``qc_*`` column from a genomes table.
 
     Called by the writers that derive a new file from an existing one
-    (``binnify``, ``merge``, ``reassign``).  Their output has a different bin
-    grid, a different pixel table or different genomes, so counts copied
-    across would describe contacts the output does not contain — a stale
-    number is worse than no number, because nothing about it looks stale.
-    (``reassign`` then stores a block for its own output, carrying the
-    per-contig :data:`QC_CONTIG_COLUMNS` over when it can.)
+    (``binnify``, ``reassign``).  Their output has a different bin grid or
+    different genomes, so counts copied across would describe contacts the
+    output does not contain — a stale number is worse than no number, because
+    nothing about it looks stale.  (``reassign`` then stores a block for its
+    own output, carrying the per-contig :data:`QC_CONTIG_COLUMNS` over when it
+    can.  ``merge`` drops each input's columns too, and stores their sum: see
+    :meth:`ContactQC.add`.)
 
     For ``/contigs``, see :func:`strip_contig_qc_columns`.
 

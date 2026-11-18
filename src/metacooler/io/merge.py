@@ -8,15 +8,33 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import cooler
 import h5py
 import numpy as np
+from cooler.api import info as cooler_info
 
 from metacooler._version import __version__
-from metacooler.io._utils import check_output_path, cooler_writer_shims, write_column
-from metacooler.qc import QC_METADATA_KEY, is_qc_column
+from metacooler.io._utils import (
+    check_output_path,
+    cooler_writer_shims,
+    store_qc,
+    write_column,
+)
+from metacooler.qc import (
+    QC_CATEGORIES,
+    QC_CONTIG_COLUMNS,
+    QC_GENOME_COLUMNS,
+    QC_METADATA_KEY,
+    QC_PAIRS_COUNT_KEYS,
+    QC_SUMMARY_KEYS,
+    ContactQC,
+    _contig_counts_add_up,
+    _counts_problem,
+    is_qc_column,
+    unbinned_genome_id,
+)
 from metacooler.schema import (
     COOLER_FORMAT,
     COOLER_FORMAT_URL,
@@ -31,6 +49,17 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
 
 logger = logging.getLogger("metacooler")
+
+# The keys of a QC block that hold a count -- of contacts, or of the pairs a
+# ``create pairs`` tally read and discarded -- or a quantity derived from the
+# counts: what another library changes.  The pairs counts are summed, the rest
+# recomputed from the summed tally.  Every other key (``version``, ``source``,
+# ``distance_threshold``, or one a later release records) says how the contacts
+# were counted, and the inputs' blocks add up only where those agree --
+# ``binsize`` aside (see :data:`_QC_BINSIZE_KEY`).
+_QC_COUNT_KEYS = (
+    QC_SUMMARY_KEYS - {"version", "source", "distance_threshold"}
+) | frozenset(QC_PAIRS_COUNT_KEYS)
 
 #: The columns of ``/contigs`` and ``/genomes`` that say *what* a map is: which
 #: assembly, which genomes, which contig belongs to which, how many bins each
@@ -209,6 +238,399 @@ def _refuse_repeated_inputs(inputs: list[str]) -> None:
         seen[key] = uri
 
 
+# ``binsize``: the bin size a map had when its block was stored.  The inputs of
+# a merge share one bin grid -- merge checks that before anything else -- so it
+# changes no count between them, and their blocks add up whether or not each
+# records it.  The merged block records it when every input records the same
+# value, and not at all otherwise.
+_QC_BINSIZE_KEY = "binsize"
+
+# The four ``qc_<category>`` count columns of ``/genomes``: what a tally sums.
+_GENOME_COUNT_COLUMNS = QC_GENOME_COLUMNS[: len(QC_CATEGORIES)]
+
+# What :func:`_qc_block` returns for a map whose ``metadata`` attribute is not a
+# JSON object: whether it holds a QC block cannot be told.
+_NOT_JSON = object()
+
+# A key a block does not record, for :func:`_merged_extra` to compare.
+_ABSENT = object()
+
+
+class _SummedQC(NamedTuple):
+    """The inputs' QC, summed: counts only, until the merged map can take them.
+
+    Held through the pixel merge, so it holds no name: those are read from the
+    merged map when the QC is written into it (:func:`_store_summed_qc`).
+
+    Attributes:
+        tally: The sum of the inputs' tallies.
+        extra: The keys of the merged block that ``tally.summary()`` does not
+            write itself (:func:`_merged_extra`).
+    """
+
+    tally: ContactQC
+    extra: dict
+
+
+def _qc_block(group: h5py.Group) -> object:
+    """A map's ``metadata["qc"]`` value, read as cooler reads the attribute.
+
+    ``None`` when it has none; :data:`_NOT_JSON` when its ``metadata``
+    attribute is not a JSON object, which may or may not have held one.
+    """
+    metadata = cooler_info(group).get("metadata")
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        return _NOT_JSON
+    return metadata.get(QC_METADATA_KEY)
+
+
+def _columns(table: h5py.Group, columns: tuple[str, ...]) -> np.ndarray:
+    """*columns* of *table* side by side; the caller has checked they are there."""
+    return np.column_stack([table[column][:] for column in columns])
+
+
+def _names(table: h5py.Group) -> np.ndarray:
+    """The ``name`` column of ``/genomes`` or ``/contigs``, decoded."""
+    return table["name"].asstr()[:]
+
+
+def _input_problem(uri: str, group: h5py.Group, block: object) -> str | None:
+    """Why the QC of one input cannot be summed, whatever the others hold.
+
+    Told from its ``metadata`` attribute and the types of its ``/genomes``
+    count columns: not a count is read.  metacooler reserves those names in
+    ``/genomes``, as 0.2.0 already did, so a count column there that holds
+    text was not written by it, and nothing of the input's QC is trusted.
+    ``/contigs`` is another matter (:func:`_contig_count_problems`).
+    """
+    if block is _NOT_JSON:
+        return f"the metadata attribute of {uri} is not a JSON object"
+    if not isinstance(block, dict):
+        return f"the QC block of {uri} is not a JSON object"
+    genomes = group["genomes"]
+    if not all(column in genomes for column in _GENOME_COUNT_COLUMNS):
+        return f"{uri} lacks the qc_* count columns of /genomes that go with it"
+    if any(genomes[column].dtype.kind not in "iuf" for column in _GENOME_COUNT_COLUMNS):
+        return f"the qc_* columns of /genomes of {uri} are not numbers"
+    return None
+
+
+def _measured_differently(first: dict, other: dict) -> list[str]:
+    """The keys on which two QC blocks disagree about how they were counted.
+
+    A key recorded by one block and not the other is one of them, counts
+    included: a ``create pairs`` block without its pairs counts cannot add up
+    with one that has them.  ``binsize`` is not (see :data:`_QC_BINSIZE_KEY`).
+    A key this release does not know is compared like ``source``: the blocks
+    add up only where every input records the same value, which the merged
+    block then carries.
+    """
+    return [
+        key
+        for key in sorted((set(first) | set(other)) - {_QC_BINSIZE_KEY})
+        if (key in first) != (key in other)
+        or (key not in _QC_COUNT_KEYS and first[key] != other[key])
+    ]
+
+
+def _unsummable(
+    inputs: list[str], blocks: list[object], problems: list[str | None]
+) -> str | None:
+    """Why the inputs' QC blocks cannot be summed, or ``None`` if they can.
+
+    They can when every input has one, with its ``/genomes`` count columns
+    (:func:`_input_problem`), and every block was counted alike: the same
+    keys, ``binsize`` aside, and the same value of each that is not a count
+    (:func:`_measured_differently`).  What each holds is checked as it is read
+    back (:func:`_summed_tally`).
+    """
+    missing = [uri for uri, block in zip(inputs, blocks, strict=True) if block is None]
+    if missing:
+        return f"{', '.join(missing)} {'has' if len(missing) == 1 else 'have'} none"
+    problem = next((problem for problem in problems if problem), None)
+    if problem:
+        return problem
+    first = blocks[0]
+    assert isinstance(first, dict)
+    for uri, block in zip(inputs[1:], blocks[1:], strict=True):
+        assert isinstance(block, dict)
+        keys = _measured_differently(first, block)
+        if keys:
+            return "they were not counted alike: " + "; ".join(
+                f"{key} is {_described(first, key)} in {inputs[0]} but "
+                f"{_described(block, key)} in {uri}"
+                for key in keys
+            )
+    return None
+
+
+def _described(block: dict, key: str) -> str:
+    """The value of *key* in *block*, for a message: ``absent`` when it has none."""
+    return repr(block[key]) if key in block else "absent"
+
+
+class _ContigProblems(NamedTuple):
+    """Why inputs' ``/contigs`` QC columns cannot be summed: empty if they can.
+
+    Attributes:
+        none: The inputs with neither column: maps written by metacooler
+            0.2.0 or earlier.
+        partial: One reason per other shortfall: an input with only one of
+            the two, or with one that is not numbers -- a user's column of
+            that name, which 0.2.0 stored as given, since it reserved no QC
+            name in ``/contigs``.
+        stale: The inputs whose columns no longer add up to their block, which
+            a ``qc --store`` of such a release rewrote without them.
+    """
+
+    none: list[str]
+    partial: list[str]
+    stale: list[str]
+
+
+def _contig_count_problems(inputs: list[str], blocks: list[dict]) -> _ContigProblems:
+    """Why the inputs' ``/contigs`` QC columns cannot be summed, if they cannot.
+
+    Each input's columns are read only when both are there as numbers, and let
+    go before the next one's: they are as long as the map has contigs.
+    """
+    problems = _ContigProblems([], [], [])
+    for uri, block in zip(inputs, blocks, strict=True):
+        with _open_uri(uri) as group:
+            contigs = group["contigs"]
+            absent = [column for column in QC_CONTIG_COLUMNS if column not in contigs]
+            if len(absent) == len(QC_CONTIG_COLUMNS):
+                problems.none.append(uri)
+                continue
+            text = [
+                column
+                for column in QC_CONTIG_COLUMNS
+                if column not in absent and contigs[column].dtype.kind not in "iuf"
+            ]
+            if absent:
+                problems.partial.append(f"{uri} lacks {' and '.join(absent)}")
+            if text:
+                problems.partial.append(
+                    f"the {' and '.join(text)} of {uri} "
+                    f"{'is' if len(text) == 1 else 'are'} not numbers (a user's "
+                    "column of that name, as metacooler 0.2.0 stored one)"
+                )
+            if absent or text:
+                continue
+            per_contig = _columns(contigs, QC_CONTIG_COLUMNS)
+        if not _contig_counts_add_up(block, per_contig):
+            problems.stale.append(uri)
+        del per_contig
+    return problems
+
+
+def _summed_tally(
+    inputs: list[str], blocks: list[dict], *, per_contig: bool
+) -> ContactQC:
+    """Rebuild every input's tally from what it stored, and add them up.
+
+    One input at a time: its columns are read, checked and added to the sum,
+    then let go, so that the sum is all that is held of them.
+
+    Args:
+        inputs: Input URIs.
+        blocks: Their QC blocks, already found to be counted alike
+            (:func:`_unsummable`).
+        per_contig: Whether to sum the ``/contigs`` columns too.
+
+    Raises:
+        ValueError: Naming the input whose QC cannot be read back: a block of
+            another version, or counts that are not those of one tally
+            (:meth:`ContactQC.from_stored`), or pairs counts that are not
+            whole numbers of pairs.
+    """
+    with _open_uri(inputs[0]) as group:
+        unbinned = unbinned_genome_id(_names(group["genomes"]))
+    total: ContactQC | None = None
+    for uri, block in zip(inputs, blocks, strict=True):
+        with _open_uri(uri) as group:
+            per_genome = _columns(group["genomes"], _GENOME_COUNT_COLUMNS)
+            counts = (
+                _columns(group["contigs"], QC_CONTIG_COLUMNS) if per_contig else None
+            )
+        pairs_counts = [key for key in QC_PAIRS_COUNT_KEYS if key in block]
+        try:
+            tally = ContactQC.from_stored(
+                block, per_genome, counts, unbinned_genome=unbinned
+            )
+            problem = _counts_problem(block, pairs_counts, whole=True)
+            if problem:
+                raise ValueError(problem)
+        except ValueError as exc:
+            raise ValueError(f"the QC of {uri} cannot be read back ({exc})") from exc
+        del per_genome, counts
+        if total is None:
+            total = tally
+        else:
+            total.add(tally)
+        del tally
+    assert total is not None
+    return total
+
+
+def _merged_extra(blocks: list[dict]) -> dict:
+    """The keys of the merged block that a tally's ``summary()`` does not write.
+
+    The pairs counts are summed; ``binsize`` is kept when every input records
+    the same value (:data:`_QC_BINSIZE_KEY`); every other key is carried as
+    the inputs record it, which they all do alike (:func:`_unsummable`).
+    """
+    first = blocks[0]
+    extra = {key: value for key, value in first.items() if key not in QC_SUMMARY_KEYS}
+    for key in QC_PAIRS_COUNT_KEYS:
+        if key in extra:
+            extra[key] = sum(block[key] for block in blocks)
+    binsizes = [block.get(_QC_BINSIZE_KEY, _ABSENT) for block in blocks]
+    if any(binsize != binsizes[0] for binsize in binsizes):
+        extra.pop(_QC_BINSIZE_KEY, None)
+    return extra
+
+
+def _warn_dropped(blocks: list[object], reason: str, output: str) -> None:
+    """Say why the merged map has no QC block, and how to measure one.
+
+    ``qc --store`` measures one from the pixels.  For blocks measured on read
+    positions, that would lose what only they give -- the short/long split on
+    read positions, and the pairs counts -- so ``create pairs`` with every
+    library's pairs is named first.
+    """
+    from_pixels = f"'metacooler qc --store {output}'"
+    on_pairs = any(
+        isinstance(block, dict) and block.get("source") == "pairs" for block in blocks
+    )
+    if on_pairs:
+        advice = (
+            "To measure the merged map's on read positions, as blocks of "
+            "source 'pairs' were, give 'metacooler create pairs' every "
+            f"library's pairs file, one --pairs each; {from_pixels} measures "
+            "it from the pixels instead, without the short/long split on read "
+            "positions or n_pairs_read and n_pairs_discarded."
+        )
+    else:
+        advice = f"Run {from_pixels} to measure the merged map's from its pixels."
+    logger.warning(
+        "Dropping the inputs' QC blocks and qc_* columns, since %s. %s", reason, advice
+    )
+
+
+def _report_contig_counts(inputs: list[str], problems: _ContigProblems) -> None:
+    """Say why a merged map with a summed QC block lacks per-contig counts."""
+    if len(problems.none) == len(inputs):
+        logger.info(
+            "No input has per-contig QC columns (maps written by metacooler "
+            "0.2.0 and earlier lack them), so the merged map has none either."
+        )
+        return
+    reasons = []
+    if problems.none:
+        has = "has" if len(problems.none) == 1 else "have"
+        reasons.append(
+            f"{', '.join(problems.none)} {has} none (maps written by metacooler "
+            "0.2.0 and earlier lack them)"
+        )
+    reasons += problems.partial
+    if problems.stale:
+        reasons.append(
+            f"those of {', '.join(problems.stale)} do not add up to the block "
+            "they go with (another run stored them)"
+        )
+    logger.warning(
+        "Summing the inputs' QC blocks and /genomes columns without the "
+        "per-contig counts of /contigs, since %s. Without them, a later "
+        "'reassign' of the merged map recomputes its whole QC block from the "
+        "pixels: source 'pixels', with the short/long split measured between "
+        "bin midpoints and no n_pairs_read or n_pairs_discarded.",
+        "; ".join(reasons),
+    )
+
+
+def _merged_qc(inputs: list[str], output: str) -> _SummedQC | None:
+    """Sum the inputs' QC blocks and ``qc_*`` count columns, if they add up.
+
+    Every count adds up over libraries of one map: the four categories -- in
+    total, per genome and per contig -- and the pairs a ``create pairs`` tally
+    read and discarded.  So each input's tally is rebuilt from what it stored
+    and the tallies are added (:func:`_summed_tally`); every fraction and
+    ratio is recomputed from the sum when it is written, by
+    :meth:`ContactQC.summary` and :meth:`ContactQC.genome_table`, the calls
+    that produced each input's: the result is what one tally of every input's
+    contacts gives.
+
+    When the blocks cannot be summed, a warning says why and nothing is
+    returned; nor when no input has a block, which loses nothing.  When only
+    the ``/contigs`` columns cannot be (:func:`_contig_count_problems`), the
+    block and the ``/genomes`` columns are summed without them, as on a map
+    written by metacooler 0.2.0, with a warning when an input had them.
+
+    Args:
+        inputs: Input URIs, already checked to be libraries of one map.
+        output: The output path, for the messages.
+
+    Returns:
+        The summed QC, or ``None``.
+    """
+    blocks: list[object] = []
+    problems: list[str | None] = []
+    for uri in inputs:
+        with _open_uri(uri) as group:
+            block = _qc_block(group)
+            blocks.append(block)
+            problems.append(
+                None if block is None else _input_problem(uri, group, block)
+            )
+    if all(block is None for block in blocks):
+        return None
+    total = None
+    contig_problems = _ContigProblems([], [], [])
+    reason = _unsummable(inputs, blocks, problems)
+    stored = [block for block in blocks if isinstance(block, dict)]
+    if reason is None:
+        contig_problems = _contig_count_problems(inputs, stored)
+        per_contig = not any(contig_problems)
+        try:
+            total = _summed_tally(inputs, stored, per_contig=per_contig)
+        except ValueError as exc:
+            reason = str(exc)
+    if total is None:
+        _warn_dropped(blocks, str(reason), output)
+        return None
+    if any(contig_problems):
+        _report_contig_counts(inputs, contig_problems)
+    logger.info(
+        "Summed the QC blocks of the %d inputs (source=%r, distance_threshold=%d).",
+        len(inputs),
+        total.source,
+        total.distance_threshold,
+    )
+    return _SummedQC(total, _merged_extra(stored))
+
+
+def _store_summed_qc(output: str | Path, summed: _SummedQC) -> None:
+    """Write the summed QC into the merged map: its block and ``qc_*`` columns.
+
+    The names the tables carry are read here, from the merged map, rather than
+    held through the pixel merge: at millions of contigs, they outweigh the
+    counts several times over.
+    """
+    tally = summed.tally
+    with h5py.File(output, "r") as f:
+        genome_names = _names(f["genomes"])
+        contig_names = None if tally.per_contig is None else _names(f["contigs"])
+    store_qc(
+        output,
+        tally.summary(**summed.extra),
+        tally.genome_table(genome_names),
+        None if contig_names is None else tally.contig_table(contig_names),
+    )
+
+
 def merge(
     inputs: Iterable[str | Path],
     output: str | Path,
@@ -224,6 +646,25 @@ def merge(
     and saved to *output*.  Metacooler-specific groups (``genomes``,
     ``contigs``, ``genome_offset``, format attributes) are then copied from the
     first input file.
+
+    The inputs' contact-quality statistics are summed too -- the
+    ``metadata["qc"]`` block and the ``qc_*`` columns of ``/genomes`` and
+    ``/contigs`` -- when every input has a block, and every block was counted
+    alike: the same ``version``, ``source`` and ``distance_threshold``, and the
+    same keys (``binsize`` aside: it is kept when every input records the same
+    value).  Every count adds up over libraries, and every fraction and ratio
+    is recomputed from the sums, so the merged QC is the one a single tally of
+    every input's contacts gives: for blocks measured on read positions, the
+    one ``create pairs`` stores when given every input's pairs at once; for
+    blocks measured on pixels, the one ``qc --store`` measures on the merged
+    map.  Otherwise -- or when an input's ``/genomes`` columns do not add up
+    to its block -- the output has no QC block, and a warning says why.  An
+    input written by metacooler 0.2.0 has no ``/contigs`` QC columns: its
+    block and ``/genomes`` columns are summed, and the output has none in
+    ``/contigs`` either.  So it is when an input has only one of the two, one
+    that is not numbers, or two that no longer add up to its block, and a
+    warning says which.  Of the inputs' other metadata keys, this function
+    carries none; ``metacooler merge`` does.
 
     Args:
         inputs: Iterable of paths to the input ``.metacool`` files, or
@@ -308,6 +749,11 @@ def merge(
                     first,
                 )
 
+    # Before any pixel is merged: reading every input's QC back is cheap, and
+    # whether it adds up is better said before the long step than after it.
+    # Only the summed counts are held through it.
+    summed_qc = _merged_qc(inputs, str(output))
+
     # Use cooler's merge logic on the pixel tables.  ``dtypes`` is mandatory:
     # without it the summed counts inherit the int32 of the inputs and wrap.
     # merge_coolers calls cooler.create internally, so it needs the same shims
@@ -327,8 +773,8 @@ def merge(
     with _open_uri(first) as fsrc, h5py.File(output, "a") as fdst:
         # Copy genomes, minus the first input's QC columns: the merged pixel
         # table is the sum of every input, so counts copied from one of them
-        # would understate it while looking authoritative. Re-run
-        # ``metacooler qc --store`` on the output to get honest ones.
+        # would understate it while looking authoritative. The summed ones, if
+        # the inputs' add up, are stored below.
         if "genomes" in fdst:
             del fdst["genomes"]
         fdst.copy(fsrc["genomes"], "genomes")
@@ -377,7 +823,7 @@ def merge(
                 fdst.attrs[key] = fsrc.attrs[key]
 
         # Same reasoning as the QC columns above: whatever block an input
-        # carried describes that input alone.
+        # carried describes that input alone (cooler carries none today).
         raw = fdst.attrs.get("metadata")
         if raw is not None:
             if isinstance(raw, bytes):
@@ -386,5 +832,8 @@ def merge(
             if QC_METADATA_KEY in meta:
                 del meta[QC_METADATA_KEY]
                 fdst.attrs["metadata"] = json.dumps(meta)
+
+    if summed_qc is not None:
+        _store_summed_qc(output, summed_qc)
 
     validate(output)

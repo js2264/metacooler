@@ -80,8 +80,10 @@ from metacooler.qc import (
     QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
     QC_METADATA_KEY,
+    QC_SUMMARY_KEYS,
     QC_VERSION,
     ContactQC,
+    _contig_counts_add_up,
     strip_contig_qc_columns,
     strip_qc_columns,
     strip_qc_metadata,
@@ -112,11 +114,6 @@ _ASSIGNMENT_INDEPENDENT_ORDERINGS = frozenset(
 
 # How many names to spell out in a warning before truncating.
 _MAX_REPORTED_NAMES = 10
-
-# The keys ContactQC.summary() computes itself.  Every other key of a source QC
-# block (binsize, n_pairs_read, n_pairs_discarded, ...) records how its counts
-# were measured, which a reassignment does not change, so it is carried as is.
-_DERIVED_QC_KEYS = frozenset(ContactQC(0).summary())
 
 
 class ReassignReport(NamedTuple):
@@ -768,19 +765,9 @@ def _carried_contig_qc(block: object, old_contigs: pd.DataFrame) -> pd.DataFrame
         reason = "it records no integer distance threshold"
     else:
         counts = old_contigs[list(QC_CONTIG_COLUMNS)]
-        totals = counts.sum().to_numpy()
-        expected = [block.get("intra_contig_short"), block.get("intra_contig_long")]
-        try:
-            agrees = (
-                np.allclose(totals, expected, rtol=1e-9, atol=0)
-                if totals.dtype.kind == "f"
-                else np.array_equal(totals, np.asarray(expected, dtype=totals.dtype))
-            )
-        except (TypeError, ValueError):  # a total that is missing or not a number
-            agrees = False
         reason = (
             None
-            if agrees
+            if _contig_counts_add_up(block, counts.to_numpy())
             else "its per-contig counts do not add up to its intra-contig "
             "totals (they were stored by another run)"
         )
@@ -903,8 +890,10 @@ def _measure_qc(
     if carried is not None:
         assert isinstance(block, dict)
         tally.set_intra_contig(carried.to_numpy(), new_genome)
+        # Every key summary() does not write records how the counts were
+        # measured, which a reassignment does not change: carried as is.
         summary = tally.summary(
-            **{k: v for k, v in block.items() if k not in _DERIVED_QC_KEYS}
+            **{k: v for k, v in block.items() if k not in QC_SUMMARY_KEYS}
         )
         logger.info(
             "Carried the source's intra-contig QC counts (source=%r) over to the "

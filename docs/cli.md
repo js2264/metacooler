@@ -323,8 +323,8 @@ everything a single pass measures covers all of them, **exactly**: the summed
 contacts, the QC block and its `qc_*` columns, the `<output>.ps.tsv`
 P(s) table, and the dropped-pairs report with `n_pairs_read` /
 `n_pairs_discarded`. One map per library joined with [`merge`](#merge) holds the
-same contacts but not the rest: `merge` drops the QC block, and no P(s) table
-comes out of it.
+same contacts, and the same QC block and `qc_*` columns ([`merge` sums
+them](#merge-qc)), but no P(s) table comes out of it.
 
 ```bash
 # Three libraries of one assembly, in one pass: one map, one QC block, one P(s)
@@ -858,7 +858,9 @@ size, and [`zoomify`](#zoomify) builds a multi-resolution collection.
 Sum the pixel counts of two or more metacool files that share **identical**
 bins, contigs, genomes, and contig ordering (e.g. sequencing replicates of the
 same assembly). Inputs may be `.mmetacool` entry URIs. Integer counts are
-summed in `int64`, float counts in `float64`. **API:**
+summed in `int64`, float counts in `float64`. The command merges the inputs'
+`metadata` keys too and appends its command line; the API function keeps none
+of them but the summed [QC block](#merge-qc). **API:**
 `metacooler.merge` (`metacooler.io.merge.merge`).
 
 "Identical" means the same contig names and lengths, the same contig-to-genome
@@ -866,7 +868,8 @@ assignment and the same genome sizes — the columns that say what the pixels
 are. Metadata columns (completeness, coverage, …, whether from creation or
 [`annotate`](#annotate)) and the QC columns may differ: the merged map keeps
 the first input's metadata, and each difference in a metadata column is
-reported as a warning naming the input and the columns.
+reported as a warning naming the input and the columns. The QC columns are
+summed ([below](#merge-qc)).
 
 ```console
 metacooler merge A.metacool B.metacool [...] -o merged.metacool [OPTIONS]
@@ -882,11 +885,54 @@ metacooler merge A.metacool B.metacool [...] -o merged.metacool [OPTIONS]
 metacooler merge rep1.metacool rep2.metacool -o merged.metacool
 ```
 
+#### The QC block { #merge-qc }
+
+The inputs' [contact-quality statistics](#qc) are summed too: the
+`metadata.qc` block and the `qc_*` columns of `/genomes` and `/contigs`. Every
+count adds up over libraries — the four categories, in total, per MAG and per
+contig, and `n_pairs_read` / `n_pairs_discarded` — and every fraction and
+ratio (`trans_contig_ratio`, each `*_fraction`, `qc_intra_genome_ratio`) is
+recomputed from the sums, as the block itself computes them. One map per
+library, merged, therefore holds the very block and columns that
+[`create pairs`](#create-pairs-libraries) stores when it is given every
+library's pairs at once; for blocks measured on pixels, those that `qc --store`
+measures on the merged map.
+
+That takes blocks counted alike: every input must have one, with the same
+`version`, `source` and `distance_threshold`, and the same keys. `binsize` is
+the exception: the inputs share one bin grid, so it changes no count, and the
+merged block keeps it when every input records the same value and leaves it out
+otherwise. A key metacooler does not know is carried as the inputs record it,
+when they all agree. Each input's block must also hold together with its own
+columns: no count negative, `n_pairs_read` and `n_pairs_discarded` whole
+numbers, and the `/genomes` columns adding up to the block.
+
+Otherwise the merged map has no QC block, and a warning names the input and the
+reason (an input without a block, a different threshold, a block measured on
+pixels beside one measured on read positions, a column edited since, …). To
+measure the merged map's, give `create pairs` every library's pairs file when
+the blocks were measured on read positions; `metacooler qc --store` measures
+one from the pixels, without the split on read positions or the pairs counts.
+Inputs none of which has a block merge without a word about it.
+
+A map written by metacooler 0.2.0 has a block but no per-contig columns. Its
+block and `/genomes` columns are summed all the same, and the merged map has
+no `/contigs` QC columns either; a warning says so when another input had them.
+So it is, with a warning naming the input, when an input has only one of the
+two, holds text under one of their names (a user's column that 0.2.0, which
+reserved no QC name in `/contigs`, stored as given), or has two that no longer
+add up to its block. A later [`reassign`](#reassign) of such a map recomputes
+its whole QC block from the pixels.
+
+Float counts (a block measured on a rescaled map) add up to the values a tally
+of the merged map gives, though not always to its last bits: float addition
+does not associate.
+
 !!! tip "Libraries you still have as pairs files"
-    `merge` drops the inputs' QC blocks and has no P(s) table to sum. When the
-    libraries' pairs files are at hand, pass them all to
-    [`create pairs`](#create-pairs-libraries) instead — one `--pairs` each — for
-    the same contacts with an exact QC block and P(s) table.
+    `merge` has no P(s) table to sum. When the libraries' pairs files are at
+    hand, pass them all to [`create pairs`](#create-pairs-libraries) instead —
+    one `--pairs` each — for the same map, QC block included, and a P(s) table
+    measured on all of them.
 
 ### `binnify` { #binnify }
 
@@ -1502,9 +1548,11 @@ depend on the genome assignment, so [`reassign`](#reassign) carries them over
 to the new genomes rather than re-measuring them (see
 [What a reassignment invalidates](#reassign-invalidates)).
 
-Because these columns describe one particular pixel table, `binnify` and
-`merge` drop them (and the `metadata.qc` block) from their output rather than
-carry stale numbers forward — re-run `metacooler qc --store` on the result.
+Because these columns describe one particular pixel table, `binnify` drops
+them (and the `metadata.qc` block) from its output rather than carry stale
+numbers forward — re-run `metacooler qc --store` on the result. `merge` sums
+them instead, since a merged map's contacts are its inputs' put together (see
+[its QC block](#merge-qc)).
 
 ```bash
 # The 3D ratio and its breakdown, as JSON
