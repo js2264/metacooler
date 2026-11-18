@@ -14,8 +14,12 @@ import numpy as np
 import pandas as pd
 
 from metacooler.schema import (
+    CLUSTER_TABLE_COLUMNS,
+    CLUSTERS_GROUP,
     DEFAULT_CHUNKSIZE,
     GENOME_GROUPED_ORDERINGS,
+    _decode_table_group,
+    cluster_rounds,
     read_table,
 )
 from metacooler.schema import (
@@ -461,6 +465,112 @@ class MetaCooler:
             grp = self._group_path.lstrip("/") + "/contigs"
             return read_table(self._store, grp)
         return read_table(self._store, "contigs")
+
+    # ------------------------------------------------------------------
+    # Clustering rounds (see docs/format.md#clusters)
+    # ------------------------------------------------------------------
+
+    @functools.cached_property
+    def cluster_rounds(self) -> list[dict]:
+        """The clustering rounds of the map, in the order they were made.
+
+        Each is a dict with a ``name`` and what its tool stored with it (by
+        convention ``tool``, ``version``, ``parameters`` and ``date``).
+
+        Returns:
+            One dict per round; empty when the map has no ``/clusters``.
+        """
+        with self.open() as grp:
+            if CLUSTERS_GROUP not in grp:
+                return []
+            return cluster_rounds(grp[CLUSTERS_GROUP])
+
+    @functools.cached_property
+    def clusters(self) -> pd.DataFrame:
+        """One row per cluster of every clustering round.
+
+        The columns are ``round`` and ``name``; ``parent_round`` and
+        ``parent``, the round and name of the cluster it was split from
+        (missing for none); ``n_contigs`` and ``length``, over its members
+        (:meth:`cluster_members`); then the columns its tool stored.
+
+        Returns:
+            DataFrame indexed by cluster id, the ``cluster_id`` of the stored
+            members; empty, with the columns above, when the map has no
+            ``/clusters``.
+        """
+        columns = ["round", "name", "parent_round", "parent", "n_contigs", "length"]
+        with self.open() as grp:
+            if CLUSTERS_GROUP not in grp:
+                return pd.DataFrame(columns=columns)
+            table = _decode_table_group(grp[CLUSTERS_GROUP]["table"])
+        round_names = np.array([r["name"] for r in self.cluster_rounds], dtype=object)
+        rounds = round_names[table["round"].to_numpy(np.int64)]
+        parents = table["parent"].to_numpy(np.int64)
+        has = parents >= 0
+        parent_round = np.full(len(table), None, dtype=object)
+        parent = np.full(len(table), None, dtype=object)
+        parent_round[has] = rounds[parents[has]]
+        parent[has] = table["name"].to_numpy(dtype=object)[parents[has]]
+        out = pd.DataFrame(
+            {
+                "round": rounds,
+                "name": table["name"].to_numpy(dtype=object),
+                "parent_round": parent_round,
+                "parent": parent,
+                "n_contigs": table["n_contigs"].to_numpy(),
+                "length": table["length"].to_numpy(),
+            }
+        )
+        extra = table.drop(columns=list(CLUSTER_TABLE_COLUMNS))
+        return pd.concat([out, extra], axis=1)
+
+    def cluster_members(self, round: str | None = None) -> pd.DataFrame:
+        """The contigs of each cluster, one row per membership.
+
+        Args:
+            round: The name of one round, to read its clusters only; ``None``
+                for every round.
+
+        Returns:
+            DataFrame with the columns ``round``, ``cluster`` and ``contig``
+            (names), sorted by cluster, then contig row; empty when the map
+            has no ``/clusters``.
+
+        Raises:
+            KeyError: If *round* is not a round of the map.
+        """
+        names = [r["name"] for r in self.cluster_rounds]
+        if round is not None and round not in names:
+            raise KeyError(
+                f"{round!r} is not a clustering round of {self.uri}; its rounds: "
+                f"{', '.join(names) or 'none'}."
+            )
+        columns = ["round", "cluster", "contig"]
+        with self.open() as grp:
+            if CLUSTERS_GROUP not in grp:
+                return pd.DataFrame(columns=columns)
+            members = grp[CLUSTERS_GROUP]["members"]
+            offsets = np.asarray(grp[CLUSTERS_GROUP]["indexes"]["cluster_offset"][()])
+            cluster_ids = np.asarray(members["cluster_id"][()]).astype(np.int64)
+            contig_ids = np.asarray(members["contig_id"][()]).astype(np.int64)
+        clusters = self.clusters
+        if round is not None:
+            rows = np.flatnonzero(clusters["round"].to_numpy() == round)
+            if len(rows):
+                lo, hi = int(offsets[rows[0]]), int(offsets[rows[-1] + 1])
+                cluster_ids, contig_ids = cluster_ids[lo:hi], contig_ids[lo:hi]
+            else:
+                cluster_ids = contig_ids = np.zeros(0, dtype=np.int64)
+        contig_names = self.contigs["name"].to_numpy(dtype=object)
+        return pd.DataFrame(
+            {
+                "round": clusters["round"].to_numpy(dtype=object)[cluster_ids],
+                "cluster": clusters["name"].to_numpy(dtype=object)[cluster_ids],
+                "contig": contig_names[contig_ids],
+            },
+            columns=columns,
+        )
 
     # ------------------------------------------------------------------
     # Index lookups

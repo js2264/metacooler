@@ -66,6 +66,7 @@ from metacooler.io._utils import (
     write_column,
     write_cooler,
 )
+from metacooler.io.clusters import copy_clusters
 from metacooler.io.colspec import CONTIGS_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
 from metacooler.io.create import (
     _build_contig_order,
@@ -810,6 +811,10 @@ def _rewrite_regrouped(
         assembly_name=mc.info.get("assembly"),
         binsize=binsize,
     )
+    # The clustering rounds name contigs by row: renumber them with the rows.
+    new_row = pd.Index(contig_order).get_indexer(mc.contigs["name"].astype(str))
+    with mc.open() as src, h5py.File(target, "r+") as dst:
+        copy_clusters(src, dst, new_row, contigs["length"].to_numpy(np.int64))
 
 
 def _carried_contig_qc(block: object, old_contigs: pd.DataFrame) -> pd.DataFrame | None:

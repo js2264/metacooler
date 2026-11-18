@@ -24,7 +24,7 @@ from metacooler.qc import (
     strip_qc_columns,
     strip_qc_metadata,
 )
-from metacooler.schema import DEFAULT_CHUNKSIZE
+from metacooler.schema import CLUSTERS_GROUP, DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -797,6 +797,27 @@ def _write_rebinned_metacool(
     with h5py.File(output, "r+") as f:
         f.attrs["bin-type"] = "fixed"
         f.attrs["bin-size"] = int(binsize)
+
+    # Binned by contig, the contigs are the source's, row for row: so are its
+    # clustering rounds. Binned by genome, they are not, and the rounds, which
+    # group the source's contigs, are dropped.
+    if source_uri:
+        from metacooler.io.clusters import copy_clusters
+        from metacooler.uri import parse_uri
+
+        source_path, source_group = parse_uri(str(source_uri))
+        key = source_group.strip("/")
+        with h5py.File(source_path, "r") as fs, h5py.File(output, "r+") as f:
+            source = fs[key] if key else fs
+            if level == "contig":
+                copy_clusters(source, f)
+            elif CLUSTERS_GROUP in source:
+                logger.warning(
+                    "%s holds clustering rounds of its contigs, which %s, "
+                    "binned by genome, has not: they are not carried.",
+                    source_uri,
+                    output,
+                )
 
     validate(output)
     logger.info("Written rebinned metacool to %s", output)

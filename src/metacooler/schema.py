@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -282,6 +283,200 @@ def _check_offset_ends(
     if first != 0 or last != total:
         raise MetaCoolerFormatError(
             f"{name} endpoints ({first}, {last}) do not bracket the table (0, {total})"
+        )
+
+
+#: The optional group of the clustering rounds (see docs/format.md#clusters),
+#: and the columns metacooler requires in each of its two tables.
+CLUSTERS_GROUP = "clusters"
+CLUSTER_TABLE_COLUMNS = ("round", "name", "parent", "n_contigs", "length")
+CLUSTER_MEMBER_COLUMNS = ("cluster_id", "contig_id")
+
+
+def cluster_rounds(clusters: h5py.Group) -> list[dict]:
+    """The ``@rounds`` attribute of a ``/clusters`` group, checked.
+
+    Args:
+        clusters: The ``/clusters`` group.
+
+    Returns:
+        One dict per round, in order, each with a ``name``.
+
+    Raises:
+        MetaCoolerFormatError: If the attribute is missing, is not a JSON list
+            of objects, or a round's name is missing, empty, repeated or not
+            ASCII.
+    """
+    raw = clusters.attrs.get("rounds")
+    if raw is None:
+        raise MetaCoolerFormatError("/clusters has no 'rounds' attribute")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        rounds = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise MetaCoolerFormatError(
+            f"/clusters attrs['rounds'] is not JSON: {exc}"
+        ) from exc
+    if not isinstance(rounds, list) or not all(
+        isinstance(r, dict) and isinstance(r.get("name"), str) and r["name"]
+        for r in rounds
+    ):
+        raise MetaCoolerFormatError(
+            "/clusters attrs['rounds'] must be a list of objects, each with a "
+            "non-empty 'name'"
+        )
+    names = [r["name"] for r in rounds]
+    if len(set(names)) != len(names):
+        raise MetaCoolerFormatError("/clusters round names are not unique")
+    if not all(name.isascii() for name in names):
+        raise MetaCoolerFormatError("/clusters round names must be ASCII")
+    return rounds
+
+
+def _check_clusters_structure(clusters: h5py.Group) -> None:
+    """The O(n_columns) checks of a ``/clusters`` group (see :func:`validate`).
+
+    Raises:
+        MetaCoolerFormatError: If a table, a column or the index is missing,
+            the columns of a table have unequal lengths, or ``cluster_offset``
+            does not bracket the members.
+    """
+    cluster_rounds(clusters)
+    lengths = {}
+    for table, columns in (
+        ("table", CLUSTER_TABLE_COLUMNS),
+        ("members", CLUSTER_MEMBER_COLUMNS),
+    ):
+        if not isinstance(clusters.get(table), h5py.Group):
+            raise MetaCoolerFormatError(f"Missing group: /clusters/{table}")
+        for column in columns:
+            if column not in clusters[table]:
+                raise MetaCoolerFormatError(
+                    f"Missing column in /clusters/{table}: {column}"
+                )
+        lengths[table] = _table_length(clusters[table], f"clusters/{table}")
+    indexes = clusters.get("indexes")
+    if not isinstance(indexes, h5py.Group) or "cluster_offset" not in indexes:
+        raise MetaCoolerFormatError("Missing index: /clusters/indexes/cluster_offset")
+    _check_offset_ends(
+        indexes["cluster_offset"],
+        "cluster_offset",
+        lengths["table"] + 1,
+        lengths["members"],
+    )
+
+
+def _check_clusters(
+    clusters: h5py.Group, n_contigs: int, contig_lengths: np.ndarray
+) -> None:
+    """The full check of a ``/clusters`` group (see docs/format.md#clusters).
+
+    Args:
+        clusters: The ``/clusters`` group, structurally checked already.
+        n_contigs: Rows of ``/contigs``.
+        contig_lengths: ``/contigs/length``, as int64.
+
+    Raises:
+        MetaCoolerFormatError: If a round index, a parent, a cluster id or a
+            contig id is out of range; the rows are not grouped by round in
+            the order of ``@rounds``; a name repeats within its round or is not
+            ASCII; a parent is not of an earlier round; the members are not
+            strictly sorted by ``(cluster_id, contig_id)``; or ``cluster_offset``,
+            ``n_contigs`` or ``length`` does not match the members.
+    """
+    n_rounds = len(cluster_rounds(clusters))
+    table, members = clusters["table"], clusters["members"]
+    for group, columns in (
+        (table, ("round", "parent", "n_contigs", "length")),
+        (members, CLUSTER_MEMBER_COLUMNS),
+    ):
+        for column in columns:
+            if group[column].dtype.kind not in "iu":
+                raise MetaCoolerFormatError(
+                    f"{group.name}/{column} must hold integers, not "
+                    f"{group[column].dtype}"
+                )
+    if table["name"].dtype.kind not in "SO" or (
+        table["name"].dtype.kind == "O"
+        and h5py.check_string_dtype(table["name"].dtype) is None
+    ):
+        raise MetaCoolerFormatError(
+            f"/clusters/table/name must hold text, not {table['name'].dtype}"
+        )
+    rounds = np.asarray(table["round"][()]).astype(np.int64)
+    n_clusters = len(rounds)
+    if n_clusters and (np.min(rounds) < 0 or np.max(rounds) >= n_rounds):
+        raise MetaCoolerFormatError(
+            f"/clusters/table/round values out of range [0, {n_rounds})"
+        )
+    if np.any(np.diff(rounds) < 0):
+        raise MetaCoolerFormatError(
+            "/clusters/table rows are not grouped by round, in the order of "
+            "attrs['rounds']"
+        )
+    names = [
+        name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
+        for name in table["name"][()]
+    ]
+    if not all(name and name.isascii() for name in names):
+        raise MetaCoolerFormatError(
+            "/clusters/table/name must be non-empty ASCII strings"
+        )
+    if len(set(zip(rounds.tolist(), names, strict=True))) != n_clusters:
+        raise MetaCoolerFormatError(
+            "/clusters/table names are not unique within their round"
+        )
+    parents = np.asarray(table["parent"][()]).astype(np.int64)
+    if n_clusters and (np.min(parents) < -1 or np.max(parents) >= n_clusters):
+        raise MetaCoolerFormatError(
+            f"/clusters/table/parent values out of range [-1, {n_clusters})"
+        )
+    has_parent = parents >= 0
+    if np.any(rounds[parents[has_parent]] >= rounds[has_parent]):
+        raise MetaCoolerFormatError(
+            "/clusters/table/parent must be a cluster of an earlier round"
+        )
+
+    cluster_ids = np.asarray(members["cluster_id"][()]).astype(np.int64)
+    contig_ids = np.asarray(members["contig_id"][()]).astype(np.int64)
+    n_members = len(cluster_ids)
+    if n_members:
+        if np.min(cluster_ids) < 0 or np.max(cluster_ids) >= n_clusters:
+            raise MetaCoolerFormatError(
+                f"/clusters/members/cluster_id values out of range [0, {n_clusters})"
+            )
+        if np.min(contig_ids) < 0 or np.max(contig_ids) >= n_contigs:
+            raise MetaCoolerFormatError(
+                f"/clusters/members/contig_id values out of range [0, {n_contigs})"
+            )
+        key = cluster_ids * n_contigs + contig_ids
+        if np.any(np.diff(key) <= 0):
+            raise MetaCoolerFormatError(
+                "/clusters/members are not sorted by (cluster_id, contig_id), or "
+                "a (cluster_id, contig_id) pair is repeated"
+            )
+    offsets = np.asarray(clusters["indexes"]["cluster_offset"][()]).astype(np.int64)
+    _check_offset_array(offsets, "cluster_offset", n_clusters + 1, n_members)
+    counts = np.bincount(cluster_ids, minlength=n_clusters)
+    expected = np.zeros(n_clusters + 1, dtype=np.int64)
+    expected[1:] = np.cumsum(counts)
+    if not np.array_equal(offsets, expected):
+        raise MetaCoolerFormatError(
+            "/clusters/indexes/cluster_offset is inconsistent with the members"
+        )
+    if not np.array_equal(np.asarray(table["n_contigs"][()]).astype(np.int64), counts):
+        raise MetaCoolerFormatError(
+            "/clusters/table/n_contigs does not match the members"
+        )
+    lengths = np.bincount(
+        cluster_ids,
+        weights=contig_lengths[contig_ids].astype(np.float64),
+        minlength=n_clusters,
+    ).astype(np.int64)
+    if not np.array_equal(np.asarray(table["length"][()]).astype(np.int64), lengths):
+        raise MetaCoolerFormatError(
+            "/clusters/table/length does not match the lengths of the members"
         )
 
 
@@ -640,6 +835,12 @@ def validate(uri: str | Path, *, full: bool = True) -> None:
                 raise MetaCoolerFormatError(f"indexes/{ds_name} is missing")
             _check_offset_ends(idx[ds_name], ds_name, expected_len, total)
 
+        clusters = f.get(CLUSTERS_GROUP)
+        if clusters is not None:
+            if not isinstance(clusters, h5py.Group):
+                raise MetaCoolerFormatError("/clusters is not a group")
+            _check_clusters_structure(clusters)
+
         if not full:
             return
 
@@ -829,6 +1030,10 @@ def validate(uri: str | Path, *, full: bool = True) -> None:
                 f"declares {int(genome_lengths[bad])} bp but its contigs sum to "
                 f"{int(expected_lengths[bad])} bp"
             )
+
+        # --- the clustering rounds, when the map has them ---
+        if clusters is not None:
+            _check_clusters(clusters, n_contigs, contig_lengths.astype(np.int64))
 
         # --- pixel ordering, range, and upper-triangle ---
         # Global bin1_id ordering is proven by the monotonicity of bin1_offset
@@ -1351,19 +1556,22 @@ def read_table(uri: str | Path, group: str) -> pd.DataFrame:
     """
     path = Path(uri)
     with h5py.File(path, "r", track_order=True) as f:
-        g = f[group]
-        columns = {}
-        for key in g:
-            ds = g[key]
-            data = ds[:]
-            # Decode fixed-length byte strings to str (like cooler). Use an
-            # explicit UTF-8 decode: ``astype("U")`` decodes as ASCII and raises
-            # UnicodeDecodeError on any non-ASCII byte (e.g. a "é" in a name),
-            # which would break every read of a file that metacooler itself
-            # wrote.
-            if data.dtype.kind == "S":
-                data = np.char.decode(data, "utf-8")
-            elif data.dtype == object and len(data) > 0 and isinstance(data[0], bytes):
-                data = np.array([x.decode("utf-8") for x in data])
-            columns[key] = data
+        return _decode_table_group(f[group])
+
+
+def _decode_table_group(group: h5py.Group) -> pd.DataFrame:
+    """The table an open HDF5 group holds, as :func:`read_table` returns it."""
+    columns = {}
+    for key in group:
+        data = group[key][:]
+        # Decode fixed-length byte strings to str (like cooler). Use an
+        # explicit UTF-8 decode: ``astype("U")`` decodes as ASCII and raises
+        # UnicodeDecodeError on any non-ASCII byte (e.g. a "é" in a name),
+        # which would break every read of a file that metacooler itself
+        # wrote.
+        if data.dtype.kind == "S":
+            data = np.char.decode(data, "utf-8")
+        elif data.dtype == object and len(data) > 0 and isinstance(data[0], bytes):
+            data = np.array([x.decode("utf-8") for x in data])
+        columns[key] = data
     return pd.DataFrame(columns)

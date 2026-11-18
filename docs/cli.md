@@ -1144,7 +1144,7 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-t, --table` | `pixels` | `bins`, `chroms`, `contigs`, `genomes`, `pixels`, `indexes`, or `all`. |
+| `-t, --table` | `pixels` | `bins`, `chroms`, `contigs`, `genomes`, `pixels`, `indexes`, `clusters`, `members`, or `all`. |
 | `--genomes` | — | Filter rows to the named genome(s). |
 | `--contigs` | — | Filter rows to the named contig(s). |
 | `--filter` | — | Filter rows by property, e.g. `--filter "contigs.length >= 10kb"`. Repeatable; narrows `--genomes`/`--contigs`. See [Filtering with `--filter`](#filter). |
@@ -1160,9 +1160,15 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
 `-t contigs` adds a `genome` column next to the internal `genome_id`, and
-`-t genomes`/`-t chroms` respect `--genomes`/`--contigs`. `-t all` writes
-`<prefix>.genomes.tsv`, `.contigs.tsv`, `.bins.tsv`, `.pixels.tsv`, and
-`.indexes.tsv`; `chroms` is omitted because it duplicates `contigs`.
+`-t genomes`/`-t chroms` respect `--genomes`/`--contigs`. `-t clusters` and
+`-t members` dump the [clustering rounds](format.md#clusters) of a map that has
+them: one row per cluster (`round`, `name`, `parent_round`, `parent`,
+`n_contigs`, `length`, then its tool's columns), and one row per contig of a
+cluster (`round`, `cluster`, `contig`); a contig selection keeps the clusters
+that hold a selected contig. `-t all` writes `<prefix>.genomes.tsv`,
+`.contigs.tsv`, `.bins.tsv`, `.pixels.tsv`, and `.indexes.tsv`, and
+`.clusters.tsv` and `.members.tsv` for a map with clustering rounds; `chroms`
+is omitted because it duplicates `contigs`.
 
 !!! note "Incompatible combinations are now errors"
     Options that do not apply to the chosen table used to be accepted and
@@ -1171,7 +1177,7 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 
     | Combination | Why it fails |
     |-------------|--------------|
-    | `--weight` / `--join` with `-t bins/chroms/contigs/genomes/indexes` | Only the pixels table has a value column or coordinates to join. |
+    | `--weight` / `--join` with `-t bins/chroms/contigs/genomes/indexes/clusters/members` | Only the pixels table has a value column or coordinates to join. |
     | `--genomes` / `--contigs` / `--filter` with `-t indexes` | The indexes table has no genome or contig dimension. |
     | `-o/--output` with `-t all` | `all` writes one file per table — use `--prefix`. |
     | `--prefix` with any table other than `all` | Single-table dumps go to `-o/--output`. |

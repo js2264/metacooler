@@ -89,7 +89,17 @@ def _selected_pixels(
 
 def dump_table(
     uri: str | Path,
-    table: Literal["bins", "chroms", "contigs", "genomes", "pixels", "indexes", "all"],
+    table: Literal[
+        "bins",
+        "chroms",
+        "contigs",
+        "genomes",
+        "pixels",
+        "indexes",
+        "clusters",
+        "members",
+        "all",
+    ],
     genomes: list[str] | None = None,
     contigs: list[str] | None = None,
     filters: list[str] | None = None,
@@ -148,6 +158,8 @@ def dump_table(
         # ``chroms`` is intentionally omitted: it is the cooler soft-link alias
         # of ``contigs[["name", "length"]]`` and would duplicate the contigs file.
         tables = ("genomes", "contigs", "bins", "pixels", "indexes")
+        if mc.cluster_rounds:
+            tables += ("clusters", "members")
         # Guard every destination up front so a clash on the last table does
         # not leave the first four already overwritten.
         for tbl in tables:
@@ -212,6 +224,23 @@ def dump_table(
         core = ["name", "length", "n_contigs"]
         extras = [c for c in df.columns if c not in core]
         df = df[core + extras]
+    elif table in ("clusters", "members"):
+        # The clustering rounds: every cluster, or every membership, that
+        # holds a selected contig.
+        members = mc.cluster_members()
+        if selected_contig_ids is not None:
+            names = mc.contigs.loc[sorted(selected_contig_ids), "name"]
+            members = members[members["contig"].isin(set(names))]
+        if table == "members":
+            df = members.reset_index(drop=True)
+        else:
+            df = mc.clusters
+            if selected_contig_ids is not None:
+                kept = set(zip(members["round"], members["cluster"], strict=True))
+                rows = [
+                    key in kept for key in zip(df["round"], df["name"], strict=True)
+                ]
+                df = df.loc[rows]
     elif table == "pixels":
         # Pre-compute filter parameters that are independent of chunk
         valid_bin_ids: np.ndarray | None = None

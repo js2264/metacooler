@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Added
+
+- **Clustering rounds: the `/clusters` group** (see
+  [the format](format.md#clusters)). A tool that groups contigs into genomes
+  can store the rounds of its latest run in the map: one table of every
+  cluster of every round (`round`, `name`, `parent`, `n_contigs`, `length` and
+  its own columns, such as completeness), and the contigs of each cluster, a
+  contig possibly in several. metaTOR keeps its overlapping, recursive and
+  final clusters there, so the intermediate clusters stay out of `/genomes` and
+  `/contigs`, which hold the current assignment. Python:
+  `metacooler.write_clusters` (replaces the group whole: one run at a time) and
+  `drop_clusters`; `MetaCooler.cluster_rounds`, `clusters` and
+  `cluster_members(round=)`. `dump -t clusters` and `-t members` write them out,
+  `validate()` and `check` check them, and the commands that write a map from a
+  map keep them: `reassign` (renumbering their contigs when it re-groups them),
+  `annotate`, `merge` (the first input's, with a warning about an input whose
+  rounds differ), `binnify` by contig, `zoomify` and the `.mmetacool`
+  entries (`binnify --level genome` makes other contigs, and warns that it
+  drops them). The group is optional: a map without it is unchanged. metacooler
+  0.3.0 reads a map with it; of the maps it writes from that map, those it
+  copies keep the group (`annotate`, a relabelling `reassign`, the
+  `.mmetacool` entries, the base level of `zoomify`) and those it rewrites
+  drop it (a re-grouping `reassign`, `binnify`, `merge`, the coarser levels
+  of `zoomify`).
+
 ### Changed
 
 - **A pairs file's compression is read from its content**, whatever its name:

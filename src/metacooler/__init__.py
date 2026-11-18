@@ -29,6 +29,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from metacooler.api import MetaCooler
     from metacooler.io.annotate import annotate
+    from metacooler.io.clusters import drop_clusters, write_clusters
     from metacooler.io.collect import collect
     from metacooler.io.create import from_cool, from_pairs
     from metacooler.io.dump import dump_table
@@ -71,6 +72,8 @@ __all__ = [
     # transforms and readers
     "reassign",
     "annotate",
+    "write_clusters",
+    "drop_clusters",
     "extract",
     "flatten",
     "merge",
@@ -131,6 +134,14 @@ def __getattr__(name: str) -> object:
         from metacooler.io.reassign import reassign as _reassign
 
         return _reassign
+    if name == "write_clusters":
+        from metacooler.io.clusters import write_clusters as _write_clusters
+
+        return _write_clusters
+    if name == "drop_clusters":
+        from metacooler.io.clusters import drop_clusters as _drop_clusters
+
+        return _drop_clusters
     if name == "annotate":
         from metacooler.io.annotate import annotate as _annotate
 

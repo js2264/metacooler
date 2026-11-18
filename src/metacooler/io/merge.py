@@ -24,6 +24,7 @@ from metacooler.io._utils import (
     write_column,
     write_cooler,
 )
+from metacooler.io.clusters import clusters_digest, copy_clusters
 from metacooler.qc import (
     QC_CATEGORIES,
     QC_CONTIG_COLUMNS,
@@ -697,7 +698,9 @@ def merge(
     lengths, contig-to-genome assignment, bins per genome -- with the same
     bins and the same ``contig-ordering`` attribute.  Their metadata columns
     (completeness, coverage, ...) may differ: the output keeps the first
-    input's, and each difference is reported as a warning.  Pixels from all
+    input's, and each difference is reported as a warning.  So may their
+    clustering rounds (``/clusters``): the output keeps the first input's,
+    with a warning about each input whose rounds differ.  Pixels from all
     inputs are concatenated, re-sorted externally by
     ``cooler.merge_coolers()``, and saved to *output* (when no input has a
     pixel, *output* is written with none, as ``merge_coolers`` would write
@@ -753,6 +756,7 @@ def merge(
         contigs_hash = _hash_group(f0, "contigs")
         genomes_hash = _hash_group(f0, "genomes")
         metadata_digests = _metadata_digests(f0)
+        clusters_digest_first = clusters_digest(f0)
         # ``contig-ordering`` may be absent or explicitly null; normalise both
         # sides of the comparison so a missing attribute does not later become
         # ``f.attrs[...] = None``, which h5py rejects with a raw TypeError.
@@ -805,6 +809,14 @@ def merge(
                 raise ValueError(
                     f"storage-mode mismatch: {first} stores {storage_mode!r} but "
                     f"{inp} stores {other_mode!r}; a merge needs one."
+                )
+            if clusters_digest(f) != clusters_digest_first:
+                logger.warning(
+                    "%s has other clustering rounds than %s (or none): the merged "
+                    "map keeps those of %s.",
+                    inp,
+                    first,
+                    first,
                 )
             differences = _metadata_differences(metadata_digests, _metadata_digests(f))
             if differences:
@@ -871,6 +883,9 @@ def merge(
         if "genome_offset" in fdst["indexes"]:
             del fdst["indexes"]["genome_offset"]
         fdst["indexes"].copy(fsrc["indexes"]["genome_offset"], "genome_offset")
+
+        # The clustering rounds, as metadata: the first input's.
+        copy_clusters(fsrc, fdst)
 
         # Strip cooler's enum dtype from bins/chrom — cooler.merge_coolers()
         # always writes bins/chrom as an HDF5 enum type, which is inconsistent
