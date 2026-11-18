@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import gzip
 import importlib
 import itertools
@@ -175,12 +176,22 @@ def read_user_table(
         raise ValueError(f"{kind} has no non-blank lines: {path}")
 
     # Every read below passes keep_default_na=False so that a genome or contig
-    # literally named "NA", "nan" or "None" is not turned into a missing value.
+    # literally named "NA", "nan" or "None" is not turned into a missing value,
+    # and quoting=QUOTE_NONE so that a '"' is an ordinary character. These are
+    # tab-separated tables, not CSV: honouring quotes let one stray '"' in a
+    # free-text column (CheckM2's Additional_Notes, say) swallow every row up
+    # to the next '"' into a single field -- rows the raw field count above
+    # cannot see, so they vanished silently and their contigs went unbinned.
     if not header:
         widest = max(counts)
         _warn_ragged_rows(counts, widest, kind, path, first_line=1)
         return pd.read_csv(
-            path, sep="\t", header=None, dtype=str, keep_default_na=False
+            path,
+            sep="\t",
+            header=None,
+            dtype=str,
+            keep_default_na=False,
+            quoting=csv.QUOTE_NONE,
         )
 
     n_header, data_counts = counts[0], counts[1:]
@@ -196,7 +207,14 @@ def read_user_table(
         )
 
     df = _drop_trailing_unnamed_columns(
-        pd.read_csv(path, sep="\t", header=0, dtype=str, keep_default_na=False),
+        pd.read_csv(
+            path,
+            sep="\t",
+            header=0,
+            dtype=str,
+            keep_default_na=False,
+            quoting=csv.QUOTE_NONE,
+        ),
         kind,
     )
     n_named = df.shape[1]
@@ -264,6 +282,21 @@ def rename_key_columns(
                 "%s column %r contains '/', which HDF5 reads as a group path; "
                 "stored as %r.",
                 kind,
+                name,
+                fixed,
+            )
+            name = fixed
+        if name.strip(".") == "":
+            # "." names the group itself and ".." its parent: h5py refuses both
+            # (and an empty name) as a dataset name -- but only at write time,
+            # after create's whole pairs pass or halfway through an in-place
+            # annotate. Every '/' was handled above, so this is the rest.
+            fixed = f"col{i + 1}"
+            logger.warning(
+                "%s column %d is named %r, which HDF5 cannot store as a "
+                "dataset name; stored as %r.",
+                kind,
+                i + 1,
                 name,
                 fixed,
             )
@@ -1316,29 +1349,31 @@ def _filter_by_genomes_and_contigs(
     all_genomes = mc.genomes
     all_contigs = mc.contigs
     selected: set[int] = set()
-    known_genomes = set(all_genomes["name"])
-    known_contigs = set(all_contigs["name"])
 
+    # One membership test over each table for the whole list, never one scan
+    # per name: that made a list of 5 000 contigs cost 7 s at 200 k contigs.
     if genomes:
+        known_genomes = set(all_genomes["name"])
         for g in genomes:
             if g not in known_genomes:
                 available = all_genomes["name"].tolist()
                 raise KeyError(
                     f"Genome {g!r} not found. Available ({len(available)} total): {available[:20]}..."
                 )
-            gid = int(all_genomes.loc[all_genomes["name"] == g].index[0])
-            cids = all_contigs.index[all_contigs["genome_id"] == gid].tolist()
-            selected.update(cids)
+        gids = all_genomes.index[all_genomes["name"].isin(set(genomes))]
+        selected.update(all_contigs.index[all_contigs["genome_id"].isin(gids)].tolist())
 
     if contigs:
+        known_contigs = set(all_contigs["name"])
         for c in contigs:
             if c not in known_contigs:
                 available = all_contigs["name"].tolist()
                 raise KeyError(
                     f"Contig {c!r} not found. Available ({len(available)} total): {available[:20]}..."
                 )
-            cid = int(all_contigs.loc[all_contigs["name"] == c].index[0])
-            selected.add(cid)
+        selected.update(
+            all_contigs.index[all_contigs["name"].isin(set(contigs))].tolist()
+        )
 
     return selected
 

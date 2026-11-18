@@ -94,6 +94,12 @@ def _aggregate_pairs(
         chunk = mc._clr.pixels()[lo : lo + chunksize]
         b1, b2, values = _weighted(chunk, weight, weights)
         n1, n2 = to_upper_triangle(bin_to_node[b1], bin_to_node[b2])
+        # A node pair sums every pixel between two contigs or genomes, and
+        # aggregate_pixels keeps the dtype it is given: an int32 count column
+        # (what create writes) wrapped past 2**31 to a negative edge weight.
+        # Widen integers as ops/aggregate does; float weights pass unchanged.
+        if np.issubdtype(values.dtype, np.integer):
+            values = values.astype(np.int64, copy=False)
         df = pd.DataFrame(
             {"bin1_id": n1, "bin2_id": n2, "count": values},
             copy=False,

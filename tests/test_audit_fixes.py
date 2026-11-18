@@ -1,0 +1,701 @@
+"""Regression tests from the audit of the 0.2.0 release.
+
+Every test in this module pins down a defect found while re-auditing the
+package after 0.2.0 was published. As in ``test_regressions.py``, each
+docstring states what went wrong before the fix, and the tests assert on
+observable behaviour (file contents, exit codes, raised messages) rather than
+on how the fix is implemented.
+"""
+
+from __future__ import annotations
+
+import ast
+import os
+from pathlib import Path
+
+import cooler
+import numpy as np
+import pandas as pd
+import pytest
+from _cli_output import flat
+from click.testing import CliRunner
+
+import metacooler.cli
+from metacooler.api import MetaCooler
+from metacooler.cli.main import cli
+from metacooler.io._utils import read_user_table
+from metacooler.io.merge import merge
+from metacooler.schema import validate
+
+
+def _ids(ranges: np.ndarray) -> np.ndarray:
+    """The bin ids of ``[lo, hi)`` *ranges*, concatenated."""
+    return np.concatenate([np.arange(lo, hi) for lo, hi in ranges])
+
+
+def _run(*args: object):
+    return CliRunner().invoke(cli, [str(a) for a in args])
+
+
+class TestQuotedFieldsInUserTables:
+    """A stray '"' in a free-text column swallowed every row up to the next one.
+
+    ``pd.read_csv`` honours quotes by default, so ``"draft`` on one row and
+    ``curated"`` three rows later became one field spanning the rows between
+    them. The raw field count that guards against misaligned tables counts tabs
+    and could not see it: the rows vanished silently, and in ``create`` their
+    contigs went to ``__unbinned__`` with exit status 0.
+    """
+
+    TABLE = (
+        "contig_name\tgenome_name\tnote\n"
+        'contig_A\tMAG_1\t"draft\n'
+        "contig_B\tMAG_1\tok\n"
+        "contig_C\tMAG_2\tok\n"
+        'contig_D\tMAG_2\tcurated"\n'
+    )
+
+    def test_every_row_is_read_and_quotes_are_kept_verbatim(self, tmp_path: Path):
+        f = tmp_path / "t.tsv"
+        f.write_text(self.TABLE)
+        df = read_user_table(f, kind="Contig table")
+        assert df["contig_name"].tolist() == [
+            "contig_A",
+            "contig_B",
+            "contig_C",
+            "contig_D",
+        ]
+        assert df["note"].tolist() == ['"draft', "ok", "ok", 'curated"']
+
+    def test_headerless_tables_too(self, tmp_path: Path):
+        f = tmp_path / "t.tsv"
+        f.write_text("".join(self.TABLE.splitlines(keepends=True)[1:]))
+        df = read_user_table(f, kind="Contig table", header=False)
+        assert len(df) == 4
+
+    def test_create_assigns_every_listed_contig(
+        self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path
+    ):
+        table = tmp_path / "t.tsv"
+        table.write_text(self.TABLE)
+        out = tmp_path / "o.metacool"
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--bins", tiny_bins_bed,
+            "--contigs", table, "-o", out, "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        genomes = MetaCooler(out).genomes.set_index("name")["n_contigs"]
+        assert genomes.to_dict() == {"MAG_1": 2, "MAG_2": 2}
+        notes = MetaCooler(out).contigs.set_index("name")["note"]
+        assert notes["contig_A"] == '"draft'
+
+
+class TestNetworkIntegerOverflow:
+    """``network`` summed int32 counts in int32, printing negative edge weights.
+
+    The 0.2.0 rewrite routed the sum through ``aggregate_pixels``, which keeps
+    the input dtype, so a contig or genome pair totalling more than 2**31
+    contacts -- the ``__unbinned__`` self-edge of a deep library, say -- wrapped
+    to a negative number while ``aggregate`` reported the right total.
+    """
+
+    @pytest.fixture
+    def heavy(self, tmp_path: Path) -> Path:
+        bins = pd.DataFrame(
+            {
+                "chrom": ["c1"] * 3 + ["c2"] * 2,
+                "start": [0, 10, 20, 0, 10],
+                "end": [10, 20, 30, 10, 20],
+            }
+        )
+        pixels = pd.DataFrame(
+            {
+                "bin1_id": [0, 1, 3],
+                "bin2_id": [1, 2, 4],
+                "count": np.array([1_500_000_000, 1_500_000_000, 7], dtype=np.int32),
+            }
+        )
+        src = tmp_path / "heavy.cool"
+        cooler.create_cooler(
+            str(src), bins, pixels, dtypes={"count": np.int32}, ordered=True
+        )
+        table = tmp_path / "c.tsv"
+        table.write_text("contig_name\tgenome_name\nc1\tG1\nc2\tG2\n")
+        out = tmp_path / "heavy.metacool"
+        result = _run(
+            "create", "cool", "--cool", src, "--contigs", table, "-o", out, "--no-qc"
+        )
+        assert result.exit_code == 0, result.output
+        assert cooler.Cooler(str(out)).pixels()[:]["count"].dtype == np.int32
+        return out
+
+    @pytest.mark.parametrize(("level", "node"), [("genome", "G1"), ("contig", "c1")])
+    def test_edge_weight_is_not_wrapped(self, heavy: Path, level: str, node: str):
+        result = _run("network", heavy, "--level", level)
+        assert result.exit_code == 0, result.output
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        edges = {(r[0], r[1]): int(r[2]) for r in rows if len(r) == 3}
+        assert edges[(node, node)] == 3_000_000_000
+
+
+class TestCollectOutputGuard:
+    """``collect -f`` deleted its own inputs, and a previous output it then failed to replace.
+
+    Its ``check_output`` call passed neither ``inputs=`` nor ``defer_removal``
+    -- the one command added after the guard was introduced, and the one that
+    missed it. ``collect A.cool B.cool --genomes g.tsv -o g.tsv -f`` deleted
+    ``g.tsv`` and then failed with "Genomes table not found".
+    """
+
+    @pytest.fixture
+    def cools(self, tmp_path: Path, tiny_cool: Path) -> list[Path]:
+        out = []
+        for name in ("A", "B"):
+            dst = tmp_path / f"{name}.cool"
+            dst.write_bytes(tiny_cool.read_bytes())
+            out.append(dst)
+        return out
+
+    @pytest.mark.parametrize("option", ["--genomes", "--metadata"])
+    def test_an_input_table_survives_being_named_as_output(
+        self, tmp_path: Path, cools: list[Path], option: str
+    ):
+        table = tmp_path / "in.tsv"
+        table.write_text("genome_name\tphylum\nA\tx\nB\ty\n")
+        if option == "--metadata":
+            table = tmp_path / "in.yaml"
+            table.write_text("project: x\n")
+        before = table.read_bytes()
+        result = _run("collect", *cools, option, table, "-o", table, "-f")
+        assert result.exit_code != 0
+        assert "same file as the input" in flat(result.output)
+        assert table.read_bytes() == before
+
+    def test_an_input_cool_survives_being_named_as_output(self, cools: list[Path]):
+        before = cools[0].read_bytes()
+        result = _run("collect", *cools, "-o", cools[0], "-f")
+        assert result.exit_code != 0
+        assert cools[0].read_bytes() == before
+
+    def test_a_failed_run_keeps_the_previous_output(
+        self, tmp_path: Path, cools: list[Path]
+    ):
+        out = tmp_path / "prev.metacool"
+        assert _run("collect", *cools, "-o", out).exit_code == 0
+        before = out.read_bytes()
+        bad = tmp_path / "bad.tsv"
+        bad.write_text("no_such_column\tx\nA\t1\n")
+        result = _run("collect", *cools, "--genomes", bad, "-o", out, "-f")
+        assert result.exit_code != 0
+        assert out.read_bytes() == before
+
+
+def test_every_command_names_its_inputs_to_the_output_guard():
+    """Structural guard: a new command cannot forget ``inputs=`` again.
+
+    ``collect`` was added after the guard learned to refuse an output that is
+    one of the inputs, and its bare ``check_output(output, force)`` silently
+    reintroduced the input-deleting ``-f``. Every call in the CLI must say what
+    the command reads.
+    """
+    cli_dir = Path(metacooler.cli.__file__).parent
+    missing = []
+    for path in sorted(cli_dir.glob("cmd_*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "check_output"
+                and not any(k.arg == "inputs" for k in node.keywords)
+            ):
+                missing.append(f"{path.name}:{node.lineno}")
+    assert not missing, f"check_output without inputs=: {missing}"
+
+
+class TestUserQcColumns:
+    """A user's ``qc_*`` column in ``/genomes`` was accepted, then silently lost.
+
+    Every ``qc_*`` column of ``/genomes`` is metacooler's QC namespace -- the
+    writers that derive one map from another strip it -- yet ``create``,
+    ``collect`` and ``annotate`` stored a user's ``qc_pass`` there under its own
+    name. The next ``reassign`` (even one changing nothing) deleted it without
+    a word, and ``annotate --drop genomes.qc_pass`` refused it as derived. It is
+    now renamed ``user_qc_pass`` on the way in, like any other reserved name.
+    """
+
+    @pytest.fixture
+    def tables(self, tmp_path: Path, tiny_contigs_table: Path) -> tuple[Path, Path]:
+        genomes = tmp_path / "g.tsv"
+        genomes.write_text(
+            "genome_name\tqc_pass\tphylum\nMAG_1\tyes\tA\nMAG_2\tno\tB\n"
+        )
+        contigs = tmp_path / "c.tsv"
+        contigs.write_text(
+            "contig_name\tgenome_name\tqc_flag\n"
+            "contig_A\tMAG_1\tok\ncontig_B\tMAG_1\tok\ncontig_C\tMAG_2\tlow\n"
+        )
+        return genomes, contigs
+
+    @pytest.fixture
+    def created(
+        self, tmp_path: Path, tables, tiny_pairs: Path, tiny_bins_bed: Path
+    ) -> Path:
+        genomes, contigs = tables
+        out = tmp_path / "a.metacool"
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--bins", tiny_bins_bed,
+            "--contigs", contigs, "--genomes", genomes, "-o", out, "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        return out
+
+    def test_create_renames_it_out_of_the_qc_namespace(self, created: Path):
+        columns = set(MetaCooler(created).genomes.columns)
+        assert "user_qc_pass" in columns
+        assert "qc_pass" not in columns
+        assert (
+            MetaCooler(created).genomes.set_index("name").loc["MAG_1", "user_qc_pass"]
+            == "yes"
+        )
+
+    @pytest.mark.parametrize("layout", ["auto", "keep"])
+    def test_user_columns_survive_reassign(
+        self, tmp_path: Path, created: Path, tables, layout: str
+    ):
+        _, contigs = tables
+        moved = tmp_path / "moved.tsv"
+        moved.write_text(
+            contigs.read_text().replace("contig_C\tMAG_2", "contig_C\tMAG_1")
+        )
+        out = tmp_path / f"r_{layout}.metacool"
+        result = _run(
+            "reassign", created, "--contigs", moved, "--layout", layout, "-o", out
+        )
+        assert result.exit_code == 0, result.output
+        mc = MetaCooler(out)
+        assert "user_qc_pass" in mc.genomes.columns
+        assert mc.contigs.set_index("name").loc["contig_C", "qc_flag"] == "low"
+
+    def test_annotate_renames_it_and_can_drop_it(self, tmp_path: Path, created):
+        extra = tmp_path / "x.tsv"
+        extra.write_text("genome_name\tqc_checked\nMAG_1\t1\nMAG_2\t0\n")
+        out = tmp_path / "ann.metacool"
+        result = _run("annotate", created, "--genomes", extra, "-o", out)
+        assert result.exit_code == 0, result.output
+        assert "user_qc_checked" in MetaCooler(out).genomes.columns
+        dropped = tmp_path / "dropped.metacool"
+        result = _run(
+            "annotate", out, "--drop", "genomes.user_qc_checked", "-o", dropped
+        )
+        assert result.exit_code == 0, result.output
+        assert "user_qc_checked" not in MetaCooler(dropped).genomes.columns
+
+
+class TestHdf5InvalidColumnNames:
+    """A user column named ``.`` passed every check, then failed at write time.
+
+    ``rename_key_columns`` rewrote ``/`` and integer labels but not ``.``,
+    which names the HDF5 group itself: ``create`` failed only after its whole
+    pairs pass, and an in-place ``annotate`` failed halfway through writing.
+    """
+
+    @pytest.mark.parametrize("bad", [".", ".."])
+    def test_create_stores_it_under_a_safe_name(
+        self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path, bad: str
+    ):
+        contigs = tmp_path / "c.tsv"
+        contigs.write_text(
+            f"contig_name\tgenome_name\t{bad}\n"
+            "contig_A\tMAG_1\t1\ncontig_B\tMAG_1\t2\ncontig_C\tMAG_2\t3\n"
+        )
+        genomes = tmp_path / "g.tsv"
+        genomes.write_text(f"genome_name\t{bad}\nMAG_1\tx\nMAG_2\ty\n")
+        out = tmp_path / "o.metacool"
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--bins", tiny_bins_bed,
+            "--contigs", contigs, "--genomes", genomes, "-o", out, "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        assert "col3" in MetaCooler(out).contigs.columns
+        assert "col2" in MetaCooler(out).genomes.columns
+
+
+class TestAnnotateInplaceIsAllOrNothing:
+    """A failure while ``annotate --inplace`` wrote its second table half-edited the map.
+
+    Tables were rebuilt and swapped in one at a time, so a failure building
+    ``/contigs`` left ``/genomes`` already edited, no history recorded, and
+    the ``.annotate-scratch`` group behind.
+    """
+
+    def test_a_failed_build_leaves_the_map_untouched(
+        self, tmp_path: Path, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import h5py
+
+        import metacooler.io.annotate as annotate_mod
+
+        target = tmp_path / "m.metacool"
+        target.write_bytes(tiny_metacooler.read_bytes())
+        genomes = tmp_path / "g.tsv"
+        genomes.write_text("genome_name\tphylum\nMAG_1\tA\nMAG_2\tB\n")
+        contigs = tmp_path / "c.tsv"
+        contigs.write_text("contig_name\tdepth\ncontig_A\t3.5\ncontig_B\t1.0\n")
+        real = annotate_mod.write_column
+
+        def failing(group, name, values):
+            if name == "depth":
+                raise OSError("disk full")
+            return real(group, name, values)
+
+        monkeypatch.setattr(annotate_mod, "write_column", failing)
+        before = {
+            "genomes": list(MetaCooler(target).genomes.columns),
+            "contigs": list(MetaCooler(target).contigs.columns),
+            "metadata": MetaCooler(target).metadata,
+        }
+        with pytest.raises(OSError, match="disk full"):
+            annotate_mod.annotate(
+                target, genomes_table=genomes, contigs_table=contigs, inplace=True
+            )
+        mc = MetaCooler(target)
+        assert list(mc.genomes.columns) == before["genomes"]
+        assert list(mc.contigs.columns) == before["contigs"]
+        assert mc.metadata == before["metadata"]
+        with h5py.File(target, "r") as f:
+            assert annotate_mod._SCRATCH not in f
+        validate(target)
+
+
+class TestRepeatedInputs:
+    """``merge A A`` summed a map with itself and exited 0.
+
+    ``create pairs`` already refused the same pairs file given twice for this
+    reason. Both now identify a file by device and inode, so an alias, symlink
+    or hard link of a listed input is caught too.
+    """
+
+    def test_merge_refuses_the_same_map_twice(self, tmp_path: Path, tiny_metacooler):
+        result = _run("merge", tiny_metacooler, tiny_metacooler, "-o", tmp_path / "m")
+        assert result.exit_code != 0
+        assert "same map" in flat(result.output)
+
+    def test_merge_refuses_a_hard_link(self, tmp_path: Path, tiny_metacooler):
+        link = tmp_path / "link.metacool"
+        os.link(tiny_metacooler, link)
+        with pytest.raises(ValueError, match="same map"):
+            merge([tiny_metacooler, link], tmp_path / "m.metacool")
+
+    def test_two_entries_of_one_collection_still_merge(
+        self, tmp_path: Path, tiny_mmetacool: Path
+    ):
+        out = tmp_path / "m.metacool"
+        merge(
+            [f"{tiny_mmetacool}::entries/entry1", f"{tiny_mmetacool}::entries/entry2"],
+            out,
+        )
+        assert (
+            MetaCooler(out).info["sum"]
+            == 2 * MetaCooler(f"{tiny_mmetacool}::entries/entry1").info["sum"]
+        )
+
+    def test_merge_refuses_one_entry_twice(self, tmp_path: Path, tiny_mmetacool):
+        uri = f"{tiny_mmetacool}::entries/entry1"
+        with pytest.raises(ValueError, match="same map"):
+            merge([uri, uri.replace("::entries", "::/entries")], tmp_path / "m")
+
+    def test_create_refuses_a_hard_linked_pairs_file(
+        self, tmp_path: Path, tiny_pairs: Path, tiny_bins_bed: Path, tiny_contigs_table
+    ):
+        link = tmp_path / "link.pairs"
+        os.link(tiny_pairs, link)
+        result = _run(
+            "create", "pairs", "--pairs", tiny_pairs, "--pairs", link,
+            "--bins", tiny_bins_bed, "--contigs", tiny_contigs_table,
+            "-o", tmp_path / "o.metacool", "--no-ps",
+        )  # fmt: skip
+        assert result.exit_code != 0
+        assert "given twice" in flat(result.output)
+
+
+class TestPairsFileReading:
+    """Two pairs-file shapes that read as something other than what they hold.
+
+    The codec was left to pyarrow's own detection, which matches suffixes
+    case-sensitively: ``R1.PAIRS.GZ`` reached the CSV parser as raw gzip bytes.
+    And a blank line inside the ``#`` header threw off the ``skip_rows`` count,
+    since pyarrow counts blank lines as rows: the last header line was parsed as
+    a one-field data row and the read died on the first real pair. The header's
+    ``#chromsize:`` lines after the blank were ignored as well.
+    """
+
+    BODY = (
+        "r1\tcA\t10\tcA\t900\n"
+        "r2\tcA\t150\tcB\t20\n"
+        "r3\tcB\t5\tcB\t550\n"
+    )  # fmt: skip
+
+    def _create(self, tmp_path: Path, pairs: Path) -> MetaCooler:
+        from metacooler.io.create import from_pairs
+
+        out = tmp_path / f"{pairs.name}.metacool"
+        from_pairs(uri=out, bins=None, binsize=100, pairs=str(pairs))
+        validate(out)
+        return MetaCooler(out)
+
+    def _plain(self, tmp_path: Path) -> MetaCooler:
+        plain = tmp_path / "plain.pairs"
+        plain.write_text("#chromsize: cA 1000\n#chromsize: cB 600\n" + self.BODY)
+        return self._create(tmp_path, plain)
+
+    @pytest.mark.parametrize("name", ["R1.PAIRS.GZ", "r1.Pairs.Gz", "r1.pairs.BGZ"])
+    def test_an_upper_case_suffix_is_decompressed(self, tmp_path: Path, name: str):
+        import gzip
+
+        raw = "#chromsize: cA 1000\n#chromsize: cB 600\n" + self.BODY
+        path = tmp_path / name
+        path.write_bytes(gzip.compress(raw.encode()))
+        mc = self._create(tmp_path, path)
+        expected = self._plain(tmp_path)
+        assert mc.info["sum"] == expected.info["sum"] == 3
+        assert mc.contigs["name"].tolist() == ["cA", "cB"]
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "#chromsize: cA 1000\n\n#chromsize: cB 600\n",
+            "#chromsize: cA 1000\n#chromsize: cB 600\n\n\n",
+            "\n#chromsize: cA 1000\n \t\n#chromsize: cB 600\n",
+        ],
+        ids=["inside", "after", "leading-and-whitespace"],
+    )
+    def test_a_blank_line_in_the_header(self, tmp_path: Path, header: str):
+        path = tmp_path / "blank.pairs"
+        path.write_text(header + self.BODY)
+        mc = self._create(tmp_path, path)
+        assert mc.info["sum"] == 3
+        assert dict(zip(mc.contigs["name"], mc.contigs["length"], strict=True)) == {
+            "cA": 1000,
+            "cB": 600,
+        }
+        pd.testing.assert_frame_equal(mc.pixels(), self._plain(tmp_path).pixels())
+
+
+class TestOneTableOneType:
+    """One contigs table gave a metadata column different types per command.
+
+    ``create`` types a column over every row of the table as read, so a single
+    ``N/A`` -- even on a row naming a contig the assembly lacks -- keeps the
+    column text. ``collect`` and ``annotate`` typed only the rows that matched,
+    and stored the same column as numbers; ``reassign`` re-typed the stored
+    text column the same way and turned it numeric.
+    """
+
+    TABLE = (
+        "contig_name\tgenome_name\tgc\n"
+        "contig_A\tMAG_1\t0.5\n"
+        "contig_B\tMAG_1\t0.4\n"
+        "contig_C\tMAG_2\t0.6\n"
+        "contig_Z\tMAG_9\tN/A\n"
+    )
+
+    @staticmethod
+    def _gc(path: Path, group: str = "/") -> np.ndarray:
+        import h5py
+
+        with h5py.File(path, "r") as f:
+            return f[group]["contigs"]["gc"][:]
+
+    def _created(self, tmp_path: Path, tiny_cool: Path) -> Path:
+        from metacooler.io.create import from_cool
+
+        table = tmp_path / "c.tsv"
+        table.write_text(self.TABLE)
+        out = tmp_path / "created.metacool"
+        from_cool(tiny_cool, out, contig_genome_map=table, qc=False)
+        return out
+
+    def test_annotate_types_the_column_as_create_does(
+        self, tmp_path: Path, tiny_cool: Path, tiny_contigs_table: Path
+    ):
+        from metacooler.io.annotate import annotate
+        from metacooler.io.create import from_cool
+
+        created = self._created(tmp_path, tiny_cool)
+        annotated = tmp_path / "annotated.metacool"
+        from_cool(tiny_cool, annotated, contig_genome_map=tiny_contigs_table, qc=False)
+        annotate(annotated, inplace=True, contigs_table=tmp_path / "c.tsv")
+        assert self._gc(created).dtype.kind == "S"
+        assert self._gc(annotated).dtype.kind == "S"
+        assert self._gc(annotated).tolist() == self._gc(created).tolist()
+
+    def test_collect_types_the_column_over_every_row(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        cool = make_cool(tmp_path / "E_coli.cool", ECOLI)
+        table = tmp_path / "m.tsv"
+        table.write_text(
+            "contig_name\tgc\n"
+            "chromosome\t0.5\nplasmid1\t0.4\nplasmid2\t0.6\nnot_here\tN/A\n"
+        )
+        out = tmp_path / "out.metacool"
+        collect([cool], out, contigs_table=table)
+        gc = self._gc(out)
+        assert gc.dtype.kind == "S"
+        assert gc.tolist() == [b"0.5", b"0.4", b"0.6"]
+
+    def test_reassign_keeps_a_stored_text_column_text(
+        self, tmp_path: Path, tiny_cool: Path
+    ):
+        from metacooler.io.reassign import reassign
+
+        created = self._created(tmp_path, tiny_cool)
+        out = tmp_path / "reassigned.metacool"
+        reassign(created, {"contig_D": "MAG_2"}, out, qc=False)
+        validate(out)
+        assert self._gc(out).dtype.kind == "S"
+
+
+class TestCollectSingleBinInputs:
+    """An input whose every contig is one bin was refused as variable-binned.
+
+    cooler infers ``bin-size`` from the bins before each contig's last; a cool
+    of a phage or a set of short plasmids has none, so it reads as variable
+    even though its bins are exactly the grid of the sample's bin size.
+    """
+
+    def test_it_joins_the_collection_bin_size(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, 100)
+        phage = make_cool(tmp_path / "phage.cool", {"p1": 60, "p2": 100}, 100)
+        assert cooler.Cooler(str(phage)).binsize is None
+        out = tmp_path / "out.metacool"
+        collect([ecoli, phage], out)
+        validate(out)
+        mc = MetaCooler(out)
+        assert mc.binsize == 100
+        assert mc.info["sum"] == sum(
+            cooler.Cooler(str(p)).info["sum"] for p in (ecoli, phage)
+        )
+
+    def test_a_contig_longer_than_the_bin_size_is_still_refused(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, 100)
+        phage = make_cool(tmp_path / "phage.cool", {"p1": 60, "p2": 150}, 200)
+        with pytest.raises(ValueError, match="not binned alike"):
+            collect([ecoli, phage], tmp_path / "out.metacool")
+
+    def test_a_variable_binned_input_is_still_refused(self, tmp_path: Path):
+        from _cools import ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        ecoli = make_cool(tmp_path / "E_coli.cool", ECOLI, 100)
+        bins = pd.DataFrame({"chrom": ["p1", "p1"], "start": [0, 30], "end": [30, 90]})
+        odd = make_cool(tmp_path / "odd.cool", {"p1": 90}, bins=bins)
+        with pytest.raises(ValueError, match="not binned alike"):
+            collect([ecoli, odd], tmp_path / "out.metacool")
+
+
+class TestScatteredGenomeReads:
+    """A genome scattered over a non-grouped map cost ranges x contigs to read.
+
+    Each range was read with cooler's bin selector, which decodes the whole
+    ``/chroms`` table on every read to name the contigs: a 97-contig genome of
+    a 200 k-contig ``--contig-order alpha`` map took 7.7 s, ``extract
+    --genomes`` 15 s. Contig ids are now read and named once per call. Name
+    lists (``--contigs`` with thousands of names) scanned the contigs table
+    once per name, which is gone as well.
+    """
+
+    @pytest.fixture
+    def scattered(self, tmp_path: Path, tiny_pairs: Path, tiny_fasta: Path) -> Path:
+        from metacooler.io.create import from_pairs
+
+        table = tmp_path / "scattered.tsv"
+        table.write_text(
+            "contig_name\tgenome_name\n"
+            "contig_A\tMAG_1\ncontig_B\tMAG_2\ncontig_C\tMAG_1\ncontig_D\tMAG_2\n"
+        )
+        out = tmp_path / "alpha.metacool"
+        from_pairs(
+            uri=out, pairs=tiny_pairs, fasta=tiny_fasta, binsize=100,
+            contig_genome_map=table, contig_ordering="alpha", qc=False, ps=False,
+        )  # fmt: skip
+        return out
+
+    def _expected(self, path: Path, genome: str) -> pd.DataFrame:
+        mc = MetaCooler(path)
+        return mc.bins().iloc[_ids(mc.genome_bin_ranges(genome))]
+
+    def test_genome_bins_are_cooler_s_rows(self, scattered: Path):
+        mc = MetaCooler(scattered)
+        assert len(mc.genome_bin_ranges("MAG_1")) == 2  # really scattered
+        pd.testing.assert_frame_equal(
+            mc.bins_for_genome("MAG_1"), self._expected(scattered, "MAG_1")
+        )
+
+    def test_the_span_read_gives_the_same_rows(self, scattered: Path, monkeypatch):
+        import metacooler.api as api
+
+        monkeypatch.setattr(api, "_MAX_RANGE_READS", 1)
+        pd.testing.assert_frame_equal(
+            MetaCooler(scattered).bins_for_genome("MAG_2"),
+            self._expected(scattered, "MAG_2"),
+        )
+
+    def test_a_cached_bin_table_is_sliced(self, scattered: Path):
+        mc = MetaCooler(scattered)
+        mc.bins()
+        pd.testing.assert_frame_equal(
+            mc.bins_for_genome("MAG_1"), self._expected(scattered, "MAG_1")
+        )
+
+    def test_no_range_gives_an_empty_frame_of_the_same_shape(self, scattered: Path):
+        mc = MetaCooler(scattered)
+        empty = mc._bins_in_ranges(np.empty((0, 2), dtype=np.int64))
+        assert len(empty) == 0
+        assert list(empty.columns) == list(mc.bins().columns)
+        assert empty["chrom"].dtype == mc.bins()["chrom"].dtype
+
+    def test_the_contig_names_are_decoded_once_per_call(
+        self, scattered: Path, monkeypatch
+    ):
+        import cooler.api
+
+        mc = MetaCooler(scattered)
+        assert mc._clr is not None  # building the Cooler reads /chroms itself
+        calls = []
+        real = cooler.api.chroms
+        monkeypatch.setattr(
+            cooler.api, "chroms", lambda *a, **k: calls.append(1) or real(*a, **k)
+        )
+        ranges = mc.genome_bin_ranges("MAG_1")
+        assert len(ranges) == 2
+        mc._bins_in_ranges(ranges)
+        mc._bins_in_ranges(ranges)
+        assert len(calls) <= 1
+
+    def test_name_lists_resolve_as_before(self, scattered: Path):
+        from metacooler.io._utils import resolve_contig_selection
+        from metacooler.ops.show import _contig_ids, _genome_contig_ids, _genome_ids
+
+        mc = MetaCooler(scattered)
+        assert resolve_contig_selection(mc, contigs=["contig_D", "contig_A"]) == {
+            0,
+            3,
+        }
+        assert resolve_contig_selection(mc, genomes=["MAG_1"]) == {0, 2}
+        assert _contig_ids(mc, ["contig_D", "contig_A"]) == [3, 0]
+        g1, g2 = _genome_ids(mc, ["MAG_1", "MAG_2"])
+        assert _genome_contig_ids(mc, ["MAG_2", "MAG_1"]) == [[1, 3], [0, 2]]
+        assert mc.genomes["name"].iloc[[g1, g2]].tolist() == ["MAG_1", "MAG_2"]
