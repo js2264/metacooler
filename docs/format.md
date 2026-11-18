@@ -269,7 +269,7 @@ to set or remove those four; `metadata list`/`get` read them like any other key.
 | Key | Written by | Content |
 |-----|------------|---------|
 | `commands` | every command that writes a map | List of the command lines that produced the file, oldest first. Carried forward by every derived map. |
-| `qc` | `create`, `collect`, `qc --store`, `reassign` | The contact-quality block ([below](#qc-block)). |
+| `qc` | `create`, `collect`, `qc --store`, `reassign`, `merge` | The contact-quality block ([below](#qc-block)). |
 | `reassign` | `reassign` | List, one entry per run, oldest first: `source` (the map reassigned), `table` (the assignment table; empty when the API was given a mapping), `layout` (the `contig-ordering` written) and `n_contigs_reassigned`. |
 | `annotate` | `annotate` | List, one entry per run that changed the map, oldest first: `genomes_table` and `contigs_table` (the tables given, or `null`), `replace` and `missing` (the options used), and `added`, `replaced`, `dropped` — the columns affected, each as `<table>.<column>` (e.g. `contigs.gc`). A run that changes nothing records nothing. |
 
@@ -293,7 +293,7 @@ alongside the `commands` provenance list:
 | `trans_contig_ratio` | The "3D ratio": `inter_contig / n_contacts`. |
 | `*_fraction` | Each category's share of `n_contacts`. `null` on an empty file. |
 | `binsize` | Bin size at measurement time (pixel source). |
-| `n_pairs_read`, `n_pairs_discarded` | Pairs seen and dropped while binning (pairs source), so the denominator the ratio does *not* use stays visible. Summed over every pairs file when `create pairs` reads several. |
+| `n_pairs_read`, `n_pairs_discarded` | Pairs seen and dropped while binning (pairs source), so the denominator the ratio does *not* use stays visible. Summed over every pairs file when `create pairs` reads several, and over the inputs of `merge`. |
 
 **`/genomes` columns**, one row per genome:
 `qc_intra_contig_short`, `qc_intra_contig_long`,
@@ -308,11 +308,12 @@ same split contig by contig. A contig's contacts with itself are credited to
 its genome, so each `/genomes` column of that name is the sum of this one over
 the genome's contigs, and the column totals are the block's
 `intra_contig_short` and `intra_contig_long`. Written with the block by every
-command that stores one (`create`, `collect`, `qc --store`, `reassign`); maps
+command that stores one (`create`, `collect`, `qc --store`, `reassign`, and
+`merge` when every input has both, as numbers adding up to its block); maps
 written by metacooler 0.2.0 and earlier do not have them. These two are the
-only `qc_*` columns metacooler writes to `/contigs`: any other (`qc_pass`, from
-a `--contigs` table) is user metadata — every writer keeps it, `annotate` can
-drop it, and `merge` compares it like any metadata column.
+only `qc_*` columns metacooler writes to `/contigs`: any other (`qc_pass`,
+from a `--contigs` table) is user metadata — every writer keeps it, `annotate`
+can drop it, and `merge` compares it like any metadata column.
 
 These two categories are the only ones that do not depend on the
 contig-to-genome assignment, which is why they are kept per contig:
@@ -325,12 +326,22 @@ without these columns (or whose columns no longer add up to its block) has
 its block recomputed from the pixels instead, and loses the split measured on
 read positions.
 
-All three are statements about one specific pixel table, so `binnify` and
-`merge` drop them from their output instead of carrying them forward, and
-`merge` ignores `qc_*` columns when it compares the inputs' `/genomes` and
-`/contigs` tables for compatibility — two libraries over one assembly
-legitimately differ there. The names are reserved: a user table column called
-`qc_intra_contig_short`, say, is stored as `user_qc_intra_contig_short`.
+All three are statements about one specific pixel table, so `binnify` drops
+them from its output instead of carrying them forward. `merge` sums them
+instead: a merged map's contacts are its inputs' put together, every count of
+the block, of `/genomes` and of `/contigs` adds up over libraries, and every
+fraction and ratio is recomputed from the sums. The result is what a single
+tally of every input's contacts gives — `create pairs` given every library's
+pairs at once or, for blocks measured on pixels, `qc --store` on the merged
+map. That takes blocks counted alike: the same `version`, `source` and
+`distance_threshold`, and the same keys, `binsize` aside (kept when every input
+records the same value), with each block holding together with its columns.
+Otherwise `merge` drops them, with a warning that says why (see
+[`merge`](cli.md#merge-qc)). It ignores `qc_*` columns when it compares the
+inputs' `/genomes` and `/contigs` tables for compatibility — two libraries over
+one assembly legitimately differ there. The names are reserved: a user table
+column called `qc_intra_contig_short`, say, is stored as
+`user_qc_intra_contig_short`.
 
 !!! note "P(s) is a companion file, not part of the format"
     `create pairs` also writes a per-MAG P(s) curve, but as a plain TSV beside

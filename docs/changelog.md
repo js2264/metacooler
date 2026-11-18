@@ -40,9 +40,9 @@
   counted contig by contig; the `/genomes` columns of the same names are their
   per-genome sums. The block's `version` stays `2`: no existing key changes
   meaning. Like the `/genomes` ones, the names are reserved (a user table
-  column of that name is stored as `user_qc_intra_contig_short`), `binnify` and
-  `merge` drop them, and `annotate` cannot drop or replace them. Python:
-  `ContactQC(..., n_contigs=)`, `ContactQC.contig_table()`,
+  column of that name is stored as `user_qc_intra_contig_short`), `binnify`
+  drops them, `merge` sums them, and `annotate` cannot drop or replace them.
+  Python: `ContactQC(..., n_contigs=)`, `ContactQC.contig_table()`,
   `ContactQC.set_intra_contig()`, `metacooler.ops.qc.tally_map()` (the pixel
   pass of `qc`, with the bins' genomes as an option), and a `per_contig`
   argument to `store_qc`.
@@ -84,6 +84,33 @@
   map, restores the attributes of the weights it carries, which cooler does not
   write — and `annotate` drops those that read a `/contigs` column it changes.
 
+- **`merge` sums the inputs' QC instead of dropping it.** The `metadata.qc`
+  block and the `qc_*` columns of `/genomes` and `/contigs` are summed when
+  every input has a block, all counted alike: the same `version`, `source` and
+  `distance_threshold`, and the same keys. `binsize` need not agree, since the
+  inputs share one bin grid: it is kept when every input records the same
+  value. Every count adds up — the four categories, in total, per MAG and per
+  contig, and `n_pairs_read`/`n_pairs_discarded` — and every fraction and
+  ratio is recomputed from the sums, so one map per library, merged, now holds
+  exactly the block and columns that `create pairs` stores when given every
+  library's pairs at once (for blocks measured on pixels, those that `qc
+  --store` measures on the merged map; float counts agree up to rounding).
+  This is the route for a run with several Hi-C libraries built as one map
+  each. Otherwise — an input without a block, another threshold or source, a
+  block that cannot be read back, `/genomes` `qc_*` columns that do not add
+  up to their block or hold negative counts — the merged map has no QC block,
+  as before, and a warning says why, pointing to `create pairs` for blocks
+  measured on read positions; maps none of which has a block merge without a
+  word. An input written by 0.2.0 has no per-contig columns: its block and
+  `/genomes` columns are summed all the same, without `/contigs` ones, with a
+  warning when another input had them — and so when an input's `/contigs`
+  QC columns are incomplete, hold text (a user's column of that name, which
+  0.2.0 stored as given) or no longer add up to its block. Only the summed
+  counts are held through the pixel merge.
+  `metacooler merge` keeps the summed block in the metadata it rewrites.
+  Python: `ContactQC.from_stored()` rebuilds a tally from a stored block and
+  its columns, refusing counts that are not those of one tally, and
+  `ContactQC.add()` adds two tallies of one map.
 - **`reassign` keeps the QC block instead of recomputing it from the pixels.**
   The per-contig intra-contig counts are carried over and summed per new
   genome, only the two inter-contig categories are re-measured from the pixels
@@ -105,14 +132,14 @@
   meanwhile — `--inplace` included — leaves the source's block and per-contig
   counts as they were; it used to be stored after the relabelling.
 - **In `/contigs`, only the two QC columns go with the QC block.** `merge`
-  drops them (it copied the first input's `/contigs` verbatim), as `binnify`
-  does, and `reassign` replaces or drops them with the block, whether it moves
-  the contigs or not. A user column that merely starts with `qc_` (`qc_pass`,
-  from a `--contigs` table) is contig metadata, kept by every writer:
-  `binnify` and a re-grouping `reassign` used to drop every `qc_*` column of
-  `/contigs`. `annotate --drop` now accepts it, and `merge` reports it when
-  inputs differ, as for any metadata column; both treated every `qc_*` column
-  of `/contigs` as metacooler's.
+  sums them with the block, or drops them (it copied the first input's
+  `/contigs` verbatim); `binnify` drops them, and `reassign` replaces or drops
+  them with the block, whether it moves the contigs or not. A user column that
+  merely starts with `qc_` (`qc_pass`, from a `--contigs` table) is contig
+  metadata, kept by every writer: `binnify` and a re-grouping `reassign` used
+  to drop every `qc_*` column of `/contigs`. `annotate --drop` now accepts it,
+  and `merge` reports it when inputs differ, as for any metadata column; both
+  treated every `qc_*` column of `/contigs` as metacooler's.
 - **`merge` refuses the same map given twice.** `merge A A` summed every
   contact of `A` with itself and exited 0. Inputs are now identified by file
   (device and inode) and group, so an alias or a hard link of a listed input

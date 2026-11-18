@@ -13,7 +13,11 @@ from metacooler.cli._options import (
     quiet_option,
     verbose_option,
 )
-from metacooler.cli._provenance import read_metadata_uri, reconstruct_command
+from metacooler.cli._provenance import (
+    read_metadata,
+    read_metadata_uri,
+    reconstruct_command,
+)
 from metacooler.cli.main import MetaCoolURI, cli
 
 
@@ -40,14 +44,15 @@ def cmd_merge(
 
     All input files must have the same contigs, genomes, and
     ``contig-ordering`` attribute.  Pixel tables are concatenated and
-    re-sorted externally.  Metadata from all inputs is merged and the
-    command line is appended for provenance.
+    re-sorted externally, and the inputs' QC blocks are summed when they were
+    counted alike.  Metadata from all inputs is merged and the command line
+    is appended for provenance.
     """
     import h5py
 
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.merge import merge
-    from metacooler.qc import strip_qc_metadata
+    from metacooler.qc import QC_METADATA_KEY, strip_qc_metadata
 
     setup_logging(verbose, command_name="metacooler merge", quiet=quiet)
 
@@ -62,8 +67,8 @@ def cmd_merge(
     combined_meta: dict = {}
     all_commands: list[str] = []
     for inp in metacool_paths:
-        # merge() already dropped the qc block from its output: each input's
-        # describes that input alone, not the summed pixel table.
+        # Each input's qc block describes that input alone, not the summed
+        # pixel table: the block merge() wrote, if it could sum them, is kept.
         meta = strip_qc_metadata(read_metadata_uri(inp))
         for key, value in meta.items():
             if key == "commands":
@@ -77,4 +82,7 @@ def cmd_merge(
     combined_meta["commands"] = all_commands
 
     with h5py.File(output, "a") as f:
+        merged_qc = read_metadata(f).get(QC_METADATA_KEY)
+        if merged_qc is not None:
+            combined_meta[QC_METADATA_KEY] = merged_qc
         f.attrs["metadata"] = json.dumps(combined_meta)

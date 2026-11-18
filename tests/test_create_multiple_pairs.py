@@ -2,8 +2,8 @@
 
 The contract: N libraries of one assembly give exactly the map, QC block,
 ``/genomes`` ``qc_*`` columns, P(s) table and drop report of the one file that
-concatenates them (headers united).  ``merge`` of per-library maps cannot: it
-drops the QC block and has no P(s) table to sum.
+concatenates them (headers united).  ``merge`` of per-library maps gives the
+same map and QC block (``test_merge_qc.py``), but has no P(s) table to sum.
 """
 
 from __future__ import annotations
@@ -163,7 +163,8 @@ class TestSeveralFilesMatchTheirConcatenation:
 
         tables_many, tables_one = _tables(many), _tables(one)
         assert tables_many == tables_one
-        # The parts a merge of per-library maps would lose, spelled out.
+        # Spelled out: the pixels and the QC block, which a merge of
+        # per-library maps gives too, and the P(s) table, which it cannot.
         for column in ("pixels/bin1_id", "pixels/bin2_id", "pixels/count"):
             assert tables_many[column] == tables_one[column]
         qc_columns = [k for k in tables_many if k.startswith("genomes/qc_")]

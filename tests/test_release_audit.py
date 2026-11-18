@@ -215,18 +215,19 @@ class TestMerge:
     ):
         """The CLI re-merged every input's metadata, putting ``qc`` back.
 
-        ``io.merge`` strips the block (it describes one input, not the sum), but
-        the CLI then copied every input key into the output: a merged file of
-        twice the contacts reported the first input's ``n_contacts``.
+        ``io.merge`` writes the block of the summed pixel table, or none (each
+        input's describes that input alone), but the CLI then copied every
+        input key into the output: a merged file of twice the contacts reported
+        the first input's ``n_contacts``.  The block it keeps is the sum.
         """
-        assert "qc" in MetaCooler(tiny_metacooler).metadata
+        block = MetaCooler(tiny_metacooler).metadata["qc"]
         out = tmp_path / "m.metacool"
         result = _run(
             "merge", tiny_metacooler, _replica(tiny_metacooler, tmp_path), "-o", out
         )
         assert result.exit_code == 0, result.output
         meta = MetaCooler(out).metadata
-        assert "qc" not in meta
+        assert meta["qc"]["n_contacts"] == 2 * block["n_contacts"]
         assert "merge" in meta["commands"][-1]
 
     def test_bin_size_survives_single_bin_contigs(
