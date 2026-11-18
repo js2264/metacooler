@@ -639,6 +639,45 @@ class ContactQC:
         self._per_contig = per_contig
 
 
+# Every key ContactQC.summary() writes itself: the tally's parameters (version,
+# source, distance_threshold), its four counts and what it derives from them.
+# Any other key of a stored block is an ``**extra`` it was given, recording how
+# the counts were measured (binsize, n_pairs_read, n_pairs_discarded, ...).
+QC_SUMMARY_KEYS = frozenset(ContactQC(0).summary())
+
+
+def _contig_counts_add_up(block: dict, per_contig: np.ndarray) -> bool:
+    """Whether per-contig QC counts add up to a block's intra-contig totals.
+
+    They do when the block and the ``/contigs`` columns were stored together.
+    A ``qc --store`` from a release without per-contig columns (0.2.0 and
+    earlier) rewrites the block and leaves older columns behind, which no
+    longer describe it.
+
+    Args:
+        block: A ``metadata["qc"]`` block.
+        per_contig: ``(n_contigs, 2)`` short/long counts: the
+            :data:`QC_CONTIG_COLUMNS` of ``/contigs``.
+
+    Returns:
+        Whether the two column totals are the block's ``intra_contig_short``
+        and ``intra_contig_long``: exactly for integer counts, to a relative
+        ``1e-9`` for float ones.  ``False`` when a total is missing or not a
+        number.
+    """
+    totals = np.asarray(per_contig).sum(axis=0)
+    expected: list[Any] = [
+        block.get("intra_contig_short"),
+        block.get("intra_contig_long"),
+    ]
+    try:
+        if totals.dtype.kind == "f":
+            return bool(np.allclose(totals, expected, rtol=1e-9, atol=0))
+        return bool(np.array_equal(totals, np.asarray(expected, dtype=totals.dtype)))
+    except (TypeError, ValueError):  # a total that is missing or not a number
+        return False
+
+
 def is_qc_column(table: str, column: object) -> bool:
     """Whether a column of ``/genomes`` or ``/contigs`` belongs to the QC block.
 
