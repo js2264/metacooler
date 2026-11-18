@@ -76,6 +76,14 @@ from metacooler.io.create import (
     _staged_output,
     _stream_remapped_pixels,
 )
+from metacooler.io.weights import (
+    drop_stale_weights,
+    restore_weight_attrs,
+    stale_weights,
+    warn_dropped_weights,
+    weight_attrs,
+    weight_columns,
+)
 from metacooler.qc import (
     QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
@@ -101,6 +109,9 @@ if TYPE_CHECKING:
     from metacooler.api import MetaCooler
 
 logger = logging.getLogger("metacooler")
+
+#: What a reassignment changes, as :func:`warn_dropped_weights` words it.
+_ASSIGNMENT = "the contig-to-genome assignment"
 
 UNBINNED = "__unbinned__"
 
@@ -590,6 +601,8 @@ def _write_relabelled(
     genome_offset: np.ndarray,
     ordering: str,
     metadata: dict,
+    *,
+    assignment_changed: bool = True,
 ) -> None:
     """Rewrite the genome-dependent parts of a map, in place, leaving bins alone.
 
@@ -611,6 +624,9 @@ def _write_relabelled(
         genome_offset: CSR offsets over ``/contigs``, length ``n_genomes + 1``.
         ordering: Value for the ``contig-ordering`` attribute.
         metadata: Value for the ``metadata`` attribute.
+        assignment_changed: Some contig changed genome, so the normalization
+            weights computed per genome (or fitted on the pairs of contigs of
+            one genome) no longer hold and are dropped.
 
     Raises:
         ValueError: If *contigs* does not describe the same contigs, in the same
@@ -660,6 +676,8 @@ def _write_relabelled(
         grp.attrs["ngenomes"] = len(genomes)
         grp.attrs["contig-ordering"] = ordering
         grp.attrs["metadata"] = json.dumps(metadata)
+        if assignment_changed:
+            drop_stale_weights(grp["bins"], assignment=True, why=_ASSIGNMENT)
 
 
 def _rewrite_regrouped(
@@ -671,6 +689,8 @@ def _rewrite_regrouped(
     ordering: str,
     metadata: dict,
     chunksize: int,
+    *,
+    assignment_changed: bool = True,
 ) -> None:
     """Write a new file with the contigs re-ordered and the pixels remapped.
 
@@ -689,9 +709,19 @@ def _rewrite_regrouped(
         ordering: Value for the ``contig-ordering`` attribute.
         metadata: Value for the ``metadata`` attribute.
         chunksize: Source pixels read and remapped per chunk.
+        assignment_changed: Some contig changed genome: the normalization
+            weights that depend on the assignment are not carried over.  The
+            others are, with their attributes, which cooler does not write.
     """
+    with mc.open() as grp:
+        source_bins = grp["bins"]
+        stale = stale_weights(source_bins, assignment=assignment_changed)
+        carried_attrs = weight_attrs(
+            source_bins, [c for c in weight_columns(source_bins) if c not in stale]
+        )
+    warn_dropped_weights(stale, _ASSIGNMENT)
     bins_remapped, old_to_new_bin = _remap_bins(
-        mc.bins(), contig_order, keep_extra_columns=True
+        mc.bins().drop(columns=stale), contig_order, keep_extra_columns=True
     )
     chrom_offset, genome_offset = _compute_all_offsets(bins_remapped, contigs, genomes)
     check_ascii_names(genomes, contigs)
@@ -733,6 +763,8 @@ def _rewrite_regrouped(
         assembly_name=mc.info.get("assembly"),
         binsize=binsize,
     )
+    with h5py.File(target, "r+") as f:
+        restore_weight_attrs(f["bins"], carried_attrs)
 
 
 def _carried_contig_qc(block: object, old_contigs: pd.DataFrame) -> pd.DataFrame | None:
@@ -1181,8 +1213,11 @@ def reassign(
         genomes = _with_columns(genomes, new_qc.per_genome, QC_GENOME_COLUMNS)
         contigs = _with_columns(contigs, new_qc.per_contig, QC_CONTIG_COLUMNS)
 
+    moved = bool(report.moved)
     if inplace:
-        _relabel_in_place(mc, genomes, contigs, ordering, output_metadata)
+        _relabel_in_place(
+            mc, genomes, contigs, ordering, output_metadata, assignment_changed=moved
+        )
         target_uri = mc.uri
         validate(target_uri)
     else:
@@ -1206,6 +1241,7 @@ def reassign(
                     ordering,
                     output_metadata,
                     chunksize,
+                    assignment_changed=moved,
                 )
             else:
                 _materialise_copy(mc, staged)
@@ -1217,6 +1253,7 @@ def reassign(
                     _genome_offset(contigs, len(genomes)),
                     ordering,
                     output_metadata,
+                    assignment_changed=moved,
                 )
             validate(staged)
         target_uri = str(target)
@@ -1283,6 +1320,8 @@ def _relabel_in_place(
     contigs: pd.DataFrame,
     ordering: str,
     metadata: dict,
+    *,
+    assignment_changed: bool = True,
 ) -> None:
     """Apply a relabelling to the source file itself.
 
@@ -1294,6 +1333,8 @@ def _relabel_in_place(
         contigs: The rebuilt ``/contigs`` table, in the file's row order.
         ordering: Value for the ``contig-ordering`` attribute.
         metadata: Value for the ``metadata`` attribute.
+        assignment_changed: Some contig changed genome (see
+            :func:`_write_relabelled`).
     """
     logger.info("Rewriting the genome assignment of %s in place", mc.uri)
     _write_relabelled(
@@ -1304,4 +1345,5 @@ def _relabel_in_place(
         _genome_offset(contigs, len(genomes)),
         ordering,
         metadata,
+        assignment_changed=assignment_changed,
     )

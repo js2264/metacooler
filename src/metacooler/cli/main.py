@@ -198,7 +198,7 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Edit an existing map",
-            "commands": ["reassign", "annotate", "metadata"],
+            "commands": ["reassign", "annotate", "normalize", "metadata"],
         },
         {
             "name": "Combine and re-bin",
@@ -264,6 +264,7 @@ from metacooler.cli import (  # noqa: E402, F401
     cmd_metadata,
     cmd_mv,
     cmd_network,
+    cmd_normalize,
     cmd_ps,
     cmd_qc,
     cmd_reassign,

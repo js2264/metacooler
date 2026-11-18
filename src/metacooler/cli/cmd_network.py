@@ -45,6 +45,26 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     help="Write a header line (node1, node2, value) to the output.",
 )
 @click.option(
+    "--balance",
+    type=str,
+    default=None,
+    metavar="NAME",
+    help=(
+        "Normalize the edges with the [cyan]/bins/NAME[/cyan] weights "
+        "([cyan]metacooler normalize[/cyan]): each pixel times the weights of "
+        "its two bins, masked bins left out."
+    ),
+)
+@click.option(
+    "--drop-spurious",
+    is_flag=True,
+    help=(
+        "Drop the contig pairs the [cyan]--balance[/cyan] normalization deems "
+        "spurious (the cutoff [cyan]normalize normcc[/cyan] and "
+        "[cyan]hiczin[/cyan] store). Contig or genome level."
+    ),
+)
+@click.option(
     "--chunksize",
     type=int,
     default=DEFAULT_CHUNKSIZE,
@@ -60,6 +80,8 @@ def cmd_network(
     weight: str,
     output: Path | None,
     header: bool,
+    balance: str | None,
+    drop_spurious: bool,
     chunksize: int,
     force: bool,
     verbose: bool,
@@ -88,4 +110,6 @@ def cmd_network(
         header=header,
         chunksize=chunksize,
         force=force,
+        balance=balance,
+        drop_spurious=drop_spurious,
     )

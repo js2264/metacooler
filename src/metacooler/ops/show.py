@@ -638,6 +638,7 @@ def _aggregated_panel(
     mc: MetaCooler,
     level: Literal["contig", "genome"],
     sel: _Selection,
+    weights: np.ndarray | None = None,
 ) -> _Panel:
     """Build the heatmap of a genome- or contig-level figure."""
     from metacooler.ops.aggregate import _aggregate_sparse
@@ -662,7 +663,7 @@ def _aggregated_panel(
 
     _check_dense_size(len(ids), len(ids), hint)
 
-    agg = _aggregate_sparse(mc, level=level)
+    agg = _aggregate_sparse(mc, level=level, weights=weights)
     # Only "all" may take the whole-matrix fast path: a selection naming every
     # genome in a *different* order has the same length but needs the permutation.
     mat = agg.toarray() if sel.kind == "all" else agg[ids, :][:, ids].toarray()
@@ -676,11 +677,34 @@ def _aggregated_panel(
     return _Panel(mat=mat, row=axis, col=axis, title=_selection_title(sel, level))
 
 
+def _weigh_block(
+    mat: np.ndarray,
+    row_extents: Sequence[tuple[int, int]],
+    col_extents: Sequence[tuple[int, int]],
+    weights: np.ndarray | None,
+) -> np.ndarray:
+    """Normalize a dense block: each value times the weights of its two bins.
+
+    The rows and columns of masked bins come out ``NaN``, as in cooler's
+    balanced matrices.
+    """
+    if weights is None:
+        return mat
+    rows = np.concatenate([np.arange(lo, hi) for lo, hi in row_extents])
+    cols = np.concatenate([np.arange(lo, hi) for lo, hi in col_extents])
+    return (
+        np.asarray(mat, dtype=np.float64)
+        * weights[rows][:, None]
+        * weights[cols][None, :]
+    )
+
+
 def _bin_panel(
     mc: MetaCooler,
     sel: _Selection,
     range1: str | None,
     range2: str | None,
+    weights: np.ndarray | None = None,
 ) -> _Panel:
     """Build the heatmap of a bin-level figure."""
     all_bins = mc.bins()
@@ -698,7 +722,12 @@ def _bin_panel(
             col_extents[0][1] - col_extents[0][0],
             "Use a narrower --range/--range2.",
         )
-        mat = _dense_block(mc.matrix(balance=False), row_extents, col_extents)
+        mat = _weigh_block(
+            _dense_block(mc.matrix(balance=False), row_extents, col_extents),
+            row_extents,
+            col_extents,
+            weights,
+        )
         row = _bin_axis(mc, all_bins, row_extents, range1)
         col = _bin_axis(mc, all_bins, col_extents, range2 or range1)
         return _Panel(mat=mat, row=row, col=col, title=_range_title(row, col, "bin"))
@@ -714,7 +743,12 @@ def _bin_panel(
     _check_dense_size(
         size, size, "Use --range to select a smaller region, or --level contig."
     )
-    mat = _dense_block(mc.matrix(balance=False), extents, extents)
+    mat = _weigh_block(
+        _dense_block(mc.matrix(balance=False), extents, extents),
+        extents,
+        extents,
+        weights,
+    )
     axis = _bin_axis(
         mc,
         all_bins,
@@ -740,6 +774,7 @@ def show(
     out: str | Path | None = None,
     dpi: int = 500,
     force: bool = False,
+    balance: str | None = None,
 ) -> None:
     """Render a contact map heatmap.
 
@@ -781,6 +816,10 @@ def show(
         out: Output file path (display interactively if ``None``).
         dpi: DPI for the output image.
         force: Overwrite *out* if it already exists.
+        balance: Show the map normalized with this weight column of ``/bins``
+            (see ``metacooler normalize``): each pixel times the weights of
+            its two bins.  Masked bins are blank at bin level and left out of
+            the sums at contig and genome level.
 
     Raises:
         ValueError: If *level*, *transform* or a name is unknown, if
@@ -819,10 +858,15 @@ def show(
         check_output_path(out, force, inputs=[uri])
         matplotlib.use("Agg")
 
+    weights = None
+    if balance is not None:
+        from metacooler.io.weights import read_weights
+
+        weights = read_weights(mc, balance)
     panel = (
-        _bin_panel(mc, sel, range1, range2)
+        _bin_panel(mc, sel, range1, range2, weights)
         if level == "bin"
-        else _aggregated_panel(mc, level, sel)
+        else _aggregated_panel(mc, level, sel, weights)
     )
 
     mat = _transform_matrix(panel.mat, transform)
@@ -841,7 +885,8 @@ def show(
         vmin=0,
         vmax=vmax_val,
     )
-    ax.set_title(panel.title, fontsize=10)
+    title = panel.title if balance is None else f"{panel.title} (normalized: {balance})"
+    ax.set_title(title, fontsize=10)
     _apply_ticks(ax, panel.col, "x")
     _apply_ticks(ax, panel.row, "y")
     if separators:

@@ -6,7 +6,7 @@ import contextlib
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,7 @@ from metacooler.io._utils import (
     chrom_codes,
     to_upper_triangle,
 )
+from metacooler.io.weights import read_weights, spurious_cutoff
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -46,12 +47,31 @@ def _fold(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return aggregate_pixels(frames)
 
 
+def _weighted(
+    chunk: pd.DataFrame, weight: str, weights: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(bin1, bin2, value)`` of a pixel chunk, normalized when *weights* is set.
+
+    A normalized value is ``value * weights[bin1] * weights[bin2]``; a pixel of
+    a masked bin (``NaN`` weight) is left out.
+    """
+    b1 = chunk["bin1_id"].to_numpy()
+    b2 = chunk["bin2_id"].to_numpy()
+    values = chunk[weight].to_numpy()
+    if weights is None:
+        return b1, b2, values
+    values = values * weights[b1] * weights[b2]
+    ok = np.isfinite(values)
+    return b1[ok], b2[ok], values[ok]
+
+
 def _aggregate_pairs(
     mc,
     bin_to_node: np.ndarray,
     weight: str,
     n_pix: int,
     chunksize: int,
+    weights: np.ndarray | None = None,
 ) -> pd.DataFrame | None:
     """Sum pixel weights per node pair, folding partial results as we go.
 
@@ -61,6 +81,7 @@ def _aggregate_pairs(
         weight: Pixels column used as the edge weight.
         n_pix: Total number of pixels in the source table.
         chunksize: Number of pixels read per chunk.
+        weights: Normalization weights of the bins (see :func:`_weighted`).
 
     Returns:
         A frame with columns ``node1``/``node2``/``value`` sorted by node pair,
@@ -71,12 +92,10 @@ def _aggregate_pairs(
 
     for lo in range(0, n_pix, chunksize):
         chunk = mc._clr.pixels()[lo : lo + chunksize]
-        n1, n2 = to_upper_triangle(
-            bin_to_node[chunk["bin1_id"].to_numpy()],
-            bin_to_node[chunk["bin2_id"].to_numpy()],
-        )
+        b1, b2, values = _weighted(chunk, weight, weights)
+        n1, n2 = to_upper_triangle(bin_to_node[b1], bin_to_node[b2])
         df = pd.DataFrame(
-            {"bin1_id": n1, "bin2_id": n2, "count": chunk[weight].to_numpy()},
+            {"bin1_id": n1, "bin2_id": n2, "count": values},
             copy=False,
         )
         pending.append(aggregate_pixels([df]))
@@ -92,6 +111,77 @@ def _aggregate_pairs(
     )
 
 
+def _spurious_rule(mc, balance: str | None, level: str) -> tuple[float, str]:
+    """The spurious-contact cutoff ``network --drop-spurious`` applies.
+
+    Raises:
+        ValueError: Without *balance*, at bin level, or when the normalization
+            records no usable cutoff.
+    """
+    if balance is None:
+        raise ValueError(
+            "--drop-spurious applies the spurious-contact cutoff of a "
+            "normalization: pass --balance NAME as well."
+        )
+    if level == "bin":
+        raise ValueError(
+            "--drop-spurious drops contig pairs, which bins are not: use "
+            "--level contig or --level genome."
+        )
+    found = spurious_cutoff(mc, balance)
+    if found is None or not np.isfinite(found[0]):
+        raise ValueError(
+            f"/bins/{balance} records no spurious-contact cutoff; "
+            "'metacooler normalize normcc' and 'normalize hiczin' compute one."
+        )
+    return found
+
+
+def _without_spurious(
+    edges: pd.DataFrame | None, cutoff: tuple[float, str]
+) -> pd.DataFrame | None:
+    """Drop the contig pairs below the spurious-contact cutoff.
+
+    The cutoff applies between two *different* contigs (NormCC and HiCzin
+    leave a contig's contacts with itself alone).  Under the ``<`` rule a pair
+    below the cutoff is spurious; under ``<=``, one at it too.
+    """
+    if edges is None:
+        return None
+    threshold, rule = cutoff
+    value = edges["value"].to_numpy()
+    spurious = value <= threshold if rule == "<=" else value < threshold
+    spurious &= edges["node1"].to_numpy() != edges["node2"].to_numpy()
+    logger.info(
+        "Dropped %d spurious contig pair(s) (normalized contact %s %.6g)",
+        int(spurious.sum()),
+        rule,
+        threshold,
+    )
+    return edges[~spurious].reset_index(drop=True)
+
+
+def _regroup(edges: pd.DataFrame, contig_to_genome: np.ndarray) -> pd.DataFrame | None:
+    """Sum contig-pair edges into genome-pair edges."""
+    if edges.empty:
+        return None
+    g1, g2 = to_upper_triangle(
+        contig_to_genome[edges["node1"].to_numpy()],
+        contig_to_genome[edges["node2"].to_numpy()],
+    )
+    summed = aggregate_pixels(
+        [
+            pd.DataFrame(
+                {"bin1_id": g1, "bin2_id": g2, "count": edges["value"].to_numpy()},
+                copy=False,
+            )
+        ]
+    )
+    return summed.rename(
+        columns={"bin1_id": "node1", "bin2_id": "node2", "count": "value"}
+    )
+
+
 def network(
     uri: str | Path,
     level: Literal["bin", "contig", "genome"] = "contig",
@@ -100,6 +190,8 @@ def network(
     header: bool = False,
     chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
+    balance: str | None = None,
+    drop_spurious: bool = False,
 ) -> None:
     """Export a network edge list from a metacool file.
 
@@ -111,10 +203,20 @@ def network(
         header: If ``True``, write a ``node1\\tnode2\\tvalue`` header line.
         chunksize: Number of pixels to process per chunk.
         force: Overwrite *out* if it already exists.
+        balance: Normalize the edges with this weight column of ``/bins``
+            (see ``metacooler normalize``): every pixel is multiplied by the
+            weights of its two bins before it is summed, and pixels of masked
+            bins are left out.
+        drop_spurious: Drop the contig pairs whose normalized contact the
+            *balance* normalization deems spurious (its stored cutoff; NormCC
+            and HiCzin record one) before the edges are summed to genomes.
 
     Raises:
-        ValueError: If *weight* column does not exist in the pixels table, or
-            if *level* is not one of ``bin``/``contig``/``genome``.
+        ValueError: If *weight* column does not exist in the pixels table, if
+            *level* is not one of ``bin``/``contig``/``genome``, or if
+            *drop_spurious* is set without a *balance* that records a cutoff
+            or at ``level="bin"``.
+        KeyError: If *balance* names no weight column.
         FileExistsError: If *out* exists and *force* is False.
     """
     from metacooler.api import MetaCooler
@@ -135,6 +237,8 @@ def network(
     if out is not None:
         check_output_path(out, force, inputs=[uri])
 
+    weights = read_weights(mc, balance) if balance is not None else None
+    cutoff = _spurious_rule(mc, balance, level) if drop_spurious else None
     n_pix = len(mc._clr.pixels())
 
     if level == "bin":
@@ -146,28 +250,31 @@ def network(
             if header:
                 fout.write("node1\tnode2\tvalue\n")
             for lo in range(0, n_pix, chunksize):
-                chunk = mc._clr.pixels()[lo : lo + chunksize]
-                df = pd.DataFrame(
-                    {
-                        "node1": chunk["bin1_id"].values,
-                        "node2": chunk["bin2_id"].values,
-                        "value": chunk[weight].values,
-                    }
-                )
+                chunk = cast(pd.DataFrame, mc._clr.pixels()[lo : lo + chunksize])
+                b1, b2, values = _weighted(chunk, weight, weights)
+                df = pd.DataFrame({"node1": b1, "node2": b2, "value": values})
                 fout.write(df.to_csv(sep="\t", index=False, header=False))
         return
 
     # Contig and genome levels: map every bin to its node, then reduce.
     bin_to_contig = chrom_codes(mc.bins())
+    contig_to_genome = mc.contigs["genome_id"].to_numpy()
     if level == "contig":
         bin_to_node = bin_to_contig
         node_names = mc.contigs["name"].values
     else:
-        contig_to_genome = mc.contigs["genome_id"].values
         bin_to_node = contig_to_genome[bin_to_contig]
         node_names = mc.genomes["name"].values
 
-    agg = _aggregate_pairs(mc, bin_to_node, weight, n_pix, chunksize)
+    if cutoff is None:
+        agg = _aggregate_pairs(mc, bin_to_node, weight, n_pix, chunksize, weights)
+    else:
+        agg = _without_spurious(
+            _aggregate_pairs(mc, bin_to_contig, weight, n_pix, chunksize, weights),
+            cutoff,
+        )
+        if agg is not None and level == "genome":
+            agg = _regroup(agg, contig_to_genome)
     if agg is None:
         edges = pd.DataFrame(columns=["node1", "node2", "value"])
     else:

@@ -82,6 +82,7 @@ def _aggregate_sparse(
     mc: MetaCooler,
     level: Literal["contig", "genome"] = "contig",
     chunksize: int = DEFAULT_CHUNKSIZE,
+    weights: np.ndarray | None = None,
 ) -> sparse.csr_matrix:
     """Return the aggregated contact matrix as a sparse CSR matrix.
 
@@ -89,6 +90,10 @@ def _aggregate_sparse(
         mc: Open MetaCooler instance.
         level: Aggregation level — ``"contig"`` or ``"genome"``.
         chunksize: Number of pixels to process per chunk.
+        weights: Normalization weights of the bins (a ``/bins`` weight
+            column): each pixel is multiplied by the weights of its two bins
+            before it is summed, and pixels of masked (``NaN``) bins are left
+            out.
 
     Returns:
         Symmetrised sparse CSR matrix of shape ``(n, n)`` where ``n`` is
@@ -102,7 +107,11 @@ def _aggregate_sparse(
     # for float counts, which an integer cast used to floor toward zero.
     pixels = mc._clr.pixels()
     src_dtype = pixels[:0]["count"].dtype
-    dtype = np.int64 if np.issubdtype(src_dtype, np.integer) else np.float64
+    dtype = (
+        np.int64
+        if weights is None and np.issubdtype(src_dtype, np.integer)
+        else np.float64
+    )
 
     # Reduce each chunk into a running aggregate instead of buffering every
     # chunk: peak memory stays bounded by the output matrix plus one chunk,
@@ -111,9 +120,15 @@ def _aggregate_sparse(
     n_pix = len(pixels)
     for i in range(0, n_pix, chunksize):
         chunk = pixels[i : i + chunksize]
-        c1 = mapping[chunk["bin1_id"].values]
-        c2 = mapping[chunk["bin2_id"].values]
-        vals = chunk["count"].values.astype(dtype)
+        b1 = chunk["bin1_id"].to_numpy()
+        b2 = chunk["bin2_id"].to_numpy()
+        vals = chunk["count"].to_numpy().astype(dtype)
+        if weights is not None:
+            vals = vals * weights[b1] * weights[b2]
+            ok = np.isfinite(vals)
+            b1, b2, vals = b1[ok], b2[ok], vals[ok]
+        c1 = mapping[b1]
+        c2 = mapping[b2]
 
         c1, c2 = to_upper_triangle(c1, c2)
 

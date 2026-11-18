@@ -75,6 +75,12 @@ class TestInit:
             "aggregate",
             "network",
             "dump_table",
+            # normalization
+            "normalize_ice",
+            "normalize_metator",
+            "normalize_mge",
+            "normalize_normcc",
+            "normalize_hiczin",
             # quality control
             "contact_qc",
             "contact_probability",
