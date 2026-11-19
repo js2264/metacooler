@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Changed
+
+- **A pairs file's compression is read from its content**, whatever its name:
+  gzip and bgzip, bzip2, zstd and lz4, from the file's first bytes, and plain
+  text otherwise. It was read from the file's suffix, so a gzip file named
+  `lib.pairs` was parsed as raw compressed bytes, and a plain file named
+  `lib.pairs.gz` failed to decompress. A zip archive, an xz file or a legacy
+  LZ4 file, which metacooler cannot read, is refused by name.
+
+### Fixed
+
+- **Pairs files concatenated with `cat`.** The header lines below the top of a
+  pairs file (those of the files concatenated after the first) are skipped, so
+  the files read as if given one after the other (`--pairs a --pairs b`).
+  `create pairs` and `ps` stopped on the first of them, parsed as a pair. At no
+  cost for most files: pyarrow skips those lines itself, as rows with another
+  number of fields than a pair, which every standard header line is. A header
+  line with as many tab-separated fields as a pair (a `#samheader: @RG` line
+  with every tag, say) is skipped too when the top header holds one, the file
+  then filtered before parsing (about a fifth more CPU time to read it, 12%
+  more for `create pairs` as a whole); when only a header below the top holds
+  one, it is parsed as a pair: the read stops with an error that says so,
+  as it does for a header line below the top that is not UTF-8 text, unless
+  the line holds integers where a pair's positions go (a commented-out pair),
+  which is then counted as a pair. The `#chromsize` lines below the top must
+  agree with the top header's, as numbers, wherever the contig lengths come
+  from: pairs files of other assemblies are refused rather than read with the
+  first one's lengths. That is stricter than the files given one by one,
+  whose headers are not checked when the lengths come from `--fasta` or a
+  bins BED. A line of white space only is a blank line, below the top too.
+- **A `"` in a pairs file.** Pairs are read without quoting: a field starting
+  with `"` (a read name, or a header line below the top) made the reader take
+  every line up to the next `"` as one field, and the pairs among them were
+  lost without a word.
+
 ## 0.3.0 - 2026-11-18
 
 ### Added

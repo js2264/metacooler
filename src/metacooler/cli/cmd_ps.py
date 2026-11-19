@@ -45,9 +45,9 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     default=None,
     help=(
         "Measure from this pairs file instead of the binned pixel table "
-        "(plain text or any codec [cyan]create pairs[/cyan] reads, e.g. "
-        "[cyan].gz[/cyan] or [cyan].bgz[/cyan] — read exactly as "
-        "[cyan]create pairs[/cyan] reads it). Distances then come from read "
+        "(plain text or any compression [cyan]create pairs[/cyan] reads, "
+        "e.g. gzip or bgzip — read exactly as [cyan]create pairs[/cyan] "
+        "reads it). Distances then come from read "
         "positions, so the curve starts at 1 bp instead of at one bin. The "
         "metacool is still needed: it supplies the contig\u2192genome "
         "assignment, the contig lengths, and the selection."
