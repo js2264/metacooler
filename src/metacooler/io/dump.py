@@ -226,21 +226,20 @@ def dump_table(
         df = df[core + extras]
     elif table in ("clusters", "members"):
         # The clustering rounds: every cluster, or every membership, that
-        # holds a selected contig.
-        members = mc.cluster_members()
-        if selected_contig_ids is not None:
-            names = mc.contigs.loc[sorted(selected_contig_ids), "name"]
-            members = members[members["contig"].isin(set(names))]
-        if table == "members":
-            df = members.reset_index(drop=True)
+        # holds a selected contig -- found through the contig index, so a
+        # selection reads its own memberships only.
+        if selected_contig_ids is None:
+            df = mc.cluster_members() if table == "members" else mc.clusters
         else:
-            df = mc.clusters
-            if selected_contig_ids is not None:
-                kept = set(zip(members["round"], members["cluster"], strict=True))
-                rows = [
-                    key in kept for key in zip(df["round"], df["name"], strict=True)
-                ]
-                df = df.loc[rows]
+            contig_ids = np.array(sorted(selected_contig_ids), dtype=np.int64)
+            cluster_ids, counts = mc._memberships_of(contig_ids)
+            if table == "members":
+                # In the order of the stored members: cluster, then contig.
+                contig_ids = np.repeat(contig_ids, counts)
+                order = np.lexsort((contig_ids, cluster_ids))
+                df = mc._name_memberships(cluster_ids[order], contig_ids[order])
+            else:
+                df = mc.clusters.loc[np.unique(cluster_ids)]
     elif table == "pixels":
         # Pre-compute filter parameters that are independent of chunk
         valid_bin_ids: np.ndarray | None = None

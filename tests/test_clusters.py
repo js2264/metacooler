@@ -21,6 +21,7 @@ from _cli_output import flat
 from click.testing import CliRunner
 
 import metacooler
+from metacooler import api as api_module
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
 from metacooler.io import clusters as clusters_module
@@ -985,6 +986,108 @@ def test_copy_clusters_needs_the_lengths_with_a_contig_map(clustered: Path):
 
 
 # ---------------------------------------------------------------------------
+# Reading the memberships through the indexes
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["point reads", "whole datasets"])
+def reads(request, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Run a lookup both ways: a few rows read one by one, and (past
+    _POINT_READS rows) whole datasets read once. The answers are the same."""
+    if request.param == "whole datasets":
+        monkeypatch.setattr(api_module, "_POINT_READS", 0)
+    return request.param
+
+
+def test_the_clusters_of_a_contig_come_round_by_round(clustered: Path, reads: str):
+    mc = MetaCooler(clustered)
+    assert mc.contig_clusters("c3").values.tolist() == [
+        ["c3", "overlapping", "O1"],
+        ["c3", "recursive", "O1_2"],
+    ]
+    # Several contigs, in the order given, each one's clusters in round order.
+    assert mc.contig_clusters(["c4", "c1"]).values.tolist() == [
+        ["c4", "overlapping", "O2"],
+        ["c1", "overlapping", "O1"],
+        ["c1", "recursive", "O1_1"],
+        ["c1", "final", "F1"],
+    ]
+    assert mc.contig_clusters([]).empty
+
+
+def test_the_clusters_of_many_contigs(clustered: Path):
+    """Past _POINT_READS rows, the indexes are read whole."""
+    found = MetaCooler(clustered).contig_clusters(["c2"] * 600)
+    assert len(found) == 1_800
+    assert found["cluster"].tolist()[:3] == ["O1", "O1_1", "F1"]
+
+
+def test_the_clusters_of_a_contig_in_two_clusters_of_a_round(clustered: Path):
+    """Whatever the method: a round whose clusters share a contig."""
+    write_clusters(
+        clustered,
+        ["r"],
+        pd.DataFrame({"round": "r", "name": ["X", "Y"]}),
+        pd.DataFrame(
+            {"round": "r", "cluster": ["X", "X", "Y"], "contig": ["c1", "c2", "c2"]}
+        ),
+    )
+    mc = MetaCooler(clustered)
+    assert mc.contig_clusters("c2")["cluster"].tolist() == ["X", "Y"]
+    assert mc.contig_clusters("c4").empty  # in no cluster
+
+
+def test_contig_clusters_names_what_is_not_a_contig(clustered: Path):
+    mc = MetaCooler(clustered)
+    with pytest.raises(KeyError, match="Not contigs of .*: 'nope', 'caf\u00e9'"):
+        mc.contig_clusters(["c1", "nope", "caf\u00e9"])
+    assert mc.chromnames == ["c1", "c2", "c3", "c4"]  # cooler's name -> id dict
+    assert mc.contig_clusters("c4")["cluster"].tolist() == ["O2"]
+    with pytest.raises(KeyError, match="'nope'"):
+        mc.contig_clusters("nope")
+
+
+def test_contig_clusters_of_a_map_without_clusters(tmp_path: Path):
+    mc = MetaCooler(_map(tmp_path / "plain.metacool"))
+    found = mc.contig_clusters("c1")
+    assert found.empty and list(found.columns) == ["contig", "round", "cluster"]
+
+
+def test_the_contigs_of_a_cluster(clustered: Path, reads: str):
+    mc = MetaCooler(clustered)
+    assert mc.cluster_contigs("overlapping", "O2") == ["c4"]
+    assert mc.cluster_contigs("recursive", "O1_1") == ["c1", "c2"]
+    assert mc.cluster_contigs("overlapping", "O1") == ["c1", "c2", "c3"]
+    loaded = MetaCooler(clustered)
+    assert len(loaded.contigs) == 4  # a loaded contigs table names them too
+    assert loaded.cluster_contigs("final", "F1") == ["c1", "c2"]
+    with pytest.raises(KeyError, match="has no cluster 'O1'"):
+        mc.cluster_contigs("final", "O1")
+    with pytest.raises(KeyError, match="is not a clustering round"):
+        mc.cluster_contigs("nope", "O1")
+
+
+def test_names_that_are_not_ascii_are_decoded_all_the_same():
+    """A map whose contig names are not ASCII does not open (cooler cannot
+    read it), but one opened with validate=False is still named."""
+    raw = np.array([b"c1", "caf\u00e9".encode()], dtype="S")
+    assert api_module._decode_names(raw).tolist() == ["c1", "caf\u00e9"]
+
+
+def test_one_round_is_read_alone(clustered: Path, reads: str):
+    """cluster_members(round) reads that round's slice: the same rows as
+    every membership filtered to the round."""
+    mc = MetaCooler(clustered)
+    every = mc.cluster_members()
+    for entry in mc.cluster_rounds:
+        name = entry["name"]
+        pd.testing.assert_frame_equal(
+            mc.cluster_members(round=name),
+            every[every["round"] == name].reset_index(drop=True),
+        )
+
+
+# ---------------------------------------------------------------------------
 # reassign --round: a round of the map as its genomes
 # ---------------------------------------------------------------------------
 
@@ -1215,6 +1318,30 @@ def test_dump_the_clusters_and_their_members(clustered: Path):
     assert [line.split("\t")[1] for line in result.output.strip().splitlines()] == [
         "O2"
     ]
+
+    # Several contigs: their memberships in the stored order, cluster by
+    # cluster, as without a selection.
+    result = runner.invoke(
+        cli, ["dump", str(clustered), "-t", "members", "--contigs", "c3,c1"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip().splitlines() == [
+        "overlapping\tO1\tc1",
+        "overlapping\tO1\tc3",
+        "recursive\tO1_1\tc1",
+        "recursive\tO1_2\tc3",
+        "final\tF1\tc1",
+    ]
+
+
+@pytest.mark.parametrize("table", ["clusters", "members"])
+def test_dump_a_selection_of_a_map_without_clusters(tmp_path: Path, table: str):
+    plain = _map(tmp_path / "plain.metacool")
+    result = CliRunner().invoke(
+        cli, ["dump", str(plain), "-t", table, "--contigs", "c1"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == ""
 
 
 def test_dump_all_writes_the_clusters_of_a_map_that_has_them(

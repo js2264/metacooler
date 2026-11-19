@@ -1599,19 +1599,22 @@ def read_table(uri: str | Path, group: str) -> pd.DataFrame:
         return _decode_table_group(f[group])
 
 
+def _decode_text(data: np.ndarray) -> np.ndarray:
+    """A column as stored, its text decoded to ``str`` (like cooler).
+
+    Fixed-length bytes, or variable-length text that h5py reads as bytes, are
+    decoded as UTF-8 explicitly: ``astype("U")`` decodes as ASCII and raises
+    UnicodeDecodeError on any non-ASCII byte (e.g. a "é" in a name), which
+    would break every read of a file that metacooler itself wrote. Any other
+    column is returned as it is.
+    """
+    if data.dtype.kind == "S":
+        return np.char.decode(data, "utf-8")
+    if data.dtype == object and len(data) > 0 and isinstance(data[0], bytes):
+        return np.array([x.decode("utf-8") for x in data])
+    return data
+
+
 def _decode_table_group(group: h5py.Group) -> pd.DataFrame:
     """The table an open HDF5 group holds, as :func:`read_table` returns it."""
-    columns = {}
-    for key in group:
-        data = group[key][:]
-        # Decode fixed-length byte strings to str (like cooler). Use an
-        # explicit UTF-8 decode: ``astype("U")`` decodes as ASCII and raises
-        # UnicodeDecodeError on any non-ASCII byte (e.g. a "é" in a name),
-        # which would break every read of a file that metacooler itself
-        # wrote.
-        if data.dtype.kind == "S":
-            data = np.char.decode(data, "utf-8")
-        elif data.dtype == object and len(data) > 0 and isinstance(data[0], bytes):
-            data = np.array([x.decode("utf-8") for x in data])
-        columns[key] = data
-    return pd.DataFrame(columns)
+    return pd.DataFrame({key: _decode_text(group[key][:]) for key in group})

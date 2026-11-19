@@ -14,8 +14,11 @@
   recursive and final clusters there, so the intermediate clusters stay out of
   `/genomes` and `/contigs`, which hold the current assignment. Python:
   `metacooler.write_clusters` (replaces the group whole: one run at a time) and
-  `drop_clusters`; `MetaCooler.cluster_rounds`, `clusters` and
-  `cluster_members(round=)`. `dump -t clusters` and `-t members` write them out,
+  `drop_clusters`; `MetaCooler.cluster_rounds`, `clusters`,
+  `cluster_members(round=)` (one round's slice), `cluster_contigs(round,
+  name)` (one cluster's contigs) and `contig_clusters(contigs)` (each
+  contig's clusters, round by round), each reading only the memberships it
+  returns. `dump -t clusters` and `-t members` write them out,
   `validate()` and `check` check them, and the commands that write a map from a
   map keep them: `reassign` (renumbering their contigs when it re-groups them),
   `annotate`, `merge` (the first input's, with a warning about an input whose

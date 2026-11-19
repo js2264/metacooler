@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -19,6 +19,7 @@ from metacooler.schema import (
     DEFAULT_CHUNKSIZE,
     GENOME_GROUPED_ORDERINGS,
     _decode_table_group,
+    _decode_text,
     cluster_rounds,
     read_table,
 )
@@ -486,18 +487,11 @@ class MetaCooler:
             return cluster_rounds(grp[CLUSTERS_GROUP])
 
     @functools.cached_property
-    def clusters(self) -> pd.DataFrame:
-        """One row per cluster of every clustering round.
+    def _cluster_table(self) -> pd.DataFrame:
+        """``/clusters/table`` with its rounds and parents resolved to names.
 
-        The columns are ``round`` and ``name``; ``parent_round`` and
-        ``parent``, the round and name of the cluster it was split from
-        (missing for none); ``n_contigs`` and ``length``, over its members
-        (:meth:`cluster_members`); then the columns its tool stored.
-
-        Returns:
-            DataFrame indexed by cluster id, the ``cluster_id`` of the stored
-            members; empty, with the columns above, when the map has no
-            ``/clusters``.
+        Read once and cached; :attr:`clusters` and the membership lookups name
+        their rows from it.
         """
         columns = ["round", "name", "parent_round", "parent", "n_contigs", "length"]
         with self.open() as grp:
@@ -525,8 +519,35 @@ class MetaCooler:
         extra = table.drop(columns=list(CLUSTER_TABLE_COLUMNS))
         return pd.concat([out, extra], axis=1)
 
+    @functools.cached_property
+    def clusters(self) -> pd.DataFrame:
+        """One row per cluster of every clustering round.
+
+        The columns are ``round`` and ``name``; ``parent_round`` and
+        ``parent``, the round and name of the cluster it was split from
+        (missing for none); ``n_contigs`` and ``length``, over its members
+        (:meth:`cluster_members`); then the columns its tool stored.
+
+        Returns:
+            DataFrame indexed by cluster id, the ``cluster_id`` of the stored
+            members; empty, with the columns above, when the map has no
+            ``/clusters``.
+        """
+        return self._cluster_table.copy()
+
+    def _check_round(self, round: str) -> None:
+        names = [r["name"] for r in self.cluster_rounds]
+        if round not in names:
+            raise KeyError(
+                f"{round!r} is not a clustering round of {self.uri}; its rounds: "
+                f"{', '.join(names) or 'none'}."
+            )
+
     def cluster_members(self, round: str | None = None) -> pd.DataFrame:
         """The contigs of each cluster, one row per membership.
+
+        Reads the memberships of *round* only, through
+        ``indexes/cluster_offset``: a round's clusters are stored together.
 
         Args:
             round: The name of one round, to read its clusters only; ``None``
@@ -540,37 +561,176 @@ class MetaCooler:
         Raises:
             KeyError: If *round* is not a round of the map.
         """
-        names = [r["name"] for r in self.cluster_rounds]
-        if round is not None and round not in names:
-            raise KeyError(
-                f"{round!r} is not a clustering round of {self.uri}; its rounds: "
-                f"{', '.join(names) or 'none'}."
-            )
-        columns = ["round", "cluster", "contig"]
+        if round is not None:
+            self._check_round(round)
         with self.open() as grp:
             if CLUSTERS_GROUP not in grp:
-                return pd.DataFrame(columns=columns)
-            members = grp[CLUSTERS_GROUP]["members"]
-            offsets = np.asarray(grp[CLUSTERS_GROUP]["indexes"]["cluster_offset"][()])
-            cluster_ids = np.asarray(members["cluster_id"][()]).astype(np.int64)
-            contig_ids = np.asarray(members["contig_id"][()]).astype(np.int64)
-        clusters = self.clusters
-        if round is not None:
-            rows = np.flatnonzero(clusters["round"].to_numpy() == round)
-            if len(rows):
-                lo, hi = int(offsets[rows[0]]), int(offsets[rows[-1] + 1])
-                cluster_ids, contig_ids = cluster_ids[lo:hi], contig_ids[lo:hi]
-            else:
-                cluster_ids = contig_ids = np.zeros(0, dtype=np.int64)
-        contig_names = self.contigs["name"].to_numpy(dtype=object)
+                return self._name_memberships(_NO_ROWS, _NO_ROWS)
+            group = grp[CLUSTERS_GROUP]
+            lo, hi = 0, len(group["members"]["cluster_id"])
+            if round is not None:
+                rows = np.flatnonzero(self._cluster_table["round"].to_numpy() == round)
+                offsets = group["indexes"]["cluster_offset"]
+                if rows.size:
+                    lo, hi = int(offsets[rows[0]]), int(offsets[rows[-1] + 1])
+                else:  # a round without clusters
+                    lo = hi = 0
+            cluster_ids = group["members"]["cluster_id"][lo:hi].astype(np.int64)
+            contig_ids = group["members"]["contig_id"][lo:hi].astype(np.int64)
+        return self._name_memberships(cluster_ids, contig_ids)
+
+    def cluster_contigs(self, round: str, name: str) -> list[str]:
+        """The contigs of one cluster, by name.
+
+        One slice of the memberships, through ``indexes/cluster_offset``; only
+        the names of those contigs are read.
+
+        Args:
+            round: The name of the cluster's round.
+            name: The name of the cluster, in its round.
+
+        Returns:
+            Its contigs' names, in the order of their rows in ``/contigs``.
+
+        Raises:
+            KeyError: If *round* is not a round of the map, or has no cluster
+                of that name.
+        """
+        self._check_round(round)
+        table = self._cluster_table
+        hit = np.flatnonzero(
+            (table["round"].to_numpy() == round) & (table["name"].to_numpy() == name)
+        )
+        if not hit.size:
+            raise KeyError(f"Round {round!r} of {self.uri} has no cluster {name!r}.")
+        row = int(hit[0])
+        with self.open() as grp:
+            group = grp[CLUSTERS_GROUP]
+            lo, hi = (int(v) for v in group["indexes"]["cluster_offset"][row : row + 2])
+            contig_ids = group["members"]["contig_id"][lo:hi].astype(np.int64)
+        return self._contig_names(contig_ids).tolist()
+
+    def contig_clusters(self, contigs: str | Sequence[str]) -> pd.DataFrame:
+        """The clusters a contig is in, in every round.
+
+        One slice per contig, through ``indexes/contig_offset``. The clusters
+        are numbered round by round, so each contig's come in the order of the
+        rounds: its path through a clustering, whatever the method.
+
+        Args:
+            contigs: A contig name, or several.
+
+        Returns:
+            DataFrame with the columns ``contig``, ``round`` and ``cluster``,
+            one row per membership: the contigs in the order given, each one's
+            clusters in the order of the rounds. A contig in no cluster has no
+            row; a map without ``/clusters`` gives none.
+
+        Raises:
+            KeyError: If a name is not a contig of the map.
+        """
+        names = [contigs] if isinstance(contigs, str) else [str(c) for c in contigs]
+        ids = self._contig_ids_of(names)
+        cluster_ids, counts = self._memberships_of(ids)
+        table = self._cluster_table
         return pd.DataFrame(
             {
-                "round": clusters["round"].to_numpy(dtype=object)[cluster_ids],
-                "cluster": clusters["name"].to_numpy(dtype=object)[cluster_ids],
-                "contig": contig_names[contig_ids],
+                "contig": np.repeat(np.array(names, dtype=object), counts),
+                "round": table["round"].to_numpy(dtype=object)[cluster_ids],
+                "cluster": table["name"].to_numpy(dtype=object)[cluster_ids],
             },
-            columns=columns,
+            columns=["contig", "round", "cluster"],
         )
+
+    def _memberships_of(self, contig_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The clusters of each of *contig_ids*, through the contig index.
+
+        Returns:
+            ``(cluster_ids, counts)``: the cluster ids of every membership,
+            contig after contig in the order given (each contig's in cluster
+            order), and how many each contig has.
+        """
+        ids = np.asarray(contig_ids, dtype=np.int64)
+        with self.open() as grp:
+            if CLUSTERS_GROUP not in grp:
+                return _NO_ROWS, np.zeros(len(ids), dtype=np.int64)
+            indexes = grp[CLUSTERS_GROUP]["indexes"]
+            bounds = _read_rows(
+                indexes["contig_offset"], np.concatenate([ids, ids + 1])
+            )
+            lo, counts = bounds[: len(ids)], bounds[len(ids) :] - bounds[: len(ids)]
+            # The rows lo[i] .. lo[i] + counts[i] of each contig, end to end.
+            rows = np.repeat(lo - np.cumsum(counts) + counts, counts) + np.arange(
+                int(counts.sum())
+            )
+            cluster_ids = _read_rows(indexes["contig_clusters"], rows).astype(np.int64)
+        return cluster_ids, counts
+
+    def _name_memberships(
+        self, cluster_ids: np.ndarray, contig_ids: np.ndarray
+    ) -> pd.DataFrame:
+        """Memberships by name: one row per ``(cluster_id, contig_id)``."""
+        table = self._cluster_table
+        return pd.DataFrame(
+            {
+                "round": table["round"].to_numpy(dtype=object)[cluster_ids],
+                "cluster": table["name"].to_numpy(dtype=object)[cluster_ids],
+                "contig": self._contig_names(contig_ids),
+            },
+            columns=["round", "cluster", "contig"],
+        )
+
+    @functools.cached_property
+    def _contig_name_strings(self) -> np.ndarray:
+        """``/contigs/name`` decoded, as ``str`` objects (cached)."""
+        if "contigs" in self.__dict__:  # the table is loaded already
+            return self.contigs["name"].to_numpy(dtype=object)
+        return _decode_names(self._contig_names_raw)
+
+    def _contig_names(self, contig_ids: np.ndarray) -> np.ndarray:
+        """The names of *contig_ids*, as ``str`` objects.
+
+        Never through the whole ``/contigs`` table, whose every column
+        :attr:`contigs` decodes: a few names are read from ``/contigs/name``
+        alone; more, gathered from the whole column and decoded alone; and
+        most of the column, decoded once and kept.
+        """
+        ids = np.asarray(contig_ids, dtype=np.int64)
+        if "_contig_name_strings" in self.__dict__ or "contigs" in self.__dict__:
+            return self._contig_name_strings[ids]
+        if len(ids) <= _POINT_READS:
+            with self.open() as grp:
+                return _decode_names(_read_rows(grp["contigs"]["name"], ids))
+        if len(ids) < len(self._contig_names_raw) // 2:
+            return _decode_names(self._contig_names_raw[ids])
+        return self._contig_name_strings[ids]
+
+    def _contig_ids_of(self, names: Sequence[str]) -> np.ndarray:
+        """The rows of *names* in ``/contigs``, in one pass over the stored names.
+
+        Raises:
+            KeyError: If a name is not a contig of the map.
+        """
+        if "_clr" in self.__dict__:  # cooler already holds the name -> id dict
+            found = {name: self._clr._chromids.get(name) for name in names}
+        elif len(names) == 1:
+            found = {names[0]: self._find_contig(names[0])}
+        else:
+            keys = {}
+            for name in names:
+                with contextlib.suppress(UnicodeEncodeError):  # names are ASCII
+                    keys[name] = name.encode("ascii")
+            raw = self._contig_names_raw
+            hits = np.flatnonzero(np.isin(raw, list(set(keys.values()))))
+            row_of = {bytes(raw[i]): int(i) for i in hits}
+            found = {name: row_of.get(keys.get(name, b"")) for name in names}
+        missing = [name for name in names if found[name] is None]
+        if missing:
+            shown = ", ".join(map(repr, missing[:5])) + (
+                ", ..." if len(missing) > 5 else ""
+            )
+            raise KeyError(f"Not contigs of {self.uri}: {shown}.")
+        return np.array([found[name] for name in names], dtype=np.int64)
 
     # ------------------------------------------------------------------
     # Index lookups
@@ -1100,3 +1260,35 @@ def _ranges_to_ids(ranges: np.ndarray) -> np.ndarray:
     total = int(lengths.sum())
     shift = np.repeat(ranges[:, 0] - (np.cumsum(lengths) - lengths), lengths)
     return shift + np.arange(total, dtype=np.int64)
+
+
+#: An empty row selection.
+_NO_ROWS = np.zeros(0, dtype=np.int64)
+
+#: Up to this many rows, a lookup reads them one by one, each in the chunk that
+#: holds it; past it, reading the whole dataset once is faster.
+_POINT_READS = 1024
+
+
+def _decode_names(raw: np.ndarray) -> np.ndarray:
+    """Contig names as stored, decoded to ``str`` objects.
+
+    Names are ASCII (``check_ascii_names`` on write, ``_check_decodable`` on
+    open), which numpy decodes in C, several times faster than the UTF-8
+    decode of :func:`metacooler.schema._decode_text`, kept for what is not.
+    """
+    try:
+        return raw.astype(str).astype(object)
+    except UnicodeDecodeError:
+        return _decode_text(raw).astype(object)
+
+
+def _read_rows(dataset: h5py.Dataset, rows: np.ndarray) -> np.ndarray:
+    """The values of *dataset* at *rows*, in that order (repeats allowed)."""
+    rows = np.asarray(rows, dtype=np.int64)
+    if len(rows) > _POINT_READS:
+        return np.asarray(dataset[()])[rows]
+    unique, inverse = np.unique(rows, return_inverse=True)
+    if not len(unique):
+        return np.asarray(dataset[0:0])
+    return np.asarray(dataset[unique])[inverse]
