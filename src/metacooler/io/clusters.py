@@ -366,7 +366,8 @@ def write_clusters(
 
     The map keeps one run: its previous ``/clusters``, if any, is replaced
     whole. ``/genomes`` and ``/contigs`` are left alone; to make a round the
-    map's genomes, reassign the contigs to it (:func:`metacooler.reassign`).
+    map's genomes, reassign the contigs to it
+    (``metacooler.reassign(uri, round=...)``).
     The map is checked in full first, and the new group is built aside,
     checked, and swapped in once complete, so a failure leaves the map as it
     was. As every edit of an HDF5 file in place, it leaves the space of the

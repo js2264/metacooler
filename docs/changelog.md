@@ -26,6 +26,13 @@
   `.mmetacool` entries, the base level of `zoomify`) and those it rewrites
   drop it (a re-grouping `reassign`, `binnify`, `merge`, the coarser levels
   of `zoomify`).
+- **`reassign --round NAME`** (API: `reassign(uri, round=...)`) makes a
+  clustering round of the map its genomes: each contig of the round goes to
+  the genome named after its cluster, and the clusters' columns become the
+  genomes' metadata. The contigs the round does not hold go to
+  `__unbinned__` by default (`--missing keep` leaves them where they were),
+  and a round in which a contig is in two clusters is refused. `--contigs` is
+  no longer required: one of the two is.
 
 ### Changed
 

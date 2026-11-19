@@ -17,6 +17,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import pytest
+from _cli_output import flat
 from click.testing import CliRunner
 
 import metacooler
@@ -919,6 +920,201 @@ def test_copy_clusters_needs_the_lengths_with_a_contig_map(clustered: Path):
         assert not copy_clusters(dst, src)  # a map without clusters: nothing
         with pytest.raises(ValueError, match="needs the new contig lengths"):
             copy_clusters(src, dst, np.arange(4))
+
+
+# ---------------------------------------------------------------------------
+# reassign --round: a round of the map as its genomes
+# ---------------------------------------------------------------------------
+
+
+def _genomes_by_name(mc: MetaCooler) -> dict[str, list[str]]:
+    """The contigs of each genome of a map, by name."""
+    genome = mc.contigs["genome_id"].map(mc.genomes["name"])
+    return {
+        str(name): sorted(mc.contigs.loc[genome == name, "name"].astype(str))
+        for name in mc.genomes["name"]
+    }
+
+
+def _one_round(path: Path, clusters: dict[str, list[str]], **columns) -> None:
+    """Replace the clusters of *path* by one round, ``r``, of *clusters*."""
+    write_clusters(
+        path,
+        ["r"],
+        pd.DataFrame({"round": "r", "name": list(clusters), **columns}),
+        pd.DataFrame(
+            [
+                ("r", name, contig)
+                for name, contigs in clusters.items()
+                for contig in contigs
+            ],
+            columns=["round", "cluster", "contig"],
+        ),
+    )
+
+
+def test_a_round_becomes_the_genomes(clustered: Path):
+    """Each contig goes to the genome named after its cluster, the clusters'
+    columns become the genomes', and the clusters are left as they were."""
+    before = _by_name(MetaCooler(clustered))
+    out = clustered.with_name("out.metacool")
+    reassign(clustered, output=out, round="overlapping")
+    mc = MetaCooler(out)
+    assert _genomes_by_name(mc) == {"O1": ["c1", "c2", "c3"], "O2": ["c4"]}
+    genomes = mc.genomes.set_index("name")
+    assert genomes["completeness"].to_dict() == {"O1": 90.5, "O2": 10.0}
+    assert genomes["lineage"].to_dict() == {"O1": "Bacteria", "O2": "Archaea"}
+    pd.testing.assert_frame_equal(_by_name(mc), before)
+    assert mc.metadata["reassign"][-1]["round"] == "overlapping"
+    validate(out, full=True)
+
+
+def test_a_round_leaves_the_contigs_it_lacks_unbinned(
+    clustered: Path, caplog: pytest.LogCaptureFixture
+):
+    """A round is a whole clustering: c4, in no recursive cluster, goes to
+    __unbinned__, unless missing='keep' says to leave it where it was."""
+    out = clustered.with_name("out.metacool")
+    reassign(clustered, output=out, round="recursive")
+    assert _genomes_by_name(MetaCooler(out)) == {
+        "__unbinned__": ["c4"],
+        "O1_1": ["c1", "c2"],
+        "O1_2": ["c3"],
+    }
+    kept = clustered.with_name("kept.metacool")
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        reassign(clustered, output=kept, round="recursive", missing="keep")
+    assert _genomes_by_name(MetaCooler(kept))["MAG_B"] == ["c4"]
+    assert "1 genome(s) of the source keep the contigs" in caplog.text
+    assert "MAG_B" in caplog.text
+
+
+def test_a_round_whose_clusters_share_a_contig_is_refused(clustered: Path):
+    _one_round(clustered, {"X": ["c1", "c2"], "Y": ["c2", "c3"]})
+    out = clustered.with_name("out.metacool")
+    with pytest.raises(
+        ValueError, match=r"1 contig\(s\) are in more than one .* c2 \(X, Y\)"
+    ):
+        reassign(clustered, output=out, round="r")
+    assert not out.exists()
+
+
+def test_a_round_that_is_not_there_is_refused(clustered: Path, tmp_path: Path):
+    out = tmp_path / "out.metacool"
+    with pytest.raises(ValueError, match="its rounds: overlapping, recursive, final"):
+        reassign(clustered, output=out, round="nope")
+    plain = _map(tmp_path / "plain.metacool")
+    with pytest.raises(ValueError, match="no clustering round 'r': it has none"):
+        reassign(plain, output=out, round="r")
+
+
+def test_a_round_without_contigs_is_refused(clustered: Path):
+    write_clusters(
+        clustered,
+        ["a", "b"],
+        pd.DataFrame({"round": ["a", "b"], "name": ["x", "y"]}),
+        pd.DataFrame({"round": ["a"], "cluster": ["x"], "contig": ["c1"]}),
+    )
+    with pytest.raises(ValueError, match="Round 'b' .* holds no contig"):
+        reassign(clustered, output=clustered.with_name("out.metacool"), round="b")
+
+
+@pytest.mark.parametrize("table", [None, {"c1": "MAG_A"}], ids=["neither", "both"])
+def test_a_table_or_a_round(clustered: Path, table):
+    with pytest.raises(ValueError, match="as a table .* or as a clustering round"):
+        reassign(
+            clustered,
+            table,
+            clustered.with_name("out.metacool"),
+            round="overlapping" if table else None,
+        )
+
+
+def test_clusters_that_make_no_genome_are_named(
+    clustered: Path, caplog: pytest.LogCaptureFixture
+):
+    """A cluster named as no genome sends its contigs to __unbinned__, as a
+    table does, and a cluster without a contig makes none: both are named,
+    and neither brings its columns."""
+    _one_round(
+        clustered,
+        {"NA": ["c1"], "K": ["c2", "c3"], "E": []},
+        score=[1.0, 2.0, 3.0],
+    )
+    out = clustered.with_name("out.metacool")
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        reassign(clustered, output=out, round="r")
+    assert "1 cluster(s) of round 'r' hold no contig of the map" in caplog.text
+    assert "1 cluster(s) of round 'r' are named as no genome" in caplog.text
+    mc = MetaCooler(out)
+    assert _genomes_by_name(mc) == {"__unbinned__": ["c1", "c4"], "K": ["c2", "c3"]}
+    score = mc.genomes.set_index("name")["score"]
+    assert score["K"] == 2.0 and np.isnan(score["__unbinned__"])
+
+
+def test_a_column_of_the_clusters_called_genome_id(
+    clustered: Path, caplog: pytest.LogCaptureFixture
+):
+    """The genome names come from the clusters' names, by position: a tool
+    column called genome_id is kept, renamed, and does not take their place."""
+    _one_round(clustered, {"K": ["c1", "c2", "c3", "c4"]}, genome_id=["other"])
+    out = clustered.with_name("out.metacool")
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        reassign(clustered, output=out, round="r")
+    mc = MetaCooler(out)
+    assert _genomes_by_name(mc) == {"K": ["c1", "c2", "c3", "c4"]}
+    assert mc.genomes["genome_id_col2"].tolist() == ["other"]
+    assert "renamed it to 'genome_id_col2'" in caplog.text
+
+
+def test_a_genomes_table_replaces_the_clusters_columns(clustered: Path, tmp_path: Path):
+    table = tmp_path / "genomes.tsv"
+    table.write_text("genome_name\tnote\nO1\tfirst\nO2\tsecond\n")
+    out = tmp_path / "out.metacool"
+    reassign(clustered, output=out, round="overlapping", genomes_table=table)
+    genomes = MetaCooler(out).genomes
+    assert genomes["note"].tolist() == ["first", "second"]
+    assert "completeness" not in genomes.columns
+
+
+def test_a_round_that_is_the_genomes_moves_nothing(
+    clustered: Path, caplog: pytest.LogCaptureFixture
+):
+    """A round that is already the map's assignment moves no contig, which
+    can then be written in place; the genomes take the clusters' columns."""
+    _one_round(clustered, {"MAG_A": ["c1", "c2"], "MAG_B": ["c3", "c4"]}, gc=[0.4, 0.6])
+    with caplog.at_level(logging.INFO, logger="metacooler"):
+        reassign(clustered, round="r", inplace=True)
+    assert "No contig changes genome" in caplog.text
+    assert "from the clusters of round 'r'" in caplog.text
+    assert MetaCooler(clustered).genomes.set_index("name")["gc"].to_dict() == {
+        "MAG_A": 0.4,
+        "MAG_B": 0.6,
+    }
+    validate(clustered, full=True)
+
+
+def test_reassign_round_from_the_cli(clustered: Path, tmp_path: Path):
+    runner = CliRunner()
+    out = tmp_path / "out.metacool"
+    result = runner.invoke(
+        cli, ["reassign", str(clustered), "--round", "overlapping", "-o", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert _genomes_by_name(MetaCooler(out)) == {"O1": ["c1", "c2", "c3"], "O2": ["c4"]}
+
+    table = tmp_path / "contigs.tsv"
+    table.write_text("contig_name\tgenome_name\nc1\tMAG_Z\n")
+    for args, message in (
+        ([], "as a --contigs table or as a --round"),
+        (["--round", "r", "--contigs", str(table)], "and not both"),
+        (["--round", "r", "--contigs-format", "1,2"], "--round takes the assignment"),
+    ):
+        result = runner.invoke(
+            cli, ["reassign", str(clustered), "-o", str(tmp_path / "x.metacool"), *args]
+        )
+        assert result.exit_code != 0
+        assert message in flat(result.output)
 
 
 # ---------------------------------------------------------------------------

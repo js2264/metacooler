@@ -62,6 +62,7 @@ from metacooler.io._utils import (
     _finalize_metacool_file,
     check_ascii_names,
     check_output_path,
+    rename_key_columns,
     resolve_count_dtype,
     write_column,
     write_cooler,
@@ -74,6 +75,7 @@ from metacooler.io.create import (
     _build_genomes_table,
     _compute_all_offsets,
     _load_extra_genomes_table,
+    _normalize_genome_name,
     _parse_contig_map,
     _refuse_staging_an_input,
     _remap_bins,
@@ -120,6 +122,18 @@ _ASSIGNMENT_INDEPENDENT_ORDERINGS = frozenset(
 
 # How many names to spell out in a warning before truncating.
 _MAX_REPORTED_NAMES = 10
+
+# The columns of ``MetaCooler.clusters`` that metacooler makes; every other one
+# is the clustering tool's (completeness, ...), which ``reassign(round=...)``
+# carries into the new genomes.
+_CLUSTER_KEY_COLUMNS = (
+    "round",
+    "name",
+    "parent_round",
+    "parent",
+    "n_contigs",
+    "length",
+)
 
 
 class ReassignReport(NamedTuple):
@@ -230,6 +244,93 @@ def _log_report(report: ReassignReport, n_contigs: int) -> None:
         )
 
 
+def _round_assignment(
+    mc: MetaCooler, round_name: str
+) -> tuple[dict[str, str], pd.DataFrame]:
+    """The assignment that one clustering round of the map makes.
+
+    Each contig of the round goes to the genome named after its cluster, and
+    the clusters' own columns (the tool's: completeness, contamination, ...)
+    become the new genomes' metadata. A cluster named as no genome (``NA``,
+    ``-1``, ... as in a contigs table) sends its contigs to ``__unbinned__``,
+    and a cluster without a contig makes no genome; both are named in a
+    warning.
+
+    Args:
+        mc: The map, open.
+        round_name: The name of one of its rounds (``MetaCooler.cluster_rounds``).
+
+    Returns:
+        ``(table, genomes)``: ``{contig: genome}`` over the contigs of the
+        round, and the genomes' metadata, keyed by ``genome_id`` (the genome
+        name) as a parsed ``--genomes`` table is.
+
+    Raises:
+        ValueError: If the map has no round of that name, the round holds no
+            contig, or a contig is in two of its clusters: an assignment puts
+            each contig in one genome.
+    """
+    rounds = [str(entry["name"]) for entry in mc.cluster_rounds]
+    if round_name not in rounds:
+        found = f"its rounds: {', '.join(rounds)}" if rounds else "it has none"
+        raise ValueError(f"{mc.uri} has no clustering round {round_name!r}: {found}.")
+    members = mc.cluster_members(round=round_name)
+    if members.empty:
+        raise ValueError(
+            f"Round {round_name!r} of {mc.uri} holds no contig, so it makes no genome."
+        )
+    contigs = members["contig"].astype(str)
+    shared = contigs.duplicated(keep=False).to_numpy()
+    if shared.any():
+        clusters_of = (
+            members.loc[shared]
+            .groupby("contig", sort=False)["cluster"]
+            .agg(lambda names: ", ".join(map(str, names)))
+        )
+        examples = [f"{contig} ({names})" for contig, names in clusters_of.items()]
+        raise ValueError(
+            f"Round {round_name!r} cannot be an assignment: {len(examples)} "
+            "contig(s) are in more than one of its clusters, e.g. "
+            f"{_names(examples)}. An assignment puts each contig in one genome."
+        )
+    clusters = mc.clusters
+    clusters = clusters.loc[clusters["round"].to_numpy() == round_name]
+    names = clusters["name"].astype(str)
+    genome_of = {name: _normalize_genome_name(name) for name in names}
+    table = dict(
+        zip(contigs, members["cluster"].astype(str).map(genome_of), strict=True)
+    )
+
+    held = clusters["n_contigs"].to_numpy() > 0
+    unbinned = held & (names.map(genome_of).to_numpy() == UNBINNED)
+    for rows, what in (
+        (~held, "hold no contig of the map, and make no genome"),
+        (unbinned, f"are named as no genome, so their contigs go to {UNBINNED}"),
+    ):
+        if rows.any():
+            logger.warning(
+                "%d cluster(s) of round %r %s: %s.",
+                int(rows.sum()),
+                round_name,
+                what,
+                _names(names[rows].tolist()),
+            )
+    tool_columns = [c for c in clusters.columns if c not in _CLUSTER_KEY_COLUMNS]
+    genomes = clusters.loc[held & ~unbinned, ["name", *tool_columns]]
+    # By position: a tool column may itself be called "genome_id".
+    genomes = rename_key_columns(
+        genomes.reset_index(drop=True), {0: "genome_id"}, kind=f"Round {round_name!r}"
+    )
+    logger.info(
+        "Round %r assigns %d contig(s) to %d genome(s)%s.",
+        round_name,
+        len(table),
+        len(genomes),
+        f", with {len(tool_columns)} column(s) of its clusters" if tool_columns else "",
+    )
+    return table, genomes
+
+
 def _and(items: list[str]) -> str:
     """Join phrases as English does: ``a``, ``a and b``, ``a, b and c``."""
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
@@ -237,7 +338,7 @@ def _and(items: list[str]) -> str:
 
 def _log_nothing_moved(
     *,
-    genomes_table: bool,
+    genomes_from: str | None,
     reorder: bool,
     strategy: str,
     source_ordering: str | None,
@@ -256,8 +357,8 @@ def _log_nothing_moved(
     no contig moved, it is the source's.
 
     Args:
-        genomes_table: Whether a genomes table replaced the ``/genomes``
-            metadata columns.
+        genomes_from: What replaced the ``/genomes`` metadata columns (the
+            genomes table, or a round's clusters), or ``None``.
         reorder: Whether the contigs (hence bins and pixels) are re-laid out.
         strategy: The layout strategy, for the message.
         source_ordering: The source's ``contig-ordering`` attribute.
@@ -267,8 +368,8 @@ def _log_nothing_moved(
         metadata_keys: Metadata keys the caller merged in, provenance aside.
     """
     asked = []
-    if genomes_table:
-        asked.append("its /genomes metadata columns (from the genomes table)")
+    if genomes_from:
+        asked.append(f"its /genomes metadata columns (from {genomes_from})")
     if reorder:
         asked.append(f"its contig layout (re-grouped as {strategy!r})")
     elif ordering != source_ordering:
@@ -509,6 +610,7 @@ def _build_metadata(
     table: str,
     layout: str,
     n_moved: int,
+    round_name: str | None = None,
 ) -> tuple[dict, bool]:
     """Assemble the output's ``metadata`` attribute.
 
@@ -525,6 +627,8 @@ def _build_metadata(
         table: Path of the reassignment table, for the history entry.
         layout: Resolved layout strategy, for the history entry.
         n_moved: Number of contigs that changed genome.
+        round_name: The clustering round the assignment came from, if any,
+            for the history entry.
 
     Returns:
         ``(metadata, had_qc)`` — the metadata to write, and whether the source
@@ -539,14 +643,11 @@ def _build_metadata(
         else:
             metadata[key] = value
     history = list(metadata.get("reassign", []))
-    history.append(
-        {
-            "source": source_uri,
-            "table": table,
-            "layout": layout,
-            "n_contigs_reassigned": int(n_moved),
-        }
-    )
+    entry: dict[str, object] = {"source": source_uri, "table": table}
+    if round_name is not None:
+        entry["round"] = round_name
+    entry.update({"layout": layout, "n_contigs_reassigned": int(n_moved)})
+    history.append(entry)
     metadata["reassign"] = history
     if commands:
         metadata["commands"] = commands
@@ -1007,13 +1108,14 @@ def _with_columns(
 
 def reassign(
     uri: str | Path,
-    contig_genome_map: str | Path | dict[str, str],
+    contig_genome_map: str | Path | dict[str, str] | None = None,
     output: str | Path | None = None,
     *,
+    round: str | None = None,
     contig_table_format: str = CONTIGS_FORMAT_DEFAULT,
     genomes_table: str | Path | None = None,
     genomes_table_format: str = GENOMES_FORMAT_DEFAULT,
-    missing: Literal["keep", "unbinned"] = "keep",
+    missing: Literal["keep", "unbinned"] | None = None,
     layout: Layout = "auto",
     inplace: bool = False,
     metadata: dict | None = None,
@@ -1034,26 +1136,38 @@ def reassign(
         uri: Source ``.metacool`` path or ``file.mmetacool::entries/name`` URI.
         contig_genome_map: Reassignment table (path), or a ready-made
             ``{contig: genome}`` mapping.  It need not cover every contig — see
-            *missing*.
+            *missing*.  Leave it out to take the assignment from a *round*.
         output: Destination ``.metacool`` path.  Required unless *inplace*.
+        round: The name of a clustering round of the map (``/clusters``; see
+            ``MetaCooler.cluster_rounds``) to take the assignment from, instead
+            of a table: each contig of the round goes to the genome named after
+            its cluster, and the clusters' own columns (completeness, ...)
+            become the new genomes' metadata, replacing those carried over from
+            the source ``/genomes`` table as *genomes_table* does (which, when
+            given too, is used instead).  A cluster named as no genome (``NA``,
+            ``-1``, ...) sends its contigs to ``__unbinned__``, as in a table.
+            A round in which a contig is in two clusters is refused.  The
+            clusters themselves are left as they are.
         contig_table_format: Which columns of the reassignment table hold the
             contig and the genome names, as accepted by
             :func:`metacooler.io.contigs.parse_contigs_table`:
             ``CONTIG,GENOME[,noheader]``, each a 1-based position or a header
             name, or an alias.  Extra columns of the table are ignored; only
-            the two name columns are read.
+            the two name columns are read.  Unused with *round*.
         genomes_table: Optional ``--genomes`` metadata table for the *new*
             genomes.  When given it replaces the metadata columns carried over
             from the source ``/genomes`` table rather than merging with them.
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
             a table without a header line.  Defaults to ``genome_name``.
-        missing: What to do with a contig the table does not mention.
-            ``"keep"`` (default) leaves its current genome, which makes a short
+        missing: What to do with a contig the table (or the round) does not
+            mention.  ``"keep"`` leaves its current genome, which makes a short
             table an incremental edit; ``"unbinned"`` moves it to
             ``__unbinned__``, which makes the table authoritative — the right
-            choice when it is the output of a fresh binning run.  Neither drops
-            a contig: removing contigs (and their pixels) is what
+            choice when it is the output of a fresh binning run.  Defaults to
+            ``"keep"`` with a table and ``"unbinned"`` with a *round*, whose
+            clusters are a whole clustering.  Neither drops a contig: removing
+            contigs (and their pixels) is what
             :func:`metacooler.io.extract.extract` is for.
         layout: How to lay the output's contigs out.  ``"auto"`` (default)
             re-groups a file whose ``contig-ordering`` is genome-grouped and
@@ -1091,12 +1205,19 @@ def reassign(
         ValueError: If the output arguments are inconsistent, if *output* is
             one of the inputs, if *inplace* is asked for a reassignment that
             requires re-ordering, if re-ordering is asked of a map whose
-            storage mode is not ``symmetric-upper``, or if the table names no
-            contig of this file.
+            storage mode is not ``symmetric-upper``, if the table names no
+            contig of this file, if neither or both of a table and a *round*
+            are given, or if the map has no such round, the round holds no
+            contig, or a contig is in two of its clusters.
         FileExistsError: If *output* exists and *force* is not set.
     """
     from metacooler.api import MetaCooler
 
+    if (contig_genome_map is None) == (round is None):
+        raise ValueError(
+            "Pass the new assignment as a table (contig_genome_map) or as a "
+            "clustering round of the map (round=...), and not both."
+        )
     if inplace and output is not None:
         raise ValueError(
             "inplace rewrites the input file, so no output path is expected; "
@@ -1133,14 +1254,32 @@ def reassign(
         )
     )
 
-    source_table: str | Path | dict[str, str] = (
-        {str(k): str(v) for k, v in contig_genome_map.items()}
-        if isinstance(contig_genome_map, dict)
-        else contig_genome_map
-    )
-    table, _ = _parse_contig_map(source_table, contig_table_format)
+    round_genomes: pd.DataFrame | None = None
+    if round is not None:
+        table, round_genomes = _round_assignment(mc, round)
+    else:
+        assert contig_genome_map is not None  # one of the two, checked above
+        source_table: str | Path | dict[str, str] = (
+            {str(k): str(v) for k, v in contig_genome_map.items()}
+            if isinstance(contig_genome_map, dict)
+            else contig_genome_map
+        )
+        table, _ = _parse_contig_map(source_table, contig_table_format)
+    if missing is None:
+        missing = "keep" if round is None else "unbinned"
     assignment, report = _apply_reassignment(before, table, missing)
     _log_report(report, len(contig_names))
+    if round is not None and missing == "keep":
+        kept = sorted(set(assignment.values()) - set(table.values()) - {UNBINNED})
+        if kept:
+            logger.warning(
+                "With missing='keep', %d genome(s) of the source keep the "
+                "contigs that round %r does not hold, next to its clusters: %s. "
+                "Pass missing='unbinned' to take the round alone.",
+                len(kept),
+                round,
+                _names(kept),
+            )
 
     contig_lengths = {
         name: int(length)
@@ -1190,20 +1329,24 @@ def reassign(
             "then stop being contiguous)."
         )
 
+    if genomes_table is not None:
+        genome_metadata = _load_extra_genomes_table(genomes_table, genomes_table_format)
+    elif round_genomes is not None:
+        genome_metadata = round_genomes
+    else:
+        genome_metadata = _carry_genome_metadata(
+            old_genomes,
+            set(assignment.values()),
+            {before[c] for c in report.moved} | {assignment[c] for c in report.moved},
+        )
     genomes = _build_genomes_table(
         contig_order=contig_order,
         contig_lengths=contig_lengths,
         contig_genome_map=assignment,
-        extra_genomes_df=(
-            _load_extra_genomes_table(genomes_table, genomes_table_format)
-            if genomes_table is not None
-            else _carry_genome_metadata(
-                old_genomes,
-                set(assignment.values()),
-                {before[c] for c in report.moved}
-                | {assignment[c] for c in report.moved},
-            )
-        ),
+        extra_genomes_df=genome_metadata,
+        # A round's clusters are its genomes, by construction: what the
+        # divergence report would say of them, _round_assignment said already.
+        report_divergence=genomes_table is not None or round is None,
     )
     contigs = _build_contigs_table(
         contig_order=contig_order,
@@ -1225,15 +1368,24 @@ def reassign(
         source_metadata,
         metadata,
         source_uri=str(uri),
-        table=str(contig_genome_map) if not isinstance(contig_genome_map, dict) else "",
+        table=(
+            str(contig_genome_map) if isinstance(contig_genome_map, str | Path) else ""
+        ),
         layout=strategy,
         n_moved=len(report.moved),
+        round_name=round,
     )
     block = source_metadata.get(QC_METADATA_KEY)
     carried = _carried_contig_qc(block, old_contigs) if had_qc and qc else None
     if not report.moved:
         _log_nothing_moved(
-            genomes_table=genomes_table is not None,
+            genomes_from=(
+                "the genomes table"
+                if genomes_table is not None
+                else f"the clusters of round {round!r}"
+                if round is not None
+                else None
+            ),
             reorder=reorder,
             strategy=strategy,
             source_ordering=source_ordering,

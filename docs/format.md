@@ -134,8 +134,9 @@ its overlapping, recursive and final clusters — so that the intermediate
 clusters are kept without being written into `/genomes` and `/contigs`.
 `/genomes` and `/contigs/genome_id` hold the current assignment: `/clusters`
 says how a tool reached one, and nothing requires them to agree (a later
-`reassign` changes `/genomes`, not `/clusters`). A cluster is a set of contigs;
-a contig may be a member of several clusters, of one round or of several.
+`reassign` changes `/genomes`, not `/clusters`; `reassign --round` makes a
+round the map's genomes). A cluster is a set of contigs; a contig may be a
+member of several clusters, of one round or of several.
 
 ```
 /clusters

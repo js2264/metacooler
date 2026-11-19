@@ -572,24 +572,27 @@ contact-quality block and the `qc_*` columns back into the map it measured.
 
 Re-attribute contigs to genomes (MAGs) in a file that already exists, from a
 new contig-to-genome table — a re-binning, a curation pass, a merge of two
-MAGs. The contact matrix is **never recomputed**: the contigs, their lengths
-and their bins are those of the source file and every pixel keeps its count.
+MAGs — or from one of the map's own [clustering rounds](format.md#clusters).
+The contact matrix is **never recomputed**: the contigs, their lengths and
+their bins are those of the source file and every pixel keeps its count.
 **API:** `metacooler.reassign` (`metacooler.io.reassign.reassign`).
 
 ```console
 metacooler reassign METACOOL_PATH --contigs TABLE -o OUT.metacool [OPTIONS]
 metacooler reassign METACOOL_PATH --contigs TABLE --inplace [OPTIONS]
+metacooler reassign METACOOL_PATH --round NAME -o OUT.metacool [OPTIONS]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--contigs` | *required* | New contig-to-genome table. It need not list every contig — see `--missing`. Only its two name columns are read; extra columns are ignored. |
+| `--contigs` | — | New contig-to-genome table. It need not list every contig — see `--missing`. Only its two name columns are read; extra columns are ignored. Give it or `--round`. |
 | `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). `NA` as the genome column moves every contig the table lists to `__unbinned__`. |
+| `--round` | — | Take the assignment from a clustering round of the map instead of a table — see [A round as the genomes](#reassign-round). |
 | `-o, --output` | *required* | Output `.metacool` path. Required unless `--inplace`. |
 | `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file. Only possible when no contig has to move (see `--layout`). |
 | `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. To add or change a few columns without reassigning anything, use [`annotate`](#annotate). |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
-| `--missing` | `keep` | What to do with a contig the table does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
+| `--missing` | `keep` with `--contigs`, `unbinned` with `--round` | What to do with a contig the table (or the round) does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
 | `--layout` | `auto` | `auto`, `keep`, `genome-then-alpha`, or `genome-then-length` — see below. |
 | `--metadata` | — | JSON or YAML metadata file (no key metacooler writes itself — see `create pairs`). |
 | `--qc / --no-qc` | on | Keep the contact-quality block when the source carries one, for the new genomes — see [What a reassignment invalidates](#reassign-invalidates). With `--no-qc` the block and its `qc_*` columns are dropped and not replaced. |
@@ -608,6 +611,25 @@ What is rewritten, and what is not:
   (and its two QC columns, with the QC block — below).
 - `/bins` and `/pixels` are untouched unless the layout has to be restored
   (below).
+
+#### A round as the genomes { #reassign-round }
+
+`--round NAME` makes one of the map's [clustering rounds](format.md#clusters)
+its genomes, whichever tool wrote it (`dump -t clusters` lists them):
+
+- each contig of the round goes to the genome named after its cluster, and
+  the contigs the round does not hold go to `__unbinned__` (`--missing keep`
+  leaves them in their genomes instead, with a warning naming them);
+- the clusters' own columns (completeness, contamination, …) become the
+  genomes' metadata, replacing those carried over from `/genomes`, as
+  `--genomes` does — and a `--genomes` table, if given too, is used instead;
+- a cluster named as no genome (`NA`, `ND`, `-1`, …, as in a contigs table)
+  sends its contigs to `__unbinned__`, and a cluster without a contig makes no
+  genome; both are named in a warning;
+- a round in which a contig is in two clusters is refused: an assignment puts
+  each contig in one genome;
+- the clusters themselves are left as they are, and the reassignment's entry
+  in the map's history records the round.
 
 #### The layout, and why a reassignment can cost a full rewrite { #reassign-layout }
 
