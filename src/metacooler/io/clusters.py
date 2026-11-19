@@ -51,6 +51,8 @@ class _Clusters:
     table: pd.DataFrame
     cluster_id: np.ndarray
     contig_id: np.ndarray
+    #: Rows of the map's ``/contigs``, which ``contig_offset`` spans.
+    n_contigs: int
 
 
 def _rounds(rounds: Sequence[str | Mapping[str, object]]) -> list[dict]:
@@ -318,7 +320,7 @@ def _sorted(
         columns=["round", "name", "parent", "n_contigs", "length"], errors="ignore"
     ).reset_index(drop=True)
     table = pd.concat([head, derived, rest], axis=1)
-    return _Clusters(rounds, table, cluster_ids, contig_ids)
+    return _Clusters(rounds, table, cluster_ids, contig_ids, n_contigs)
 
 
 def _write_group(group: h5py.Group, clusters: _Clusters) -> None:
@@ -333,11 +335,22 @@ def _write_group(group: h5py.Group, clusters: _Clusters) -> None:
     members = group.create_group("members", track_order=True)
     write_column(members, "cluster_id", clusters.cluster_id, np.int32)
     write_column(members, "contig_id", clusters.contig_id, np.int32)
+    indexes = group.create_group("indexes", track_order=True)
+    # The members of each cluster: their rows, which come in cluster order.
     offsets = np.zeros(len(clusters.table) + 1, dtype=np.int64)
     offsets[1:] = np.cumsum(
         np.bincount(clusters.cluster_id, minlength=len(clusters.table))
     )
-    write_column(group.create_group("indexes"), "cluster_offset", offsets, np.int64)
+    write_column(indexes, "cluster_offset", offsets, np.int64)
+    # The clusters of each contig: the members transposed, by contig, then by
+    # cluster -- so round by round, as the clusters are numbered.
+    offsets = np.zeros(clusters.n_contigs + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(
+        np.bincount(clusters.contig_id, minlength=clusters.n_contigs)
+    )
+    write_column(indexes, "contig_offset", offsets, np.int64)
+    by_contig = clusters.cluster_id[np.argsort(clusters.contig_id, kind="stable")]
+    write_column(indexes, "contig_clusters", by_contig, np.int32)
 
 
 def _read_group(group: h5py.Group) -> _Clusters:
@@ -347,6 +360,7 @@ def _read_group(group: h5py.Group) -> _Clusters:
         _decode_table_group(group["table"]),
         np.asarray(group["members"]["cluster_id"][()]).astype(np.int32),
         np.asarray(group["members"]["contig_id"][()]).astype(np.int32),
+        len(group["indexes"]["contig_offset"]) - 1,
     )
 
 
@@ -423,7 +437,7 @@ def write_clusters(
             _write_group(scratch, built)
             # Checked before it replaces the map's group: a group validate()
             # would refuse never reaches the map.
-            _check_clusters_structure(scratch)
+            _check_clusters_structure(scratch, len(contig_lengths))
             _check_clusters(scratch, len(contig_lengths), contig_lengths)
         except BaseException:
             if _SCRATCH in grp:
@@ -489,7 +503,7 @@ def _hint_broken_clusters(uri: str | Path, error: MetaCoolerFormatError) -> None
         try:
             if not isinstance(node, h5py.Group):
                 raise MetaCoolerFormatError("/clusters is not a group")
-            _check_clusters_structure(node)
+            _check_clusters_structure(node, len(lengths))
             _check_clusters(node, len(lengths), lengths)
         except MetaCoolerFormatError:
             raise MetaCoolerFormatError(

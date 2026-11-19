@@ -9,9 +9,10 @@
   can store the rounds of its latest run in the map: one table of every
   cluster of every round (`round`, `name`, `parent`, `n_contigs`, `length` and
   its own columns, such as completeness), and the contigs of each cluster, a
-  contig possibly in several. metaTOR keeps its overlapping, recursive and
-  final clusters there, so the intermediate clusters stay out of `/genomes` and
-  `/contigs`, which hold the current assignment. Python:
+  contig possibly in several, indexed both ways: the contigs of a cluster and
+  the clusters of a contig are each one slice. metaTOR keeps its overlapping,
+  recursive and final clusters there, so the intermediate clusters stay out of
+  `/genomes` and `/contigs`, which hold the current assignment. Python:
   `metacooler.write_clusters` (replaces the group whole: one run at a time) and
   `drop_clusters`; `MetaCooler.cluster_rounds`, `clusters` and
   `cluster_members(round=)`. `dump -t clusters` and `-t members` write them out,

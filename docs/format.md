@@ -143,7 +143,10 @@ member of several clusters, of one round or of several.
 ├── @rounds                  ← JSON list, one object per round, in order
 ├── table/                   ← one row per cluster, every round
 ├── members/                 ← one row per (cluster, contig)
-└── indexes/cluster_offset   ← members/ rows of each cluster
+└── indexes/
+    ├── cluster_offset       ← members/ rows of each cluster
+    ├── contig_offset        ← contig_clusters rows of each contig
+    └── contig_clusters      ← members/cluster_id, ordered by contig, then cluster
 ```
 
 **`@rounds`**, a JSON list of objects, one per round, in the order the tool
@@ -169,8 +172,15 @@ each pair at most once:
 | `cluster_id` | `int32` | Row of `table/`. |
 | `contig_id` | `int32` | Row of `/contigs`. |
 
-**`indexes/cluster_offset`** (`int64`, `n_clusters + 1`): the members of cluster
-`i` are the rows `cluster_offset[i]` to `cluster_offset[i + 1]` of `members/`.
+**`indexes/`** looks the memberships up both ways, each in one slice:
+
+| Dataset | dtype | Description |
+|---------|-------|-------------|
+| `cluster_offset` | `int64`, `n_clusters + 1` | The members of cluster `i` are the rows `cluster_offset[i]` to `cluster_offset[i + 1]` of `members/`. |
+| `contig_offset` | `int64`, `n_contigs + 1` | The clusters of contig `j` are the rows `contig_offset[j]` to `contig_offset[j + 1]` of `contig_clusters`. |
+| `contig_clusters` | `int32`, one per member | `members/cluster_id`, ordered by `contig_id`, then `cluster_id`: the members transposed. Clusters are numbered round by round, so a contig's clusters come in the order of the rounds. |
+
+Both are derived from `members/`, and `validate()` checks them against it.
 
 The group holds one run: writing clusters (`metacooler.write_clusters`)
 replaces it whole, and earlier runs are kept only as the provenance their tool

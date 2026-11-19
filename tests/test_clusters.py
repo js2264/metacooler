@@ -719,6 +719,38 @@ CORRUPTIONS = {
         lambda g: _replace(g["table"], "length", [9_000, 1_000, 7_000, 2_000, 1]),
         "length does not match",
     ),
+    # The members transposed: contig_offset [0, 3, 6, 8, 9] into
+    # contig_clusters [0, 2, 4, 0, 2, 4, 0, 3, 1] (c1, c2, c3, c4).
+    "no contig index": (
+        lambda g: g["indexes"].__delitem__("contig_offset"),
+        "Missing index: /clusters/indexes/contig_offset",
+    ),
+    "contig index of another length": (
+        lambda g: _replace(g["indexes"], "contig_clusters", [0, 2, 4, 0, 2, 4, 0, 3]),
+        "contig_clusters has 8 rows, not one per member",
+    ),
+    "contig offsets of another length": (
+        lambda g: _replace(g["indexes"], "contig_offset", [0, 3, 6, 9]),
+        "contig_offset length",
+    ),
+    "contig offset ends": (
+        lambda g: _replace(g["indexes"], "contig_offset", [0, 3, 6, 8, 8]),
+        "contig_offset endpoints",
+    ),
+    "contig offsets inconsistent": (
+        lambda g: _replace(g["indexes"], "contig_offset", [0, 2, 6, 8, 9]),
+        "contig_offset is inconsistent",
+    ),
+    "contig clusters out of order": (
+        lambda g: _replace(
+            g["indexes"], "contig_clusters", [2, 0, 4, 0, 2, 4, 0, 3, 1]
+        ),
+        "contig_clusters is not the members' cluster ids",
+    ),
+    "contig clusters that are not integers": (
+        lambda g: _replace(g["indexes"], "contig_clusters", np.linspace(0, 1, 9)),
+        "/clusters/indexes/contig_clusters must hold integers",
+    ),
 }
 
 
@@ -736,6 +768,36 @@ def test_validate_refuses_clusters_that_are_not_a_group(tmp_path: Path):
         f.create_dataset("clusters", data=[1])
     with pytest.raises(MetaCoolerFormatError, match="/clusters is not a group"):
         validate(path, full=False)
+
+
+def test_the_members_are_indexed_both_ways(clustered: Path):
+    """The members of each cluster (cluster_offset), and the clusters of each
+    contig (contig_offset into contig_clusters), round by round."""
+    with h5py.File(clustered, "r") as f:
+        assert f["contigs/name"][()].tolist() == [b"c1", b"c2", b"c3", b"c4"]
+        indexes = f["clusters/indexes"]
+        assert indexes["cluster_offset"][()].tolist() == [0, 3, 4, 6, 7, 9]
+        assert indexes["contig_offset"][()].tolist() == [0, 3, 6, 8, 9]
+        assert indexes["contig_clusters"][()].tolist() == [0, 2, 4, 0, 2, 4, 0, 3, 1]
+
+
+def test_a_map_written_without_the_contig_index_is_named(clustered: Path):
+    """A /clusters group of the first layout (no contig index) does not
+    open; drop_clusters removes it, and write_clusters names that remedy."""
+    _corrupt(
+        clustered,
+        lambda g: (
+            g["indexes"].__delitem__("contig_offset"),
+            g["indexes"].__delitem__("contig_clusters"),
+        ),
+    )
+    with pytest.raises(MetaCoolerFormatError, match="indexes/contig_offset"):
+        MetaCooler(clustered)
+    with pytest.raises(MetaCoolerFormatError, match="drop_clusters"):
+        write_clusters(clustered, ROUNDS, CLUSTERS, MEMBERS)
+    assert drop_clusters(clustered)
+    write_clusters(clustered, ROUNDS, CLUSTERS, MEMBERS)
+    validate(clustered, full=True)
 
 
 def test_opening_a_map_checks_the_structure_only(clustered: Path):

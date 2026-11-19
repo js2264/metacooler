@@ -287,10 +287,13 @@ def _check_offset_ends(
 
 
 #: The optional group of the clustering rounds (see docs/format.md#clusters),
-#: and the columns metacooler requires in each of its two tables.
+#: the columns metacooler requires in each of its two tables, and its indexes:
+#: the members of each cluster (``cluster_offset``), and the clusters of each
+#: contig (``contig_offset`` into ``contig_clusters``).
 CLUSTERS_GROUP = "clusters"
 CLUSTER_TABLE_COLUMNS = ("round", "name", "parent", "n_contigs", "length")
 CLUSTER_MEMBER_COLUMNS = ("cluster_id", "contig_id")
+CLUSTER_INDEXES = ("cluster_offset", "contig_offset", "contig_clusters")
 
 
 def cluster_rounds(clusters: h5py.Group) -> list[dict]:
@@ -334,13 +337,18 @@ def cluster_rounds(clusters: h5py.Group) -> list[dict]:
     return rounds
 
 
-def _check_clusters_structure(clusters: h5py.Group) -> None:
+def _check_clusters_structure(clusters: h5py.Group, n_contigs: int) -> None:
     """The O(n_columns) checks of a ``/clusters`` group (see :func:`validate`).
 
+    Args:
+        clusters: The ``/clusters`` group.
+        n_contigs: Rows of ``/contigs``.
+
     Raises:
-        MetaCoolerFormatError: If a table, a column or the index is missing,
-            the columns of a table have unequal lengths, or ``cluster_offset``
-            does not bracket the members.
+        MetaCoolerFormatError: If a table, a column or an index is missing,
+            the columns of a table have unequal lengths, ``cluster_offset``
+            does not bracket the members or ``contig_offset`` the contigs'
+            clusters, or ``contig_clusters`` is not as long as the members.
     """
     cluster_rounds(clusters)
     lengths = {}
@@ -357,13 +365,23 @@ def _check_clusters_structure(clusters: h5py.Group) -> None:
                 )
         lengths[table] = _table_length(clusters[table], f"clusters/{table}")
     indexes = clusters.get("indexes")
-    if not isinstance(indexes, h5py.Group) or "cluster_offset" not in indexes:
-        raise MetaCoolerFormatError("Missing index: /clusters/indexes/cluster_offset")
+    for name in CLUSTER_INDEXES:
+        if not isinstance(indexes, h5py.Group) or name not in indexes:
+            raise MetaCoolerFormatError(f"Missing index: /clusters/indexes/{name}")
+    assert isinstance(indexes, h5py.Group)  # each index was found in it
     _check_offset_ends(
         indexes["cluster_offset"],
         "cluster_offset",
         lengths["table"] + 1,
         lengths["members"],
+    )
+    if len(indexes["contig_clusters"]) != lengths["members"]:
+        raise MetaCoolerFormatError(
+            f"/clusters/indexes/contig_clusters has {len(indexes['contig_clusters'])} "
+            f"rows, not one per member ({lengths['members']})"
+        )
+    _check_offset_ends(
+        indexes["contig_offset"], "contig_offset", n_contigs + 1, lengths["members"]
     )
 
 
@@ -382,14 +400,17 @@ def _check_clusters(
             contig id is out of range; the rows are not grouped by round in
             the order of ``@rounds``; a name repeats within its round or is not
             ASCII; a parent is not of an earlier round; the members are not
-            strictly sorted by ``(cluster_id, contig_id)``; or ``cluster_offset``,
-            ``n_contigs`` or ``length`` does not match the members.
+            strictly sorted by ``(cluster_id, contig_id)``; ``cluster_offset``,
+            ``n_contigs`` or ``length`` does not match the members; or
+            ``contig_offset`` and ``contig_clusters`` are not the members
+            ordered by contig.
     """
     n_rounds = len(cluster_rounds(clusters))
     table, members = clusters["table"], clusters["members"]
     for group, columns in (
         (table, ("round", "parent", "n_contigs", "length")),
         (members, CLUSTER_MEMBER_COLUMNS),
+        (clusters["indexes"], CLUSTER_INDEXES),
     ):
         for column in columns:
             if group[column].dtype.kind not in "iu":
@@ -477,6 +498,25 @@ def _check_clusters(
     if not np.array_equal(np.asarray(table["length"][()]).astype(np.int64), lengths):
         raise MetaCoolerFormatError(
             "/clusters/table/length does not match the lengths of the members"
+        )
+    # The members transposed: the clusters of each contig, in cluster order
+    # (a stable sort of the members, which are in cluster order already).
+    contig_offset = np.asarray(clusters["indexes"]["contig_offset"][()]).astype(
+        np.int64
+    )
+    _check_offset_array(contig_offset, "contig_offset", n_contigs + 1, n_members)
+    expected = np.zeros(n_contigs + 1, dtype=np.int64)
+    expected[1:] = np.cumsum(np.bincount(contig_ids, minlength=n_contigs))
+    if not np.array_equal(contig_offset, expected):
+        raise MetaCoolerFormatError(
+            "/clusters/indexes/contig_offset is inconsistent with the members"
+        )
+    by_contig = cluster_ids[np.argsort(contig_ids, kind="stable")]
+    stored = np.asarray(clusters["indexes"]["contig_clusters"][()]).astype(np.int64)
+    if not np.array_equal(stored, by_contig):
+        raise MetaCoolerFormatError(
+            "/clusters/indexes/contig_clusters is not the members' cluster ids "
+            "ordered by contig, then cluster"
         )
 
 
@@ -839,7 +879,7 @@ def validate(uri: str | Path, *, full: bool = True) -> None:
         if clusters is not None:
             if not isinstance(clusters, h5py.Group):
                 raise MetaCoolerFormatError("/clusters is not a group")
-            _check_clusters_structure(clusters)
+            _check_clusters_structure(clusters, n_contigs)
 
         if not full:
             return
