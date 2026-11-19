@@ -294,6 +294,11 @@ CLUSTERS_GROUP = "clusters"
 CLUSTER_TABLE_COLUMNS = ("round", "name", "parent", "n_contigs", "length")
 CLUSTER_MEMBER_COLUMNS = ("cluster_id", "contig_id")
 CLUSTER_INDEXES = ("cluster_offset", "contig_offset", "contig_clusters")
+#: The column ``MetaCooler.clusters`` computes from the map's genomes, after
+#: ``round``, ``name``, ``parent_round``, ``parent``, ``n_contigs`` and
+#: ``length``: never stored, so no tool column may take its name.
+CLUSTER_GENOME_COLUMN = "genome"
+CLUSTER_VIEW_GENOME_POSITION = 6
 
 
 def cluster_rounds(clusters: h5py.Group) -> list[dict]:
@@ -351,6 +356,13 @@ def _check_clusters_structure(clusters: h5py.Group, n_contigs: int) -> None:
             clusters, or ``contig_clusters`` is not as long as the members.
     """
     cluster_rounds(clusters)
+    if isinstance(clusters.get("table"), h5py.Group) and (
+        CLUSTER_GENOME_COLUMN in clusters["table"]
+    ):
+        raise MetaCoolerFormatError(
+            f"/clusters/table/{CLUSTER_GENOME_COLUMN} is reserved: metacooler "
+            "computes it from the map's genomes"
+        )
     lengths = {}
     for table, columns in (
         ("table", CLUSTER_TABLE_COLUMNS),

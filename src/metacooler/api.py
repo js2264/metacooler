@@ -13,8 +13,10 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from metacooler.qc import unbinned_genome_id
 from metacooler.schema import (
     CLUSTER_TABLE_COLUMNS,
+    CLUSTER_VIEW_GENOME_POSITION,
     CLUSTERS_GROUP,
     DEFAULT_CHUNKSIZE,
     GENOME_GROUPED_ORDERINGS,
@@ -526,14 +528,54 @@ class MetaCooler:
         The columns are ``round`` and ``name``; ``parent_round`` and
         ``parent``, the round and name of the cluster it was split from
         (missing for none); ``n_contigs`` and ``length``, over its members
-        (:meth:`cluster_members`); then the columns its tool stored.
+        (:meth:`cluster_members`); ``genome``, the genome of the map whose
+        contigs the cluster holds, exactly (missing for none); then the
+        columns its tool stored.
+
+        ``genome`` is computed from the map's current assignment
+        (``/contigs/genome_id``) each time a map is opened, never stored: it
+        says which clusters the map's genomes are, whatever made them, and
+        follows a ``reassign``. ``__unbinned__`` is no genome.
 
         Returns:
             DataFrame indexed by cluster id, the ``cluster_id`` of the stored
             members; empty, with the columns above, when the map has no
             ``/clusters``.
         """
-        return self._cluster_table.copy()
+        table = self._cluster_table.copy()
+        table.insert(CLUSTER_VIEW_GENOME_POSITION, "genome", self._cluster_genomes())
+        return table
+
+    def _cluster_genomes(self) -> np.ndarray:
+        """The genome each cluster is, by name, or ``None``: one pass over the
+        members, against ``/contigs/genome_id``.
+
+        A cluster is genome G when every one of its contigs is in G and it
+        holds as many as G does: its members are distinct contigs.
+        """
+        out = np.full(len(self._cluster_table), None, dtype=object)
+        with self.open() as grp:
+            if CLUSTERS_GROUP not in grp:
+                return out
+            offsets = grp[CLUSTERS_GROUP]["indexes"]["cluster_offset"][()]
+            contig_ids = grp[CLUSTERS_GROUP]["members"]["contig_id"][()]
+        names = self.genomes["name"].to_numpy(dtype=object)
+        genome_ids = self._contig_genome_ids
+        held = np.diff(offsets) > 0
+        if not held.any():
+            return out
+        of_members = genome_ids[np.asarray(contig_ids, dtype=np.int64)]
+        starts = np.asarray(offsets[:-1], dtype=np.int64)[held]
+        lowest = np.minimum.reduceat(of_members, starts)
+        highest = np.maximum.reduceat(of_members, starts)
+        sizes = np.bincount(genome_ids, minlength=len(names))
+        rows = np.flatnonzero(held)
+        exact = (lowest == highest) & (np.diff(offsets)[held] == sizes[lowest])
+        unbinned = unbinned_genome_id(names)
+        if unbinned is not None:
+            exact &= lowest != unbinned
+        out[rows[exact]] = names[lowest[exact]]
+        return out
 
     def _check_round(self, round: str) -> None:
         names = [r["name"] for r in self.cluster_rounds]

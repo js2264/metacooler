@@ -1185,9 +1185,10 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 `-t genomes`/`-t chroms` respect `--genomes`/`--contigs`. `-t clusters` and
 `-t members` dump the [clustering rounds](format.md#clusters) of a map that has
 them: one row per cluster (`round`, `name`, `parent_round`, `parent`,
-`n_contigs`, `length`, then its tool's columns), and one row per contig of a
-cluster (`round`, `cluster`, `contig`); a contig selection keeps the clusters
-that hold a selected contig. `-t all` writes `<prefix>.genomes.tsv`,
+`n_contigs`, `length`, `genome` — the genome of the map whose contigs the
+cluster holds exactly, empty for none — then its tool's columns), and one row
+per contig of a cluster (`round`, `cluster`, `contig`); a contig selection
+keeps the clusters that hold a selected contig. `-t all` writes `<prefix>.genomes.tsv`,
 `.contigs.tsv`, `.bins.tsv`, `.pixels.tsv`, and `.indexes.tsv`, and
 `.clusters.tsv` and `.members.tsv` for a map with clustering rounds; `chroms`
 is omitted because it duplicates `contigs`.

@@ -128,15 +128,17 @@ genome's contigs may be scattered, so readers must fall back to filtering
 
 ### `/clusters` group { #clusters }
 
-Optional. The clustering rounds of the latest run of a tool that groups
-contigs into genomes — [metaTOR](https://github.com/koszullab/metaTOR) writes
-its overlapping, recursive and final clusters — so that the intermediate
-clusters are kept without being written into `/genomes` and `/contigs`.
-`/genomes` and `/contigs/genome_id` hold the current assignment: `/clusters`
-says how a tool reached one, and nothing requires them to agree (a later
-`reassign` changes `/genomes`, not `/clusters`; `reassign --round` makes a
-round the map's genomes). A cluster is a set of contigs; a contig may be a
-member of several clusters, of one round or of several.
+Optional. The clustering rounds of the latest run of a method that groups
+contigs into genomes, whatever the method: the successive steps of one binner
+([metaTOR](https://github.com/koszullab/metaTOR) writes its overlapping,
+recursive and final clusters), the bin sets of several binners and the bins a
+refiner keeps from them, or clusters that share contigs. They are kept
+without being written into `/genomes` and `/contigs`, which hold the current
+assignment: `/clusters` says how a method reached one, and nothing requires
+them to agree (a later `reassign` changes `/genomes`, not `/clusters`;
+`reassign --round` makes a round the map's genomes). A cluster is a set of
+contigs; a contig may be a member of several clusters, of one round or of
+several.
 
 ```
 /clusters
@@ -162,7 +164,14 @@ by convention `tool`, `version`, `parameters` and `date`.
 | `parent` | `int32` | Row of `table/` of the cluster it was split from, in an earlier round; `-1` for none. |
 | `n_contigs` | `int32` | Number of member contigs. |
 | `length` | `int64` | Total length of its member contigs, in bp. |
-| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …). |
+| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …), named anything but `genome` (below). |
+
+Not stored: **`genome`**, the genome of the map whose contigs a cluster holds
+exactly, which `MetaCooler.clusters` and `dump -t clusters` add after
+`length`. It is computed from `/contigs/genome_id` whenever a map is read, so
+it always says which clusters the map's current genomes are, whatever made
+them, and follows a `reassign`; `__unbinned__` is no genome. A stored
+`table/genome` is refused.
 
 **`members/`**, one row per membership, sorted by `(cluster_id, contig_id)`,
 each pair at most once:

@@ -133,6 +133,7 @@ _CLUSTER_KEY_COLUMNS = (
     "parent",
     "n_contigs",
     "length",
+    "genome",
 )
 
 

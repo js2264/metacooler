@@ -132,6 +132,7 @@ def test_clusters_written_are_read_back(clustered: Path):
         "parent",
         "n_contigs",
         "length",
+        "genome",
         "completeness",
         "lineage",
     ]
@@ -295,7 +296,7 @@ def test_a_scratch_group_left_behind_is_cleared(clustered: Path):
         ([{"name": "a", "when": object()}], CLUSTERS, MEMBERS, "JSON-serialisable"),
         (ROUNDS, CLUSTERS.drop(columns="round"), MEMBERS, "needs a 'round' column"),
         (ROUNDS, CLUSTERS.drop(columns="parent"), MEMBERS, "given by two columns"),
-        (ROUNDS, CLUSTERS.assign(n_contigs=1), MEMBERS, "computed from the members"),
+        (ROUNDS, CLUSTERS.assign(n_contigs=1), MEMBERS, "computed by metacooler"),
         (
             ROUNDS,
             CLUSTERS.rename(columns={"lineage": "a/b"}),
@@ -845,7 +846,12 @@ def test_a_regrouping_renumbers_the_members(clustered: Path):
     mc = MetaCooler(out)
     assert mc.contigs["name"].tolist() != list(LENGTHS)  # the rows did move
     pd.testing.assert_frame_equal(_by_name(mc), before)
-    pd.testing.assert_frame_equal(mc.clusters, MetaCooler(clustered).clusters)
+    pd.testing.assert_frame_equal(
+        mc.clusters.drop(columns="genome"),
+        MetaCooler(clustered).clusters.drop(columns="genome"),
+    )
+    # The genome a cluster is follows the new assignment: MAG_A is {c3} now.
+    assert _genomes_of(mc.clusters) == ["-", "-", "-", "MAG_A", "-"]
     validate(out, full=True)
 
 
@@ -1088,6 +1094,73 @@ def test_one_round_is_read_alone(clustered: Path, reads: str):
 
 
 # ---------------------------------------------------------------------------
+# The genome a cluster is: computed from the map, never stored
+# ---------------------------------------------------------------------------
+
+
+def _genomes_of(clusters: pd.DataFrame) -> list[str]:
+    """The genome column, "-" where a cluster is no genome."""
+    return (
+        clusters["genome"]
+        .astype(object)
+        .where(clusters["genome"].notna(), "-")
+        .tolist()
+    )
+
+
+def test_the_genome_a_cluster_is(clustered: Path):
+    """MAG_A is {c1, c2}: the recursive O1_1 and the final F1 hold exactly its
+    contigs; O1 holds more, O1_2 and O2 fewer of MAG_B's."""
+    clusters = MetaCooler(clustered).clusters
+    assert list(clusters.columns[:7]) == [
+        "round",
+        "name",
+        "parent_round",
+        "parent",
+        "n_contigs",
+        "length",
+        "genome",
+    ]
+    assert _genomes_of(clusters) == ["-", "-", "MAG_A", "-", "MAG_A"]
+
+
+def test_the_genome_a_cluster_is_follows_a_reassignment(clustered: Path):
+    """Not stored, so never stale: a reassignment moves it, whichever way."""
+    to_round = clustered.with_name("to_round.metacool")
+    reassign(clustered, output=to_round, round="overlapping")
+    assert _genomes_of(MetaCooler(to_round).clusters) == ["O1", "O2", "-", "-", "-"]
+    by_hand = clustered.with_name("by_hand.metacool")
+    reassign(clustered, {"c2": "MAG_B"}, by_hand)  # MAG_A is {c1} now
+    assert MetaCooler(by_hand).clusters["genome"].isna().all()
+
+
+def test_unbinned_contigs_are_no_genome(clustered: Path):
+    """A cluster of exactly the unbinned contigs is no genome."""
+    _one_round(clustered, {"K": ["c1", "c2"], "U": ["c3", "c4"]})
+    out = clustered.with_name("out.metacool")
+    reassign(clustered, {"c3": "NA", "c4": "NA"}, out)
+    assert _genomes_of(MetaCooler(out).clusters) == ["MAG_A", "-"]
+
+
+def test_the_genome_of_clusters_without_contigs(clustered: Path, tmp_path: Path):
+    _one_round(clustered, {"E": []})
+    assert _genomes_of(MetaCooler(clustered).clusters) == ["-"]
+    plain = MetaCooler(_map(tmp_path / "plain.metacool")).clusters
+    assert plain.empty and "genome" in plain.columns
+
+
+def test_genome_is_no_column_a_tool_may_store(clustered: Path):
+    with pytest.raises(ValueError, match="computed by metacooler .*: genome"):
+        _one_round(clustered, {"K": ["c1"]}, genome=["MAG_A"])
+    _corrupt(
+        clustered,
+        lambda g: g["table"].create_dataset("genome", data=np.zeros(5, "S1")),
+    )
+    with pytest.raises(MetaCoolerFormatError, match="table/genome is reserved"):
+        MetaCooler(clustered)
+
+
+# ---------------------------------------------------------------------------
 # reassign --round: a round of the map as its genomes
 # ---------------------------------------------------------------------------
 
@@ -1129,6 +1202,7 @@ def test_a_round_becomes_the_genomes(clustered: Path):
     genomes = mc.genomes.set_index("name")
     assert genomes["completeness"].to_dict() == {"O1": 90.5, "O2": 10.0}
     assert genomes["lineage"].to_dict() == {"O1": "Bacteria", "O2": "Archaea"}
+    assert "genome" not in genomes.columns  # computed, not the tool's
     pd.testing.assert_frame_equal(_by_name(mc), before)
     assert mc.metadata["reassign"][-1]["round"] == "overlapping"
     validate(out, full=True)
@@ -1292,14 +1366,16 @@ def test_dump_the_clusters_and_their_members(clustered: Path):
     result = runner.invoke(cli, ["dump", str(clustered), "-t", "clusters", "-H"])
     assert result.exit_code == 0, result.output
     lines = result.output.strip().splitlines()
-    assert lines[0].split("\t")[:6] == [
+    assert lines[0].split("\t")[:7] == [
         "round",
         "name",
         "parent_round",
         "parent",
         "n_contigs",
         "length",
+        "genome",
     ]
+    assert [line.split("\t")[6] for line in lines[1:]] == ["", "", "MAG_A", "", "MAG_A"]
     assert len(lines) == 6
 
     result = runner.invoke(

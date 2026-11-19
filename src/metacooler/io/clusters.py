@@ -24,6 +24,7 @@ import pandas as pd
 
 from metacooler.io._utils import write_column
 from metacooler.schema import (
+    CLUSTER_GENOME_COLUMN,
     CLUSTERS_GROUP,
     MetaCoolerFormatError,
     _check_clusters,
@@ -110,7 +111,7 @@ def _build(
             "A cluster's parent is given by two columns, 'parent_round' and "
             "'parent': the round and the name of the cluster it was split from."
         )
-    reserved = {"n_contigs", "length"}
+    reserved = {"n_contigs", "length", CLUSTER_GENOME_COLUMN}
     extra = [
         c
         for c in clusters.columns
@@ -118,8 +119,9 @@ def _build(
     ]
     if reserved & set(extra):
         raise ValueError(
-            "These columns of the clusters table are computed from the members, "
-            f"and cannot be given: {', '.join(sorted(reserved & set(extra)))}."
+            "These columns of the clusters table are computed by metacooler "
+            "(from the members, and the map's genomes), and cannot be given: "
+            f"{', '.join(sorted(reserved & set(extra)))}."
         )
     unnamed = [repr(str(c)) for c in extra if str(c) in ("", ".") or "/" in str(c)]
     if unnamed:

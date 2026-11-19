@@ -6,19 +6,23 @@
 
 - **Clustering rounds: the `/clusters` group** (see
   [the format](format.md#clusters)). A tool that groups contigs into genomes
-  can store the rounds of its latest run in the map: one table of every
-  cluster of every round (`round`, `name`, `parent`, `n_contigs`, `length` and
-  its own columns, such as completeness), and the contigs of each cluster, a
-  contig possibly in several, indexed both ways: the contigs of a cluster and
-  the clusters of a contig are each one slice. metaTOR keeps its overlapping,
-  recursive and final clusters there, so the intermediate clusters stay out of
-  `/genomes` and `/contigs`, which hold the current assignment. Python:
+  can store the rounds of its latest run in the map, whatever the method: one
+  table of every cluster of every round (`round`, `name`, `parent`,
+  `n_contigs`, `length` and its own columns, such as completeness), and the
+  contigs of each cluster, a contig possibly in several, indexed both ways:
+  the contigs of a cluster and the clusters of a contig are each one slice.
+  metaTOR, for one, keeps its overlapping, recursive and final clusters there,
+  so the intermediate clusters stay out of `/genomes` and `/contigs`, which
+  hold the current assignment. Python:
   `metacooler.write_clusters` (replaces the group whole: one run at a time) and
   `drop_clusters`; `MetaCooler.cluster_rounds`, `clusters`,
   `cluster_members(round=)` (one round's slice), `cluster_contigs(round,
   name)` (one cluster's contigs) and `contig_clusters(contigs)` (each
   contig's clusters, round by round), each reading only the memberships it
-  returns. `dump -t clusters` and `-t members` write them out,
+  returns. `clusters` has a `genome` column, computed whenever the map is
+  read and never stored: the genome of the map whose contigs a cluster holds
+  exactly, so it always says which clusters the current genomes are, and
+  follows a `reassign`. `dump -t clusters` and `-t members` write them out,
   `validate()` and `check` check them, and the commands that write a map from a
   map keep them: `reassign` (renumbering their contigs when it re-groups them),
   `annotate`, `merge` (the first input's, with a warning about an input whose
