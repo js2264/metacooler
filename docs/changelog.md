@@ -36,6 +36,13 @@
   with `"` (a read name, or a header line below the top) made the reader take
   every line up to the next `"` as one field, and the pairs among them were
   lost without a word.
+- **`merge` of maps that hold no pixel.** It failed with "No objects to
+  concatenate", inside cooler, when no input had a pixel (libraries with no
+  contact left, say). Their merge is a map without pixels, with the inputs'
+  bins, contigs, genomes, storage mode and summed QC block, laid out as any
+  merge. Inputs of two storage modes (`symmetric-upper` and `square`) are
+  refused before anything is written, with or without pixels: cooler refused
+  them only with pixels.
 
 ## 0.3.0 - 2026-11-18
 

@@ -8,11 +8,12 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import cooler
 import h5py
 import numpy as np
+import pandas as pd
 from cooler.api import info as cooler_info
 
 from metacooler._version import __version__
@@ -21,6 +22,7 @@ from metacooler.io._utils import (
     cooler_writer_shims,
     store_qc,
     write_column,
+    write_cooler,
 )
 from metacooler.qc import (
     QC_CATEGORIES,
@@ -41,6 +43,7 @@ from metacooler.schema import (
     METACOOLER_FORMAT,
     METACOOLER_FORMAT_URL,
     METACOOLER_FORMAT_VERSION,
+    _attr,
     validate,
 )
 from metacooler.uri import parse_uri
@@ -631,6 +634,59 @@ def _store_summed_qc(output: str | Path, summed: _SummedQC) -> None:
     )
 
 
+def _n_pixels(uri: str) -> int:
+    """The number of pixels of the map *uri* addresses."""
+    with _open_uri(uri) as f:
+        return len(f["pixels"]["bin1_id"])
+
+
+def _write_empty_merge(
+    first: str,
+    output: str,
+    binsize: int | None,
+    count_dtype: np.dtype,
+    storage_mode: str,
+) -> None:
+    """Write the merge of maps that hold no pixel: *first*'s bins, no pixel.
+
+    ``cooler.merge_coolers`` concatenates the inputs' pixel chunks, and fails
+    with "No objects to concatenate" when no input has any -- libraries with no
+    contact left, say. Their sum is an empty table: it is written here as
+    ``merge_coolers`` writes a merge (the bins' ``chrom``, ``start`` and
+    ``end``, a ``count`` column of the summed dtype, the first input's
+    assembly, the inputs' storage mode), so what :func:`merge` does next
+    applies unchanged.
+
+    Args:
+        first: URI of the first input, whose bins the inputs share.
+        output: Destination path.
+        binsize: The inputs' bin size, for :func:`write_cooler`.
+        count_dtype: dtype of the merged ``count`` column.
+        storage_mode: The inputs' ``storage-mode``: ``symmetric-upper`` or
+            ``square``.
+    """
+    logger.info("No input has a pixel: the merged map has none either.")
+    clr = cooler.Cooler(first)
+    pixels = pd.DataFrame(
+        {
+            "bin1_id": np.array([], dtype=np.int64),
+            "bin2_id": np.array([], dtype=np.int64),
+            "count": np.array([], dtype=count_dtype),
+        }
+    )
+    write_cooler(
+        output,
+        cast(pd.DataFrame, clr.bins()[["chrom", "start", "end"]][:]),
+        pixels,
+        binsize=binsize,
+        columns=["count"],
+        dtypes={"count": count_dtype},
+        assembly=clr.info.get("genome-assembly"),
+        symmetric_upper=storage_mode == "symmetric-upper",
+        ordered=True,
+    )
+
+
 def merge(
     inputs: Iterable[str | Path],
     output: str | Path,
@@ -642,10 +698,12 @@ def merge(
     bins and the same ``contig-ordering`` attribute.  Their metadata columns
     (completeness, coverage, ...) may differ: the output keeps the first
     input's, and each difference is reported as a warning.  Pixels from all
-    inputs are concatenated, re-sorted externally by ``cooler.merge_coolers()``,
-    and saved to *output*.  Metacooler-specific groups (``genomes``,
-    ``contigs``, ``genome_offset``, format attributes) are then copied from the
-    first input file.
+    inputs are concatenated, re-sorted externally by
+    ``cooler.merge_coolers()``, and saved to *output* (when no input has a
+    pixel, *output* is written with none, as ``merge_coolers`` would write
+    it).  Metacooler-specific groups (``genomes``, ``contigs``,
+    ``genome_offset``, format attributes) are then copied from the first
+    input file.
 
     The inputs' contact-quality statistics are summed too -- the
     ``metadata["qc"]`` block and the ``qc_*`` columns of ``/genomes`` and
@@ -675,8 +733,8 @@ def merge(
     Raises:
         ValueError: If fewer than two inputs are provided, if the
             ``contigs``, ``genomes`` or ``bins`` tables differ across files,
-            if the resolutions differ, or if the ``contig-ordering``
-            attribute is inconsistent.
+            if the resolutions differ, or if the ``contig-ordering`` or
+            ``storage-mode`` attribute is inconsistent.
         MetaCoolerFormatError: If any input file fails the metacooler
             format validation check.
     """
@@ -698,7 +756,11 @@ def merge(
         # ``contig-ordering`` may be absent or explicitly null; normalise both
         # sides of the comparison so a missing attribute does not later become
         # ``f.attrs[...] = None``, which h5py rejects with a raw TypeError.
-        ordering = f0.attrs.get("contig-ordering") or "genome-then-alpha"
+        # ``_attr`` decodes the attributes another writer stores as bytes, as
+        # ``validate`` accepts them, whatever cooler's version: the ``info()``
+        # of cooler 0.10 returns them raw.
+        ordering = str(_attr(f0, "contig-ordering") or "genome-then-alpha")
+        storage_mode = str(_attr(f0, "storage-mode") or "symmetric-upper")
         n_bins, bins_hash = _bins_signature(f0)
         binsize = _binsize(f0)
 
@@ -736,8 +798,14 @@ def merge(
                 )
             if _hash_group(f, "genomes") != genomes_hash:
                 raise ValueError(f"Genomes table mismatch: {first} vs {inp}")
-            if (f.attrs.get("contig-ordering") or "genome-then-alpha") != ordering:
+            if str(_attr(f, "contig-ordering") or "genome-then-alpha") != ordering:
                 raise ValueError(f"contig-ordering mismatch: {first} vs {inp}")
+            other_mode = str(_attr(f, "storage-mode") or "symmetric-upper")
+            if other_mode != storage_mode:
+                raise ValueError(
+                    f"storage-mode mismatch: {first} stores {storage_mode!r} but "
+                    f"{inp} stores {other_mode!r}; a merge needs one."
+                )
             differences = _metadata_differences(metadata_digests, _metadata_digests(f))
             if differences:
                 logger.warning(
@@ -761,13 +829,17 @@ def merge(
     # costs made merge alone take minutes at 150 k contigs. They also hand
     # cooler the inputs' known bin size, which it cannot infer once every
     # contig is a single bin.
-    with cooler_writer_shims(binsize):
-        cooler.merge_coolers(
-            str(output),
-            inputs,
-            mergebuf=int(2e7),
-            dtypes={"count": _merged_count_dtype(inputs)},
-        )
+    count_dtype = _merged_count_dtype(inputs)
+    if not any(_n_pixels(uri) for uri in inputs):
+        _write_empty_merge(first, str(output), binsize, count_dtype, storage_mode)
+    else:
+        with cooler_writer_shims(binsize):
+            cooler.merge_coolers(
+                str(output),
+                inputs,
+                mergebuf=int(2e7),
+                dtypes={"count": count_dtype},
+            )
 
     # Post-process: add back metacooler-specific groups
     with _open_uri(first) as fsrc, h5py.File(output, "a") as fdst:
