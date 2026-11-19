@@ -13,6 +13,18 @@
 
 ### Fixed
 
+- **`reassign` writes the same tables whichever path it takes.** When the
+  contigs keep their rows (the relabel path), `/contigs` now lists its columns
+  in the order `create` and the regroup path write them: `genome_id` third,
+  after `name` and `length`. The relabel path deleted and wrote again
+  `genome_id`, and each QC column it changed, in a group listed in creation
+  order, so they moved after every other column. The columns it does not
+  change are kept as stored, without a copy, so a relabelling in place no
+  longer grows the file by them. Both tables are built aside and swapped in
+  together, so a relabelling stopped while writing them (`--inplace` included)
+  leaves the map's tables as they were, where `/genomes` used to be rewritten
+  already; a Ctrl-C during the swap itself is held until the map is whole
+  again.
 - **Pairs files concatenated with `cat`.** The header lines below the top of a
   pairs file (those of the files concatenated after the first) are skipped, so
   the files read as if given one after the other (`--pairs a --pairs b`).
