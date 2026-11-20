@@ -9,6 +9,10 @@ panel whose help wraps: no two panels started their help at the same offset.
 :func:`align_help_columns` fixes the columns left of the help column of every
 table to one shared width, the widest such prefix on the page, and makes the
 help column the only one that takes up the rest of the line.
+
+The help column is found by position, as the last one: every rich-click theme
+puts it there, and rich-click before 1.9.9 gives its columns no header to find
+it by.
 """
 
 from __future__ import annotations
@@ -20,9 +24,6 @@ if TYPE_CHECKING:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-
-# rich-click titles each table column after its column type ("help" -> "Help").
-HELP_HEADER = "Help"
 
 
 def _tables(renderable: object) -> Iterator[Table]:
@@ -38,42 +39,32 @@ def _tables(renderable: object) -> Iterator[Table]:
             yield from _tables(inner)
 
 
-def _padding_width(table: Table, index: int) -> int:
-    """Horizontal padding rich adds to column *index* of *table*.
-
-    The rule of rich's ``Table._get_padding_width``, read from public
-    attributes: a private method that moved would break every ``--help``.
-    Only columns left of the help column are asked about, so never the last
-    one, whose right padding the rule would also drop without ``pad_edge``.
-    """
-    _, right, _, left = table.padding
-    if table.collapse_padding or (index == 0 and not table.pad_edge):
-        left = 0
-    return left + right
-
-
 def align_help_columns(panels: Sequence[Panel], console: Console) -> None:
     """Give every table in *panels* the same offset for its help column.
 
-    Edits the tables in place: each column left of the help column gets a
-    fixed width (its content; the last one also gets whatever the table lacks
-    to reach the page's widest prefix), and the help column gets the only
-    ``ratio``, so an expanding table widens it alone. A table without a help
-    column, or with nothing left of it, is left as rich-click built it.
+    Edits the tables in place: each column left of the help (last) column gets
+    a fixed width (its content; the one next to the help also gets whatever
+    the table lacks to reach the page's widest prefix), and the help column
+    gets the only ``ratio``, so an expanding table widens it alone. A table of
+    one column is left as rich-click built it.
+
+    How much padding rich adds to a column is its private
+    ``Table._get_padding_width`` (rich 13 and 15 differ on it, under
+    ``pad_edge`` and ``collapse_padding``, so no copy of the rule is right for
+    both). Should a rich without it come, the page keeps rich-click's layout
+    rather than ``--help`` failing.
     """
     from rich.measure import Measurement
     from rich.padding import Padding
 
     options = console.options
-    layouts: list[tuple[Table, int, list[int], int]] = []
+    layouts: list[tuple[Table, list[int], int]] = []
     for panel in panels:
         indent = Padding.unpack(panel.padding)[3]
         for table in _tables(panel.renderable):
-            help_index = next(
-                (i for i, c in enumerate(table.columns) if c.header == HELP_HEADER),
-                0,
-            )
-            if help_index == 0:
+            padding_width = getattr(table, "_get_padding_width", None)
+            help_index = len(table.columns) - 1
+            if padding_width is None or help_index < 1:
                 continue
             widths = [
                 max(
@@ -82,19 +73,23 @@ def align_help_columns(panels: Sequence[Panel], console: Console) -> None:
                 )
                 for col in table.columns[:help_index]
             ]
-            offset = indent + sum(
-                width + _padding_width(table, i) for i, width in enumerate(widths)
-            )
+            # The help text starts after the help column's own left padding,
+            # which collapse_padding cuts (rich's _get_cells, 13 to 15 alike).
+            _, right, _, left = table.padding
+            if table.collapse_padding:
+                left = max(0, left - right)
+            offset = indent + left
+            offset += sum(width + padding_width(i) for i, width in enumerate(widths))
             if table.box:
                 # One rule after each column left of the help, plus the edge.
                 offset += help_index + int(table.show_edge)
-            layouts.append((table, help_index, widths, offset))
+            layouts.append((table, widths, offset))
 
     if not layouts:
         return
     target = max(offset for *_, offset in layouts)
-    for table, help_index, widths, offset in layouts:
+    for table, widths, offset in layouts:
         widths[-1] += target - offset
         for column, width in zip(table.columns, widths, strict=False):
             column.width = width
-        table.columns[help_index].ratio = 1
+        table.columns[-1].ratio = 1

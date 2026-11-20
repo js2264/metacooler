@@ -21,7 +21,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from metacooler.cli._help_layout import HELP_HEADER, align_help_columns
+from metacooler.cli._help_layout import align_help_columns
 from metacooler.cli.main import cli
 
 
@@ -97,7 +97,6 @@ def test_extract_is_listed_on_one_line(width):
 
 def _table(
     rows,
-    headers,
     *,
     box: Box | None = None,
     show_edge: bool = True,
@@ -105,7 +104,10 @@ def _table(
     collapse_padding: bool = False,
     expand: bool = True,
 ) -> Table:
-    """A table styled as rich-click styles its panels (by default)."""
+    """A table styled as rich-click styles its panels (by default).
+
+    Its columns carry no header, as under rich-click before 1.9.9.
+    """
     table = Table(
         show_header=False,
         padding=(0, 1),
@@ -117,15 +119,12 @@ def _table(
     )
     for row in rows:
         table.add_row(*row)
-    for column, header in zip(table.columns, headers, strict=True):
-        column.header = header
     return table
 
 
 def _options(**styles) -> Table:
     return _table(
         [("*", "--output", "-o", "Output path."), ("", "--verbose", "", "Talk.")],
-        ["Required", "Opt Long", "Opt Short", HELP_HEADER],
         **styles,
     )
 
@@ -133,7 +132,6 @@ def _options(**styles) -> Table:
 def _commands(**styles) -> Table:
     return _table(
         [("go", "Run it."), ("aggregate", "Sum contacts.")],
-        ["Name", HELP_HEADER],
         **styles,
     )
 
@@ -167,10 +165,19 @@ def test_panels_share_one_help_column(styles):
     assert len(_help_columns(output, _HELPS)) == 1
 
 
-def test_panels_with_different_indents_share_one_help_column():
+@pytest.mark.parametrize(
+    "styles",
+    [
+        pytest.param({"pad_edge": True}, id="pad-edge"),
+        pytest.param({"collapse_padding": True}, id="collapse-padding"),
+        pytest.param({"pad_edge": True, "collapse_padding": True}, id="both"),
+    ],
+)
+def test_panels_with_different_paddings_share_one_help_column(styles):
+    # rich 13 and 15 pad these differently: the padding must be rich's own.
     panels = [
         Panel(_options(), padding=(0, 1)),
-        Panel(_commands(pad_edge=True), padding=(0, 4)),
+        Panel(_commands(**styles), padding=(0, 4)),
     ]
     assert len(_help_columns(_render(panels), _HELPS)) == 1
 
@@ -188,7 +195,14 @@ def test_only_the_help_column_takes_the_spare_width():
     assert table.columns[1].ratio == 1
 
 
-def test_table_without_help_column_is_left_alone():
-    table = _table([("a", "b")], ["Name", "Aliases"])
+def test_one_column_table_is_left_alone():
+    table = _table([("a",), ("b",)])
     _render([Panel(table), Panel(Text("not a table"))])
+    assert [(c.width, c.ratio) for c in table.columns] == [(None, None)]
+
+
+def test_rich_without_padding_rule_keeps_rich_click_layout(monkeypatch):
+    monkeypatch.delattr(Table, "_get_padding_width")
+    table = _commands()
+    align_help_columns([Panel(table)], Console(file=io.StringIO()))
     assert [(c.width, c.ratio) for c in table.columns] == [(None, None)] * 2
