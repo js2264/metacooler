@@ -190,7 +190,7 @@ def test_raw_pairs_lines_and_header_parse(tmp_path):
     assert list(_iter_pairs_raw_lines(f, block_size=5))[-1] == b"r\tc1\t1\tc2\t2"
     assert _parse_pairs_header(f) == {"c1": 100, "c2": 250}
     # The blank line before the body is counted: pyarrow's skip_rows counts it.
-    assert _scan_pairs_header(f) == (5, True)
+    assert _scan_pairs_header(f)[:2] == (5, True)
 
     bad = tmp_path / "bad.pairs"
     bad.write_bytes(b"#chromsize: c1 1e5\n")

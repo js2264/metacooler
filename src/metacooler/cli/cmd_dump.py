@@ -37,13 +37,25 @@ def _given(ctx, name: str) -> bool:
     "-t",
     "--table",
     type=click.Choice(
-        ["chroms", "bins", "pixels", "contigs", "genomes", "indexes", "all"]
+        [
+            "chroms",
+            "bins",
+            "pixels",
+            "contigs",
+            "genomes",
+            "indexes",
+            "clusters",
+            "members",
+            "all",
+        ]
     ),
     default="pixels",
     show_default=True,
     help=(
         "Which table to dump ('chroms', 'bins', 'contigs', 'genomes', 'pixels', "
-        "'indexes'). Use 'all' to dump every table."
+        "'indexes'), or the clustering rounds: 'clusters', one row per cluster, "
+        "and 'members', one row per contig of a cluster. Use 'all' to dump "
+        "every table."
     ),
 )
 @click.option(
@@ -209,7 +221,17 @@ def dump(
     dump_table(
         uri=metacool_path,
         table=cast(
-            Literal["bins", "chroms", "contigs", "genomes", "pixels", "indexes", "all"],
+            Literal[
+                "bins",
+                "chroms",
+                "contigs",
+                "genomes",
+                "pixels",
+                "indexes",
+                "clusters",
+                "members",
+                "all",
+            ],
             table,
         ),
         genomes=genomes or None,

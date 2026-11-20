@@ -347,11 +347,20 @@ def _check_drops(dropping: dict[str, list[str]], wanted: dict[str, list[str]]) -
     for table, names in dropping.items():
         derived = [n for n in names if n in protected[table] or is_qc_column(table, n)]
         if derived:
+            keys = [n for n in derived if n in ("contig", "genome")]
+            hint = (
+                f" A column called {', '.join(map(repr, keys))} that a map "
+                "written before these names were reserved stores is dropped by "
+                "the name dump shows it under: "
+                f"{', '.join(f'{table}.user_{n}' for n in keys)}."
+                if keys
+                else ""
+            )
             raise ValueError(
                 f"Cannot drop {', '.join(f'{table}.{n}' for n in derived)}: "
                 "metacooler derives these columns. The genome assignment "
                 "changes with 'metacooler reassign', and the qc_* columns with "
-                "'metacooler qc --store'."
+                f"'metacooler qc --store'.{hint}"
             )
         both = sorted(set(names) & set(wanted.get(table, ())))
         if both:
@@ -556,10 +565,12 @@ def _plan_map(
                 f"given by the {table} table."
             )
         stored = mc.genomes if table == "genomes" else mc.contigs
+        stored_as = _stored_names(stored, table)
         table_edit = edit.tables.setdefault(table, _TableEdit(table=table))
         for column in columns:
-            if column in stored.columns:
-                table_edit.dropped.append(column)
+            name = stored_as.get(column, column)
+            if name in stored.columns:
+                table_edit.dropped.append(name)
             else:
                 edit.absent_drops.append(f"{table}.{column}")
     return edit
@@ -624,14 +635,16 @@ def _plan_table(
         The table's edit.
     """
     edit = _TableEdit(table=table, matched=matched)
+    stored_as = _stored_names(stored, table)
     for column, series in values.items():
         aligned = series.reindex(row_names)
         new = aligned.to_numpy()
-        if column not in stored.columns:
+        name = stored_as.get(column, column)
+        if name not in stored.columns:
             edit.values[column] = new
             edit.added.append(column)
             continue
-        old = stored[column].to_numpy()
+        old = stored[name].to_numpy()
         if missing == "keep":
             listed = pd.Index(series.index).get_indexer(row_names) >= 0
             new = _combine(old, new, listed)
@@ -642,8 +655,27 @@ def _plan_table(
             conflicts[f"{table}.{column}"] = _describe_change(old, new, row_names)
             continue
         edit.values[column] = new
-        edit.replaced.append(column)
+        if name == column:
+            edit.replaced.append(column)
+        else:
+            # A column of a key's name, which a map written before stores and
+            # dump shows as `column`: it is stored under that name now.
+            edit.added.append(column)
+            edit.dropped.append(name)
     return edit
+
+
+def _stored_names(stored: pd.DataFrame, table: str) -> dict[str, str]:
+    """``{shown name: stored name}`` for a table's columns of a key's name.
+
+    ``dump`` and ``--filter`` show a column that a map written before
+    ``contig`` and ``genome`` were reserved stores under one of those names
+    as ``user_<name>`` (:func:`metacooler.io._utils.shown_names`), so
+    ``annotate`` drops and replaces it by that name.
+    """
+    from metacooler.io._utils import shown_names
+
+    return {shown: name for name, shown in shown_names(stored.columns, table).items()}
 
 
 def _combine(old: np.ndarray, new: np.ndarray, listed: np.ndarray) -> np.ndarray:

@@ -67,6 +67,8 @@ class TestInit:
             # transforms and readers
             "reassign",
             "annotate",
+            "write_clusters",
+            "drop_clusters",
             "extract",
             "flatten",
             "merge",

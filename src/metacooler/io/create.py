@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import csv
 import dataclasses
@@ -9,11 +10,12 @@ import gzip
 import itertools
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import cooler
 import h5py
@@ -26,6 +28,8 @@ from metacooler.io._utils import (
     aggregate_pixels,
     check_ascii_names,
     check_output_path,
+    contigs_filter_frame,
+    genomes_filter_frame,
     infer_binsize,
     pixel_keys,
     pixels_from_keys,
@@ -113,11 +117,14 @@ _PAIRS_READ_BLOCK_MAX_BYTES = 128 * 1024**2  # 128 MiB (~1.2 M pairs)
 # is free to carry extra columns, but one of these names would collide.  The
 # QC columns are reserved unconditionally, not only when QC is computed, so a
 # user column called ``qc_inter_genome`` means the same thing on every file.
+# A user column of one of these names is stored as ``user_<name>``: the
+# columns metacooler writes, and the keys ``dump`` names the tables by
+# (``genome``, ``contig``; see io._utils.contigs_view).
 _GENOMES_RESERVED_COLUMNS = frozenset(
-    {"name", "length", "n_contigs", "n_bins"} | set(QC_GENOME_COLUMNS)
+    {"name", "length", "n_contigs", "n_bins", "genome"} | set(QC_GENOME_COLUMNS)
 )
 _CONTIGS_RESERVED_COLUMNS = frozenset(
-    {"name", "length", "genome_id"} | set(QC_CONTIG_COLUMNS)
+    {"name", "length", "genome_id", "contig", "genome"} | set(QC_CONTIG_COLUMNS)
 )
 # In /genomes the whole qc_* namespace is metacooler's (see qc.is_qc_column):
 # every writer that derives a map from another strips it. A user column there
@@ -300,20 +307,68 @@ def _drop_nonpositive_contigs(
     return contig_lengths, bins_df
 
 
-#: Pairs-file suffix (lower-cased) -> pyarrow codec name.  Any other suffix is
+#: The leading bytes of each compressed format a pairs file may come in, and
+#: the pyarrow codec that reads it.  A file that starts with none of them is
 #: read as plain text.
-_PAIRS_CODECS = {
-    ".gz": "gzip",
-    ".bgz": "gzip",
-    ".bz2": "bz2",
-    ".zst": "zstd",
-    ".zstd": "zstd",
-    ".lz4": "lz4",
-}
+_PAIRS_MAGIC = (
+    (b"\x1f\x8b", "gzip"),  # gzip, and bgzip, which is gzip-compatible
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"\x04\x22\x4d\x18", "lz4"),  # an LZ4 frame
+)
+
+
+#: The leading bytes of the formats a pairs file may come in that pyarrow
+#: cannot read, refused by name rather than parsed as text.
+_PAIRS_UNREADABLE = (
+    (b"PK\x03\x04", "a zip archive"),
+    (b"PK\x05\x06", "an empty zip archive"),
+    (b"\xfd7zXZ\x00", "xz-compressed"),
+    (b"\x02\x21\x4c\x18", "a legacy LZ4 file"),
+    (b"7z\xbc\xaf\x27\x1c", "a 7z archive"),
+)
+
+
+def _pairs_codec(path: Path) -> str | None:
+    """The pyarrow codec of a pairs file, from its first bytes; ``None`` for text.
+
+    The codec is chosen from the file's content, never from its name: by its
+    suffix, a gzip file named ``lib.pairs`` was handed to the parser as raw
+    compressed bytes, and a plain file named ``lib.pairs.gz`` failed to
+    decompress.  Nor is it left to pyarrow, whose own detection goes by suffix
+    too, with no ``.bgz`` entry, case-sensitively: ``R1.PAIRS.GZ`` came out as
+    a structurally valid but empty map.
+
+    Args:
+        path: Pairs file path.
+
+    Returns:
+        ``"gzip"``, ``"bz2"``, ``"zstd"`` or ``"lz4"``, or ``None`` for a
+        file read as plain text.
+
+    Raises:
+        ValueError: If the file is a zip or 7z archive, xz-compressed or a
+            legacy LZ4 file, which pyarrow cannot read.
+    """
+    with open(path, "rb") as handle:
+        head = handle.read(6)
+    for magic, what in _PAIRS_UNREADABLE:
+        if head.startswith(magic):
+            raise ValueError(
+                f"{path} is {what}, which metacooler cannot read as a pairs "
+                "file: decompress it, or compress the pairs file with gzip, "
+                "bgzip, bzip2, zstd or lz4 (an LZ4 frame) instead."
+            )
+    # bzip2 streams start with "BZh" and their block size, a digit from 1 to 9.
+    if head[:3] == b"BZh" and head[3:4].isdigit() and head[3:4] != b"0":
+        return "bz2"
+    for magic, codec in _PAIRS_MAGIC:
+        if head.startswith(magic):
+            return codec
+    return None
 
 
 def _pairs_input_stream(path: Path):
-    """Open a pairs file as a binary stream, decompressing by file extension.
+    """Open a pairs file as a binary stream, decompressed as its content says.
 
     The single opener for every reader of a pairs file -- the header scans as
     well as the body -- so they cannot disagree about which codecs exist.  They
@@ -321,14 +376,8 @@ def _pairs_input_stream(path: Path):
     the two header scans opened the file with their own narrower ``open``
     choices, so a ``.zst`` file -- advertised in the CLI reference -- died with
     ``UnicodeDecodeError`` before a single pair was read, and ``.bz2`` failed
-    whenever ``#chromsize`` lines were needed.
-
-    The codec is chosen here from :data:`_PAIRS_CODECS`, never left to
-    pyarrow's own detection: that table has no ``.bgz`` entry and matches
-    suffixes case-sensitively, and a file it does not recognise is handed to the
-    CSV parser as raw compressed bytes -- zero recognisable contigs, a
-    structurally valid but empty map.  ``R1.PAIRS.GZ`` came out that way.  bgzf
-    is gzip-compatible, so ``.bgz`` maps to ``gzip``.
+    whenever ``#chromsize`` lines were needed.  The codec is that of
+    :func:`_pairs_codec`.
 
     Args:
         path: Pairs file path.
@@ -338,8 +387,7 @@ def _pairs_input_stream(path: Path):
     """
     import pyarrow as pa
 
-    codec = _PAIRS_CODECS.get(path.suffix.lower())
-    return pa.input_stream(str(path), compression=codec)
+    return pa.input_stream(str(path), compression=_pairs_codec(path))
 
 
 def _iter_pairs_lines(path: Path, block_size: int = 1 << 20) -> Iterator[str]:
@@ -1027,16 +1075,17 @@ def _apply_create_filters(
     contigs_df = _build_contigs_table(
         order, contig_lengths, contig_genome_map, genomes_df, contig_df
     )
-    contigs_df = contigs_df.assign(
-        genome=contigs_df["genome_id"].map(genomes_df["name"])
-    )
     hints: dict[str, str] = {}
     if genome_n_bins is not None:
         # Same position _compute_all_offsets gives the column in the output.
         genomes_df.insert(
             3, "n_bins", genomes_df["name"].map(genome_n_bins).astype(np.int64)
         )
-    else:
+    # The tables as dump prints them, plus their stored names (see
+    # contigs_filter_frame): one filter, one meaning, before and after.
+    contigs_df = contigs_filter_frame(contigs_df, genomes_df["name"])
+    genomes_df = genomes_filter_frame(genomes_df)
+    if genome_n_bins is None:
         hints["n_bins"] = (
             "no bin has been tiled yet, so a genome's bin count is not known "
             "during 'create'. Filter on genomes.length or genomes.n_contigs "
@@ -1448,7 +1497,20 @@ def _tile_bins(
     )
 
 
-def _scan_pairs_header(path: Path) -> tuple[int, bool]:
+class _PairsHeader(NamedTuple):
+    """What the top of a pairs file says, as :func:`_scan_pairs_header` reads it."""
+
+    #: Leading lines to skip: every ``#`` line and every blank line before the
+    #: first data row.
+    n_lines: int
+    #: Whether at least one data row follows them.
+    has_data: bool
+    #: Whether a ``#`` line there has as many tab-separated fields as that
+    #: first row: a copy of it below the top would parse as a pair.
+    mirrors_a_pair: bool
+
+
+def _scan_pairs_header(path: Path) -> _PairsHeader:
     """Scan the top of a pairs file for its header size and whether data follows.
 
     Reads lines sequentially until the first non-comment line is found.
@@ -1458,12 +1520,12 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
         path: Path to the pairs file.
 
     Returns:
-        ``(n_header, has_data_rows)`` — the number of leading lines to skip
-        (every ``#`` line and every blank line before the first data row), and
-        whether at least one data row follows them.  The second element lets
-        the caller recognise a header-only file *before* handing the stream to
-        pyarrow, instead of pattern-matching pyarrow's error message (which
-        would also swallow genuine parse failures).
+        The size of the header, whether data follows it -- which lets the caller
+        recognise a header-only file *before* handing the stream to pyarrow,
+        instead of pattern-matching pyarrow's error message (which would also
+        swallow genuine parse failures) -- and whether a header line has as many
+        fields as a pair, which decides how the body skips the header lines it
+        holds (see :func:`_stream_pairs`).
 
     Blank lines are counted, not just tolerated: pyarrow's ``skip_rows``
     counts them as rows, so a blank line *inside* the header used to leave the
@@ -1471,14 +1533,216 @@ def _scan_pairs_header(path: Path) -> tuple[int, bool]:
     died on the first real pair.
     """
     n = 0
-    has_data = False
+    header_fields = set()
     for raw in _iter_pairs_raw_lines(path):
         if raw.startswith(b"#") or not raw.strip():
             n += 1
+            if raw.startswith(b"#"):
+                header_fields.add(raw.count(b"\t") + 1)
             continue
-        has_data = True
-        break
-    return n, has_data
+        return _PairsHeader(n, True, raw.count(b"\t") + 1 in header_fields)
+    return _PairsHeader(n, False, False)
+
+
+class _HeaderLinesBelow:
+    """The header lines below the top of a pairs file: counted, and their
+    ``#chromsize:`` lines checked against those of the top header.
+
+    Pairs files concatenated with ``cat`` hold one header each. Their pairs
+    read as the files given one after the other, under the top header: a
+    header below it that gives a contig another length (compared as a number),
+    or a contig the top header lacks, is a concatenation of pairs files of
+    other assemblies, or of other contigs. :meth:`check` refuses it, wherever
+    the contig lengths come from (the headers, ``--fasta`` or a bins BED): the
+    files given one by one are each checked against those lengths, but a
+    concatenation has one header, and so one assembly, to check.
+
+    Args:
+        path: The pairs file.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.count = 0
+        self._top: dict[str, int] | None = None
+        self.conflicts: list[tuple[str, int | None, str]] = []
+
+    def note(self, line: str) -> None:
+        """Count a header line below the top, and check its ``#chromsize:``."""
+        self.count += 1
+        if not line.startswith("#chromsize:"):
+            return
+        parts = line.split()
+        if len(parts) < 3:
+            return
+        if self._top is None:
+            try:
+                self._top = _parse_pairs_header(self.path) or {}
+            except ValueError:
+                self._top = {}
+        try:
+            length: int | str = int(parts[2])
+        except ValueError:
+            length = parts[2]
+        if self._top and self._top.get(parts[1]) != length:
+            self.conflicts.append((parts[1], self._top.get(parts[1]), parts[2]))
+
+    def check(self) -> None:
+        """Refuse the file when a header below the top contradicts the top one.
+
+        Raises:
+            ValueError: Naming the first contigs whose lengths differ.
+        """
+        if not self.conflicts:
+            return
+        shown = "; ".join(
+            f"{contig}: {'none' if top is None else top} at the top, {later} below"
+            for contig, top, later in self.conflicts[:3]
+        )
+        raise ValueError(
+            f"{self.path} holds several pairs headers (pairs files concatenated "
+            f"with cat) whose #chromsize lines disagree ({shown}"
+            f"{'; ...' if len(self.conflicts) > 3 else ''}): the pairs of other "
+            "assemblies, or of other contigs, than the top header's. Give the "
+            "pairs files one by one, as --pairs a --pairs b."
+        )
+
+
+#: A parse error on a ``#`` line: the invalid_row_handler skips every one it
+#: is given, so pyarrow could not give it this one (not UTF-8 text).
+_HEADER_LINE_NOT_TEXT = re.compile(
+    r"CSV parse error: Expected \d+ columns?, got \d+: #"
+)
+
+
+def _skip_header_lines(below: _HeaderLinesBelow):
+    """pyarrow's ``invalid_row_handler``: skip header and blank lines, refuse
+    anything else.
+
+    A pairs file's ``#`` lines are its header, but they need not all be at the
+    top: pairs files concatenated with ``cat`` hold each one's header. pyarrow
+    has no comment character, and hands this handler every row whose number of
+    fields is not that of the pairs -- every header line, in practice, which it
+    skips and gives to *below*. A line of white space only is skipped as a
+    blank line, as at the top. A malformed pair is still an error.
+    """
+
+    def handler(row) -> str:
+        text = row.text
+        if text.startswith("#"):
+            below.note(text)
+            return "skip"
+        return "skip" if not text.strip() else "error"
+
+    return handler
+
+
+class _HeaderLinesSkipped:
+    """A pairs stream without its header lines, wherever they are.
+
+    For the files whose header holds a line with as many tab-separated fields
+    as a pair (a ``#samheader: @RG`` line with every tag, say): pyarrow parses
+    such a line below the top as a pair, so no ``invalid_row_handler`` sees it.
+    The first *skip* lines (the top header, blank lines included) are left
+    out as they are; below them, every ``#`` line is given to *below* and left
+    out (pyarrow's handler skips the lines of white space only). Filtering
+    costs a pass in Python over every block, which a file whose header lines
+    all differ from its pairs does not pay.
+
+    Args:
+        source: The decompressed stream (see :func:`_pairs_input_stream`).
+        skip: Lines to leave out first: the top header.
+        below: Where the header lines below the top go.
+        block_size: Bytes read from *source* at a time.
+    """
+
+    closed = False
+
+    def __init__(
+        self,
+        source,
+        skip: int,
+        below: _HeaderLinesBelow,
+        block_size: int = 1 << 24,
+    ) -> None:
+        self._source = source
+        self._skip = skip
+        self._below = below
+        self._block_size = block_size
+        self._carry = b""
+        # Whole lines ready to be read, as they came: read() joins what it
+        # returns once, rather than copying them in and out of one buffer.
+        self._ready: collections.deque[bytes | memoryview] = collections.deque()
+        self._size = 0
+        self._eof = False
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        self.closed = True
+        self._source.close()
+
+    def _fill(self) -> None:
+        """Read whole lines from the source into ``_ready``, header lines left out."""
+        block = self._source.read(self._block_size)
+        if block:
+            data = self._carry + block
+            cut = data.rfind(b"\n") + 1
+            data, self._carry = data[:cut], data[cut:]
+        else:
+            self._eof = True
+            data, self._carry = self._carry, b""
+        if self._skip:
+            lines = data.split(b"\n", self._skip)
+            dropped = min(self._skip, len(lines) - 1)
+            self._skip -= dropped
+            data = lines[dropped] if dropped < len(lines) else b""
+            if self._skip and not block:
+                # The top header ends the file, its last line without a
+                # newline: that line is the header's too, not one below it.
+                self._skip, data = 0, b""
+        # b"#" first: a scan for one byte is many times faster than for two,
+        # and most blocks hold neither.
+        if b"#" in data and (data.startswith(b"#") or b"\n#" in data):
+            kept = []
+            for line in data.splitlines(keepends=True):
+                if line.startswith(b"#"):
+                    self._below.note(line.decode("utf-8", "replace").rstrip("\r\n"))
+                else:
+                    kept.append(line)
+            data = b"".join(kept)
+        if data:
+            self._ready.append(data)
+            self._size += len(data)
+
+    def read(self, nbytes: int = -1) -> bytes:
+        if nbytes is None or nbytes < 0:
+            while not self._eof:
+                self._fill()
+            nbytes = self._size
+        # Up to nbytes at once: pyarrow parses one batch per read, and short
+        # reads made many small batches, each carrying the contig dictionary.
+        while self._size < nbytes and not self._eof:
+            self._fill()
+        parts = []
+        wanted = nbytes
+        while wanted and self._ready:
+            chunk = self._ready[0]
+            if len(chunk) <= wanted:
+                parts.append(self._ready.popleft())
+                wanted -= len(chunk)
+            else:
+                view = memoryview(chunk)
+                parts.append(view[:wanted])
+                self._ready[0] = view[wanted:]
+                wanted = 0
+        out = b"".join(parts)
+        self._size -= len(out)
+        return out
 
 
 def _stream_pairs(
@@ -1494,7 +1758,16 @@ def _stream_pairs(
     pyarrow uses multi-threaded C++ parsing and native gzip decompression,
     which is significantly faster than pandas/gzip for large compressed files.
     Comment lines (``#``) at the top of the file are counted once with a fast
-    sequential scan and then skipped by pyarrow's ``skip_rows`` option.
+    sequential scan and then skipped by pyarrow's ``skip_rows`` option.  Those
+    below it -- the headers of pairs files concatenated with ``cat`` -- are
+    skipped too: by :func:`_skip_header_lines`, or, when a header line of the
+    top header has as many fields as a pair, by :class:`_HeaderLinesSkipped`.
+    A line below the top with as many fields as a pair, when the top header
+    holds none, is parsed as a pair: its read fails with an error that says
+    so (or, a commented-out pair, it is read as one). The ``#chromsize:``
+    lines below the top must agree with those of the top header
+    (:class:`_HeaderLinesBelow`). Pairs are read without quoting: a field
+    starting with ``"`` swallowed every line up to the next ``"``.
     """
     import pyarrow as pa
     import pyarrow.csv as pa_csv
@@ -1503,8 +1776,8 @@ def _stream_pairs(
 
     # Count header comment lines; pyarrow has no native comment-skip support.
     # The same scan tells us whether any data row follows at all.
-    n_header, has_data = _scan_pairs_header(path)
-    if not has_data:
+    header = _scan_pairs_header(path)
+    if not header.has_data:
         # A header-only pairs file (no data rows) is a legitimate input — a
         # sample with no surviving contacts. Detect it structurally here rather
         # than by pattern-matching pyarrow's error message, which would also
@@ -1524,12 +1797,18 @@ def _stream_pairs(
     # at ~120 bytes/row, but cap it so a large chunksize stays affordable.
     block_size = min(max(chunksize * 120, 8 * 1024 * 1024), _PAIRS_READ_BLOCK_MAX_BYTES)
 
+    below = _HeaderLinesBelow(path)
     read_opts = pa_csv.ReadOptions(
-        skip_rows=n_header,
+        # _HeaderLinesSkipped leaves the top header out itself.
+        skip_rows=0 if header.mirrors_a_pair else header.n_lines,
         autogenerate_column_names=True,
         block_size=block_size,
     )
-    parse_opts = pa_csv.ParseOptions(delimiter="\t")
+    parse_opts = pa_csv.ParseOptions(
+        delimiter="\t",
+        quote_char=False,
+        invalid_row_handler=_skip_header_lines(below),
+    )
     convert_opts = pa_csv.ConvertOptions(
         include_columns=pa_col_names,
         # Contig names arrive dictionary-encoded: each batch holds every
@@ -1544,17 +1823,51 @@ def _stream_pairs(
         },
     )
 
-    with contextlib.closing(_pairs_input_stream(path)) as src:
-        reader = pa_csv.open_csv(
-            src,
-            read_options=read_opts,
-            parse_options=parse_opts,
-            convert_options=convert_opts,
+    source = _pairs_input_stream(path)
+    if header.mirrors_a_pair:
+        logger.debug(
+            "%s has a header line with as many fields as a pair: its header "
+            "lines are left out before parsing.",
+            path,
         )
-        for batch in reader:
-            df = batch.to_pandas()
-            df.columns = final_col_names
-            yield df
+        source = _HeaderLinesSkipped(source, header.n_lines, below)
+    with contextlib.closing(source) as src:
+        try:
+            reader = pa_csv.open_csv(
+                src,
+                read_options=read_opts,
+                parse_options=parse_opts,
+                convert_options=convert_opts,
+            )
+            for batch in reader:
+                below.check()
+                df = batch.to_pandas()
+                df.columns = final_col_names
+                yield df
+        except pa.ArrowInvalid as exc:
+            if _HEADER_LINE_NOT_TEXT.search(str(exc)):
+                # Every "#" line the handler sees, it skips: one it cannot see
+                # is one pyarrow could not decode for it.
+                raise pa.ArrowInvalid(
+                    f"{path}: {exc}. That line is a header line below the top "
+                    "of the file (pairs files concatenated with cat) that is "
+                    "not UTF-8 text, which cannot be skipped: give the pairs "
+                    "files one by one, as --pairs a --pairs b, or remove that "
+                    "line."
+                ) from exc
+            if "conversion error" not in str(exc):
+                raise
+            raise pa.ArrowInvalid(
+                f"{path}: {exc}. If that line starts with #, it is a header line "
+                "below the top of the file (pairs files concatenated with cat) "
+                "with as many tab-separated fields as a pair, which cannot be "
+                "told from a pair when the top header holds no such line: give "
+                "the pairs files one by one, as --pairs a --pairs b, or remove "
+                "that line."
+            ) from exc
+    below.check()
+    if below.count:
+        logger.debug("%s: %d header line(s) below the top skipped.", path, below.count)
 
 
 @dataclasses.dataclass

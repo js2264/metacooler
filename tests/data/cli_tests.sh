@@ -288,7 +288,7 @@ metacooler dump -t indexes assembly_1_rep1_1kb_from_cool.metacool > dump_indexes
 metacooler dump -t all assembly_1_rep1_1kb_from_cool.metacool --prefix dump_all_
 
 ## --table contigs resolves the genome reference to the MAG NAME (not an integer id):
-## the third column should read MAG names / __unbinned__, never 0,1,2,...
+## the second column should read MAG names / __unbinned__, never 0,1,2,...
 metacooler dump -t contigs -H assembly_1_rep1_1kb_from_cool.metacool | head -n 5
 
 ## --join annotates pixel dumps with contig names + coordinates (cooler --join style).

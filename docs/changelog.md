@@ -30,6 +30,137 @@
 - **`--balance NAME`** on `show`, `dump` (a `balanced` column, as
   `cooler dump --balanced`) and `network`; **`network --drop-spurious`** drops
   the contig pairs below the spurious-contact cutoff NormCC and HiCzin store.
+- **Clustering rounds: the `/clusters` group** (see
+  [the format](format.md#clusters)). A tool that groups contigs into genomes
+  can store the rounds of its latest run in the map, whatever the method: one
+  table of every cluster of every round (`round`, `name`, `parent`,
+  `n_contigs`, `length` and its own columns, such as completeness), and the
+  contigs of each cluster, a contig possibly in several, indexed both ways:
+  the contigs of a cluster and the clusters of a contig are each one slice.
+  metaTOR, for one, keeps its overlapping, recursive and final clusters there,
+  so the intermediate clusters stay out of `/genomes` and `/contigs`, which
+  hold the current assignment. Python:
+  `metacooler.write_clusters` (replaces the group whole: one run at a time) and
+  `drop_clusters`; `MetaCooler.cluster_rounds`, `clusters`,
+  `cluster_members(round=)` (one round's slice), `cluster_contigs(round,
+  name)` (one cluster's contigs) and `contig_clusters(contigs)` (each
+  contig's clusters, round by round), each reading only the memberships it
+  returns. `clusters` has a `genome` column, computed whenever the map is
+  read and never stored: the genome of the map whose contigs a cluster holds
+  exactly, so it always says which clusters the current genomes are, and
+  follows a `reassign`. `dump -t clusters` and `-t members` write them out,
+  `validate()` and `check` check them, and the commands that write a map from a
+  map keep them: `reassign` (renumbering their contigs when it re-groups them),
+  `annotate`, `merge` (the first input's, with a warning about an input whose
+  rounds differ), `binnify` by contig, `zoomify` and the `.mmetacool`
+  entries (`binnify --level genome` makes other contigs, and warns that it
+  drops them). The group is optional: a map without it is unchanged. metacooler
+  0.3.0 reads a map with it; of the maps it writes from that map, those it
+  copies keep the group (`annotate`, a relabelling `reassign`, the
+  `.mmetacool` entries, the base level of `zoomify`) and those it rewrites
+  drop it (a re-grouping `reassign`, `binnify`, `merge`, the coarser levels
+  of `zoomify`).
+- **`reassign --round NAME`** (API: `reassign(uri, round=...)`) makes a
+  clustering round of the map its genomes: each contig of the round goes to
+  the genome named after its cluster, and the clusters' columns become the
+  genomes' metadata. The contigs the round does not hold go to
+  `__unbinned__` by default (`--missing keep` leaves them where they were, in
+  genomes that keep their metadata), and a round in which a contig is in two
+  clusters is refused. `--contigs` is no longer required: one of the two is.
+
+### Changed
+
+- **Normalization weights are dropped when they go stale.** A weight records
+  what it was computed from (`depends_on`): `reassign` drops the weights
+  computed per genome when a contig changes genome — and, when it rewrites the
+  map, restores the attributes of the weights it carries, which cooler does not
+  write — and `annotate` drops those that read a `/contigs` column it changes.
+
+- **Every dump is keyed by name**, so the dumps join on their key columns.
+  `dump -t contigs` prints `contig`, `genome` (the name of the genome the contig
+  is in) and `length`, then the other columns; it no longer prints `name`, nor
+  the internal `genome_id`, a row number that every `reassign` renumbers.
+  `dump -t genomes` prints `genome` where it printed `name`, and `dump -t
+  clusters` calls a cluster `cluster`, as `-t members` does. `-t chroms` keeps
+  cooler's own `name` and `length`. A script that reads `name` or `genome_id`
+  from a dump needs updating. `--filter` reads the dump's names
+  (`contigs.contig`, `contigs.genome`, `genomes.genome`), and still the names
+  the file stores the keys under (`contigs.name`, `contigs.genome_id`,
+  `genomes.name`). And a dump reads back: the default `--contigs-format` and
+  `--genomes-format` also read the `contig` and `genome` columns of a table
+  `dump -H` wrote, when it has none of `contig_name` and `genome_name` (only
+  both, for an assignment table: one with `contig_name` and no `genome_name`
+  is refused as before), so `reassign --contigs <dump>` needs no format. A
+  table that starts as a dump does is read as one, by every command: the
+  columns `dump` computed from the map (`length`, `n_contigs`, `n_bins`, the
+  QC columns) are left out rather than stored as `user_` metadata, and a
+  contigs dump's `genome` column is checked by `annotate` and `collect`, as a
+  `genome_name` column is.
+- **A pairs file's compression is read from its content**, whatever its name:
+  gzip and bgzip, bzip2, zstd and lz4, from the file's first bytes, and plain
+  text otherwise. It was read from the file's suffix, so a gzip file named
+  `lib.pairs` was parsed as raw compressed bytes, and a plain file named
+  `lib.pairs.gz` failed to decompress. A zip archive, an xz file or a legacy
+  LZ4 file, which metacooler cannot read, is refused by name.
+
+### Fixed
+
+- **`contigs.genome` means one thing.** `dump -t contigs` printed the name of
+  each contig's genome in its `genome` column, but a user column called
+  `genome` (a taxonomy, say), which `/contigs` stored as given, took its place
+  under `--filter contigs.genome` on an existing map, and not during `create`.
+  `contig` and `genome` are now reserved like `name` and `length`: a user
+  column of either name is stored as `user_contig` / `user_genome` (in
+  `/genomes` too, for `genome`), and one that a map written before holds is
+  printed and filtered as `user_contig` / `user_genome`, and `annotate` drops
+  or replaces it by that name (storing it under that name then). So
+  `contigs.genome` is always the contig's genome, in a dump and in a filter.
+- **`reassign` writes the same tables whichever path it takes.** When the
+  contigs keep their rows (the relabel path), `/contigs` now lists its columns
+  in the order `create` and the regroup path write them: `genome_id` third,
+  after `name` and `length`. The relabel path deleted and wrote again
+  `genome_id`, and each QC column it changed, in a group listed in creation
+  order, so they moved after every other column. The columns it does not
+  change are kept as stored, without a copy, so a relabelling in place no
+  longer grows the file by them. Both tables are built aside and swapped in
+  together, so a relabelling stopped while writing them (`--inplace` included)
+  leaves the map's tables as they were, where `/genomes` used to be rewritten
+  already; a Ctrl-C during the swap itself is held until the map is whole
+  again.
+- **Pairs files concatenated with `cat`.** The header lines below the top of a
+  pairs file (those of the files concatenated after the first) are skipped, so
+  the files read as if given one after the other (`--pairs a --pairs b`).
+  `create pairs` and `ps` stopped on the first of them, parsed as a pair. At no
+  cost for most files: pyarrow skips those lines itself, as rows with another
+  number of fields than a pair, which every standard header line is. A header
+  line with as many tab-separated fields as a pair (a `#samheader: @RG` line
+  with every tag, say) is skipped too when the top header holds one, the file
+  then filtered before parsing (about a fifth more CPU time to read it, 12%
+  more for `create pairs` as a whole); when only a header below the top holds
+  one, it is parsed as a pair: the read stops with an error that says so,
+  as it does for a header line below the top that is not UTF-8 text, unless
+  the line holds integers where a pair's positions go (a commented-out pair),
+  which is then counted as a pair. The `#chromsize` lines below the top must
+  agree with the top header's, as numbers, wherever the contig lengths come
+  from: pairs files of other assemblies are refused rather than read with the
+  first one's lengths. That is stricter than the files given one by one,
+  whose headers are not checked when the lengths come from `--fasta` or a
+  bins BED. A line of white space only is a blank line, below the top too.
+- **A `"` in a pairs file.** Pairs are read without quoting: a field starting
+  with `"` (a read name, or a header line below the top) made the reader take
+  every line up to the next `"` as one field, and the pairs among them were
+  lost without a word.
+- **`merge` of maps that hold no pixel.** It failed with "No objects to
+  concatenate", inside cooler, when no input had a pixel (libraries with no
+  contact left, say). Their merge is a map without pixels, with the inputs'
+  bins, contigs, genomes, storage mode and summed QC block, laid out as any
+  merge. Inputs of two storage modes (`symmetric-upper` and `square`) are
+  refused before anything is written, with or without pixels: cooler refused
+  them only with pixels.
+
+## 0.3.0 - 2026-11-18
+
+### Added
 
 - **Per-contig QC columns.** Every command that stores the contact-quality
   block — `create pairs`, `create cool`, `collect`, `qc --store`, `reassign` —
@@ -77,12 +208,6 @@
   [Reading pixels in chunks](api/metacooler.md#reading-pixels-in-chunks).
 
 ### Changed
-
-- **Normalization weights are dropped when they go stale.** A weight records
-  what it was computed from (`depends_on`): `reassign` drops the weights
-  computed per genome when a contig changes genome — and, when it rewrites the
-  map, restores the attributes of the weights it carries, which cooler does not
-  write — and `annotate` drops those that read a `/contigs` column it changes.
 
 - **`merge` sums the inputs' QC instead of dropping it.** The `metadata.qc`
   block and the `qc_*` columns of `/genomes` and `/contigs` are summed when

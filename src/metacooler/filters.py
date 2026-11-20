@@ -4,7 +4,13 @@ The CLI surface is a repeatable ``--filter`` option whose value is one
 comparison, prefixed with the table it applies to::
 
     --filter "genomes.length > 1Mb"
-    --filter "contigs.length >= 10kb" --filter "contigs.name =~ ^NODE_1"
+    --filter "contigs.length >= 10kb" --filter "contigs.contig =~ ^NODE_1"
+
+The columns are those of the tables as ``dump`` prints them (see
+:func:`metacooler.io._utils.contigs_filter_frame`): ``contigs.contig``,
+``contigs.genome`` (the genome's name), ``genomes.genome``, ``length`` and the
+metadata, plus the names the file stores the keys under (``contigs.name``,
+``contigs.genome_id``, ``genomes.name``).
 
 Repeating the option ANDs the comparisons; there is deliberately no ``or``
 and no parenthesised grammar.  The reason is the column names: a real
@@ -14,10 +20,11 @@ quote or backtick those before it can tokenise them.  Here the *first*
 comparison operator terminates the column name, so a column with spaces,
 dashes or dots needs no quoting at all.
 
-The table prefix is mandatory rather than inferred.  ``length`` exists in
-both tables and means something different in each, and a rule that only
-demands the prefix when the column happens to be ambiguous would make the
-same expression legal on one file and rejected on the next.
+The table prefix is mandatory rather than inferred.  ``length`` and
+``genome`` exist in both tables (``length`` meaning something different in
+each), and a rule that only demands the prefix when the column happens to be
+ambiguous would make the same expression legal on one file and rejected on the
+next.
 
 Missing values never match.  A row whose value is NA fails every
 comparison, including ``!=`` and ``!~`` — a filter selects rows it can

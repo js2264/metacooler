@@ -10,10 +10,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from metacooler.io._utils import read_user_table, rename_key_columns
+from metacooler.io._utils import drop_dump_columns, read_user_table, rename_key_columns
 from metacooler.io.colspec import (
     GENOMES_FORMAT_DEFAULT,
     GENOMES_KEYS,
+    dumped_table,
     parse_column_spec,
     resolve_column_spec,
 )
@@ -54,6 +55,8 @@ def parse_genomes_table(
     if path.stat().st_size == 0:
         raise ValueError(f"Genomes table is empty: {path}")
     df = read_user_table(path, kind="Genomes table", header=spec.header)
+    if spec.header and dumped_table(df.columns) == "genomes":
+        df = drop_dump_columns(df, "genomes", kind="Genomes table", path=path)
     (key,) = resolve_column_spec(
         spec, list(df.columns), kind="Genomes table", path=path, keys=GENOMES_KEYS
     )

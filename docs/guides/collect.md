@@ -13,7 +13,7 @@ metacooler collect E_coli.cool B_subtilis.cool S_aureus.cool -o species.metacool
 
 ```console
 $ metacooler dump -t genomes -H species.metacool | cut -f1-4
-name        length   n_contigs  n_bins
+genome      length   n_contigs  n_bins
 B_subtilis  4215000  1          4215
 E_coli      4705000  2          4705
 S_aureus    2849000  2          2849
@@ -41,17 +41,17 @@ whichever other genomes it is collected with:
 
 ```console
 $ metacooler dump -t contigs -H species.metacool | cut -f1-3
-name                    length   genome
-B_subtilis__chromosome  4215000  B_subtilis
-E_coli__chromosome      4640000  E_coli
-E_coli__plasmid1        65000    E_coli
-S_aureus__chromosome    2821000  S_aureus
-S_aureus__plasmid1      28000    S_aureus
+contig                  genome      length
+B_subtilis__chromosome  B_subtilis  4215000
+E_coli__chromosome      E_coli      4640000
+E_coli__plasmid1        E_coli      65000
+S_aureus__chromosome    S_aureus    2821000
+S_aureus__plasmid1      S_aureus    28000
 ```
 
 The new names are what every other command expects: `--contigs
 E_coli__plasmid1`, `-r E_coli__chromosome:1000000-2000000`, `--filter
-"contigs.name =~ plasmid"`.
+"contigs.contig =~ plasmid"`.
 
 ## Resolution
 

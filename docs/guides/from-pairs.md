@@ -24,8 +24,19 @@ assembly go in one map by repeating `--pairs` — see
 ### Pairs file
 
 Standard [4DN pairs format](https://github.com/4dn-dcic/pairix/blob/master/pairs_format_specification.md).
-Plain text or gzipped. Required columns: `chrom1`, `pos1`, `chrom2`, `pos2`
-(columns 2–5 by default).
+Plain text, or compressed with gzip, bgzip, bzip2, zstd or lz4 (read from the
+file's content, whatever its name). Required columns: `chrom1`, `pos1`,
+`chrom2`, `pos2` (columns 2–5 by default). Pairs files concatenated with `cat`
+read as the files given one after the other: the header lines below the top are
+skipped, and their `#chromsize` lines must agree with the top header's (as
+numbers), wherever the contig lengths come from (`--fasta` and a bins BED
+included): headers that disagree are those of pairs files of other assemblies.
+A header line below the top must be UTF-8 text. A header line below the top
+with as many tab-separated fields as a pair (a `#samheader: @RG` line with
+every tag) is skipped only when the top header holds one too; otherwise the
+read stops and says so: give the files one by one (`--pairs a --pairs b`). A
+commented-out pair below the top is the exception: with integers where a pair's
+positions go, it is counted as a pair. Fields are read without quoting.
 
 ```
 #pairs format v1.0
