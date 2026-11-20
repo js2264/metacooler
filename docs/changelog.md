@@ -4,32 +4,31 @@
 
 ### Added
 
-- **`normalize`** (alias `normalise`): normalizations for metagenomic Hi-C,
-  one subcommand per family, each stored as a weight column of `/bins` the way
-  `cooler balance` stores one — multiplicative, `NaN` for a masked bin, the
-  pixels untouched — so cooler, cooltools and HiGlass read them too.
-  - `ice`: iterative correction, by default **per genome** (each MAG's block
-    balanced on its own, contacts between genomes out of the fit, the MAD
-    filter's medians taken per genome); `--scope contig|global` are cooler's.
-    Where the groupings coincide the weights are cooler's, bit for bit.
-  - `metator`: MetaTOR's five network normalizations (`empirical_hit`,
-    `abundance`, `length`, `rs`, `theoretical_hit`), with its constants.
-  - `mge`: the score MetaTOR's `mge` module bins mobile elements with
-    (Bignaud et al., *Nat. Microbiol.* 2025), x<sub>ij</sub> /
-    √(x<sub>ii</sub> x<sub>jj</sub>), exact from the QC block when it was
-    measured at the same threshold.
-  - `normcc`: MetaCC's negative binomial regression (Du & Sun 2023).
-  - `hiczin`: HiCzin's zero-inflated negative binomial regression (Du et al.
-    2022), fitted on the pairs of contigs of one genome.
-  - `list`: the weight columns of a map and how they were computed.
+- **`normalize`** (alias `normalise`): normalization weights for metagenomic
+  Hi-C, stored as a column of `/bins` the way `cooler balance` stores one —
+  multiplicative, `NaN` for a masked bin, the pixels untouched — so cooler,
+  cooltools and HiGlass read them too.
+  - `normalize ice`: iterative correction, by default **per genome** (each
+    MAG's block balanced on its own, contacts between genomes out of the fit,
+    the MAD filter's medians taken per genome); `--scope contig|global` are
+    cooler's. Where the groupings coincide the weights are cooler's, bit for
+    bit.
+  - `normalize list`: the weight columns of a map and how they were computed,
+    whoever stored them.
 
-  Restriction sites come from a `/contigs` column (`--sites`) or are counted
-  from `--enzyme` in `--fasta`. Python: `metacooler.normalize_ice`,
-  `normalize_metator`, `normalize_mge`, `normalize_normcc`,
-  `normalize_hiczin`; `metacooler.io.weights` reads and writes the columns.
+  metacooler computes ICE only. Any other tool stores its own normalization
+  the same way with **`metacooler.store_weights`**, naming what the weights
+  were computed from (`depends_on`: the pixels, the genome assignment,
+  `/contigs` columns), and `metacooler.read_weights` reads a column back.
+  Python: `metacooler.normalize_ice`.
 - **`--balance NAME`** on `show`, `dump` (a `balanced` column, as
-  `cooler dump --balanced`) and `network`; **`network --drop-spurious`** drops
-  the contig pairs below the spurious-contact cutoff NormCC and HiCzin store.
+  `cooler dump --balanced`) and `network`, for any weight column.
+- **Normalization weights are dropped when they go stale.** `reassign` drops
+  the weights that depend on the genome assignment when a contig changes genome
+  — and, when it rewrites the map, restores the attributes of the weights it
+  carries, which cooler does not write — and `annotate` drops those that depend
+  on a `/contigs` column it changes. A weight `cooler balance` wrote depends on
+  the pixels alone, and is kept.
 - **Clustering rounds: the `/clusters` group** (see
   [the format](format.md#clusters)). A tool that groups contigs into genomes
   can store the rounds of its latest run in the map, whatever the method: one
@@ -69,12 +68,6 @@
   clusters is refused. `--contigs` is no longer required: one of the two is.
 
 ### Changed
-
-- **Normalization weights are dropped when they go stale.** A weight records
-  what it was computed from (`depends_on`): `reassign` drops the weights
-  computed per genome when a contig changes genome — and, when it rewrites the
-  map, restores the attributes of the weights it carries, which cooler does not
-  write — and `annotate` drops those that read a `/contigs` column it changes.
 
 - **Every dump is keyed by name**, so the dumps join on their key columns.
   `dump -t contigs` prints `contig`, `genome` (the name of the genome the contig

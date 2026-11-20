@@ -1,108 +1,56 @@
-"""Normalize a metacool file that already exists: compute and store bin weights.
+"""Normalize a metacool file that already exists: ICE weights in ``/bins``.
 
-Each function computes one normalization of the map and stores it as a weight
-column of ``/bins`` (see :mod:`metacooler.io.weights`): the normalized value of
-a pixel is ``raw * w[bin1] * w[bin2]``, the convention of cooler's balancing
-weights, so cooler, cooltools and HiGlass read the result as they read
-``cooler balance``'s.  The pixels are never rewritten.  The arithmetic lives in
-:mod:`metacooler.normalize`; this module reads what it needs from the file.
+:func:`normalize_ice` balances a map by iterative correction and stores the
+weights as a column of ``/bins`` (see :mod:`metacooler.io.weights`): the
+normalized value of a pixel is ``raw * w[bin1] * w[bin2]``, the convention of
+cooler's balancing weights, so cooler, cooltools and HiGlass read the result
+as they read ``cooler balance``'s.  The pixels are never rewritten.
 
-- :func:`normalize_ice` -- iterative correction (matrix balancing), by default
-  **per genome**: each MAG's block of the matrix balanced on its own, contacts
-  between genomes left out of the fit.  ``scope="contig"`` and
-  ``scope="global"`` are cooler's ``--cis-only`` and whole-matrix balancing.
-- :func:`normalize_metator` -- MetaTOR's network normalizations: contacts over
-  the geometric mean of each contig's Hi-C hits (``empirical_hit``, MetaTOR's
-  default), shotgun coverage (``abundance``), hit density (``length``), hits
-  per restriction site (``rs``) or expected hits (``theoretical_hit``).
-- :func:`normalize_mge` -- the score MetaTOR's ``mge`` module bins mobile
-  elements with (Bignaud et al., Nat. Microbiol. 2025): contacts over the
-  geometric mean of the two contigs' own intra-contig contacts.
-- :func:`normalize_normcc` -- NormCC (MetaCC; Du & Sun, Nat. Commun. 2023).
-- :func:`normalize_hiczin` -- HiCzin (Du et al., J. Comput. Biol. 2022, the
-  normalization of HiCBin).
+By default each **genome** is balanced on its own: each MAG's block of the
+matrix, with the contacts between genomes left out of the fit.
+``scope="contig"`` and ``scope="global"`` are cooler's ``--cis-only`` and
+whole-matrix balancing.  The arithmetic lives in :mod:`metacooler.normalize`;
+this module reads what it needs from the file.
 
-The contig-level methods give every bin of a contig its contig's weight, so a
-normalized map summed back to contigs (``network --level contig --balance``)
-holds exactly the published contig-level values.
+Other tools store their own normalizations with
+:func:`metacooler.io.weights.store_weights`.
 """
 
 from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
-import pandas as pd
 
-from metacooler._version import __version__
 from metacooler.api import MetaCooler
 from metacooler.io.weights import (
-    CONTIG_COLUMN_PREFIX,
-    DEPENDS_ATTR,
     DEPENDS_ON_ASSIGNMENT,
     DEPENDS_ON_PIXELS,
-    METHOD_ATTR,
-    SPURIOUS_CUTOFF_ATTR,
-    SPURIOUS_RULE_ATTR,
     check_weight_name,
     store_weights,
+    weight_attributes,
 )
 from metacooler.normalize import (
-    METATOR_COVERAGE_MODES,
-    METATOR_HIT_MODES,
-    METATOR_SITES_MODES,
-    canonical_metator_mode,
     compact_groups,
-    contig_hits,
-    fit_nb_glm,
-    fit_zinb,
-    hiczin_contig_weights,
     ice_iterate,
     ice_mad_drop,
     ice_marginals,
-    inverse_sqrt,
-    metator_contig_weights,
-    pairs_within_groups,
 )
-from metacooler.qc import QC_CATEGORIES, QC_METADATA_KEY, unbinned_genome_id
+from metacooler.qc import unbinned_genome_id
 from metacooler.schema import DEFAULT_CHUNKSIZE
-
-if TYPE_CHECKING:
-    from scipy import sparse
 
 logger = logging.getLogger("metacooler")
 
 #: What :func:`normalize_ice` balances separately.
 ICE_SCOPES = ("genome", "contig", "global")
 
-#: What :func:`normalize_mge` takes the intra contacts of.
-MGE_SCOPES = ("contig", "genome")
-
 #: Default name of an ICE weight column: cooler's, so tools that read
 #: ``weight`` by default (``cooler show``, HiGlass, cooltools) pick it up.
 DEFAULT_ICE_NAME = "weight"
-
-#: Separation below which intra-contig pairs are left out of the MGE score's
-#: denominator: MetaTOR's ``mge`` module drops pairs less than 1 kb apart.
-DEFAULT_MGE_MIN_DISTANCE = 1_000
-
-#: Contig filters of MetaCC and HiCBin: contigs shorter than ``min_len`` are
-#: left out, and so are those whose largest contact with another contig is
-#: below ``min_signal``.
-DEFAULT_MIN_LENGTH = 1_000
-DEFAULT_MIN_SIGNAL = 2
-
-#: Share of the normalized contig-pair contacts NormCC and HiCzin call
-#: spurious (their ``--thres``).
-DEFAULT_SPURIOUS_QUANTILE = 0.05
-
-#: Contig pairs HiCzin's regression is fitted on, at most (a uniform sample when
-#: the genomes hold more).
-DEFAULT_MAX_PAIRS = 1_000_000
 
 #: Filtered pixels genome-scoped balancing keeps in memory between iterations
 #: (about 16 bytes each); a larger map is re-read at every iteration, as
@@ -151,21 +99,17 @@ def _open_target(uri: str | Path, name: str, *, store: bool, force: bool) -> Met
 
 def _finish(
     mc: MetaCooler,
-    method: str,
     name: str,
     weights: np.ndarray,
-    attrs: dict[str, object],
     *,
+    method: str,
+    depends_on: Sequence[str],
+    parameters: Mapping[str, object],
     store: bool,
     force: bool,
     commands: Sequence[str],
 ) -> Normalization:
     """Log, store and return a computed normalization."""
-    full: dict[str, object] = {
-        METHOD_ATTR: method,
-        **attrs,
-        "metacooler_version": __version__,
-    }
     n_bins = len(weights)
     n_masked = int(np.count_nonzero(~np.isfinite(weights)))
     logger.info("%s: %s of %s bin(s) masked", method, f"{n_masked:,}", f"{n_bins:,}")
@@ -175,16 +119,19 @@ def _finish(
         )
     if store:
         store_weights(
-            mc.store,
+            mc.uri,
             name,
             weights,
-            full,
-            group_path=mc._group_path,
+            method=method,
+            depends_on=depends_on,
+            parameters=parameters,
             force=force,
             commands=commands,
         )
         logger.info("Stored the weights as /bins/%s in %s", name, mc.uri)
-    return Normalization(name, weights, full)
+    return Normalization(
+        name, weights, weight_attributes(method, depends_on, parameters)
+    )
 
 
 def _contig_groups(mc: MetaCooler) -> np.ndarray:
@@ -200,161 +147,6 @@ def _contig_groups(mc: MetaCooler) -> np.ndarray:
         alone = genome == unbinned
         key[alone] = len(mc.genomes) + np.flatnonzero(alone)
     return compact_groups(key)
-
-
-def _numeric_contig_column(
-    contigs: pd.DataFrame, column: str, *, what: str
-) -> np.ndarray:
-    """Read a ``/contigs`` column as numbers, ``NaN`` where a value is unusable."""
-    if column not in contigs.columns:
-        listing = ", ".join(
-            c for c in contigs.columns if c not in ("name", "genome_id")
-        )
-        raise ValueError(
-            f"/contigs has no column {column!r} to read the {what} from. "
-            f"Its columns: {listing}. Add one with 'metacooler annotate'."
-        )
-    values = np.array(pd.to_numeric(contigs[column], errors="coerce"), dtype=np.float64)
-    bad = ~np.isfinite(values) | (values < 0)
-    if bad.any():
-        logger.warning(
-            "%s contig(s) have no usable %s in /contigs/%s (missing, non-numeric "
-            "or negative); their bins are masked.",
-            f"{int(bad.sum()):,}",
-            what,
-            column,
-        )
-        values[bad] = np.nan
-    return values
-
-
-class _Sites(NamedTuple):
-    """Restriction-site counts and where they came from."""
-
-    counts: np.ndarray
-    attrs: dict[str, object]
-    depends: list[str]
-
-
-def _contig_sites(
-    mc: MetaCooler,
-    *,
-    sites: str | None,
-    enzymes: Sequence[str] | None,
-    fasta: str | Path | None,
-    plus_one: bool,
-) -> _Sites | None:
-    """Restriction-site count of every contig, from a column or the FASTA.
-
-    Args:
-        mc: The open map.
-        sites: ``/contigs`` column holding the counts, used as they are.
-        enzymes: Enzymes whose sites are counted in *fasta*.
-        fasta: The assembly.
-        plus_one: Add one to a count made from the FASTA -- MetaTOR's
-            convention (its ``Restriction_site`` column already includes it).
-
-    Returns:
-        A :class:`_Sites`, or ``None`` when neither source is given.
-
-    Raises:
-        ValueError: If both sources are given, or a FASTA without enzymes or
-            enzymes without a FASTA.
-    """
-    if sites is not None and enzymes:
-        raise ValueError(
-            "Give the restriction sites either as a /contigs column (--sites) or as "
-            "enzymes to count in the assembly (--enzyme with --fasta), not both."
-        )
-    if fasta is not None and not enzymes:
-        raise ValueError(
-            "--fasta is only read to count the restriction sites of --enzyme; "
-            "pass the enzyme too."
-        )
-    contigs = mc.contigs
-    if sites is not None:
-        values = _numeric_contig_column(contigs, sites, what="restriction-site count")
-        return _Sites(
-            values,
-            {"sites": f"{CONTIG_COLUMN_PREFIX}{sites}"},
-            [f"{CONTIG_COLUMN_PREFIX}{sites}"],
-        )
-    if enzymes:
-        if fasta is None:
-            raise ValueError(
-                "--enzyme counts restriction sites in the assembly: pass the "
-                "FASTA the map was built from with --fasta."
-            )
-        from metacooler.io.sites import count_sites
-
-        counts = count_sites(
-            fasta,
-            contigs["name"].astype(str).tolist(),
-            contigs["length"].to_numpy(),
-            list(enzymes),
-        ).astype(np.float64)
-        if plus_one:
-            counts += 1.0
-        return _Sites(
-            counts,
-            {"enzymes": list(enzymes), "fasta": str(fasta), "sites_plus_one": plus_one},
-            [],
-        )
-    return None
-
-
-def _contig_matrix(mc: MetaCooler, chunksize: int) -> sparse.csr_matrix:
-    """The symmetric contig-by-contig contact matrix, as ``float64``."""
-    from metacooler.ops.aggregate import _aggregate_sparse
-
-    return (
-        _aggregate_sparse(mc, level="contig", chunksize=chunksize)
-        .astype(np.float64)
-        .tocsr()
-    )
-
-
-def _off_diagonal(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
-    """*matrix* with its diagonal (the intra-contig contacts) removed."""
-    off = matrix.copy()
-    off.setdiag(0)
-    off.eliminate_zeros()
-    return off
-
-
-def _largest_contact(off: sparse.csr_matrix, among: np.ndarray) -> np.ndarray:
-    """Each contig's largest contact with another contig of *among*.
-
-    MetaCC and HiCBin drop the short contigs before they build the contact
-    matrix, so a contig's signal is measured against the long ones only.
-    """
-    from scipy import sparse
-
-    restricted = off @ sparse.diags(among.astype(np.float64))
-    return np.asarray(restricted.max(axis=1).todense()).ravel()
-
-
-def _spurious_cutoff(
-    off: sparse.csr_matrix, weights: np.ndarray, keep: np.ndarray, quantile: float
-) -> tuple[float, int]:
-    """Quantile of the normalized contacts between two kept contigs.
-
-    Returns:
-        ``(cutoff, n_contacts)`` -- ``NaN`` when there is no such contact.
-    """
-    from scipy import sparse
-
-    upper = sparse.triu(off, k=1).tocoo()
-    sel = keep[upper.row] & keep[upper.col] & (upper.data > 0)
-    values = upper.data[sel] * weights[upper.row[sel]] * weights[upper.col[sel]]
-    if not values.size:
-        return float("nan"), 0
-    return float(np.quantile(values, quantile)), int(values.size)
-
-
-def _check_quantile(value: float, option: str) -> None:
-    if not 0.0 <= value < 1.0:
-        raise ValueError(f"{option} must be a fraction in [0, 1), got {value}.")
 
 
 # ----------------------------------------------------------------------------
@@ -535,6 +327,8 @@ def _summarize_stats(stats: dict[str, object]) -> dict[str, object]:
     """
     out: dict[str, object] = {}
     for key, value in stats.items():
+        if key == "divisive_weights":
+            continue  # store_weights writes it, always False
         array = np.asarray(value)
         if array.ndim == 0:
             out[key] = value.item() if isinstance(value, np.generic) else value
@@ -630,658 +424,18 @@ def normalize_ice(
     else:
         weights, stats = _ice_with_cooler(mc, cis_only=scope == "contig", **options)
         depends = [DEPENDS_ON_PIXELS]
-    attrs: dict[str, object] = {
+    parameters: dict[str, object] = {
         "scope": scope,
         **{k: v for k, v in options.items() if k != "chunksize"},
         **stats,
-        DEPENDS_ATTR: depends,
-    }
-    return _finish(
-        mc, "ice", name, weights, attrs, store=store, force=force, commands=commands
-    )
-
-
-# ----------------------------------------------------------------------------
-# MetaTOR
-# ----------------------------------------------------------------------------
-
-
-def _contig_hit_counts(mc: MetaCooler, chunksize: int) -> np.ndarray:
-    """Hi-C hits of every contig, from the pixels (see :func:`contig_hits`)."""
-    contig_of_bin = mc._bin_contig_ids
-    n = len(mc.contigs)
-    hits = np.zeros(n)
-    for chunk in mc.iter_pixels(chunksize):
-        hits += contig_hits(
-            contig_of_bin[chunk["bin1_id"].to_numpy()],
-            contig_of_bin[chunk["bin2_id"].to_numpy()],
-            chunk["count"].to_numpy(),
-            n,
-        )
-    return hits
-
-
-def normalize_metator(
-    uri: str | Path,
-    *,
-    mode: str = "empirical_hit",
-    coverage: str | None = None,
-    sites: str | None = None,
-    enzymes: Sequence[str] | None = None,
-    fasta: str | Path | None = None,
-    name: str | None = None,
-    chunksize: int = DEFAULT_CHUNKSIZE,
-    store: bool = True,
-    force: bool = False,
-    commands: Sequence[str] = (),
-) -> Normalization:
-    """Normalize a map as MetaTOR normalizes its contig network.
-
-    MetaTOR (``metator network --normalization``) divides the contacts of two
-    contigs by the geometric mean of a per-contig quantity; each mode's weight
-    is given in :func:`metacooler.normalize.metator_contig_weights`, with
-    MetaTOR's own constants.  Every bin of a contig gets the contig's weight.
-
-    Args:
-        uri: ``file.metacool`` or ``file.mmetacool::entries/<name>``.
-        mode: ``empirical_hit`` (MetaTOR's default), ``abundance``, ``length``,
-            ``rs`` or ``theoretical_hit`` (MetaTOR's ``theoritical_hit`` and
-            ``RS`` spellings are accepted).
-        coverage: ``/contigs`` column holding each contig's shotgun coverage
-            (MetaTOR's ``Shotgun_coverage``) -- for ``abundance`` and
-            ``theoretical_hit``.
-        sites: ``/contigs`` column holding each contig's restriction-site count
-            as MetaTOR counts it, sites + 1 (its ``Restriction_site``) -- for
-            ``rs`` and ``theoretical_hit``.  Or count them with *enzymes*.
-        enzymes: Enzymes whose sites are counted in *fasta* (plus one, as
-            MetaTOR does).
-        fasta: The assembly the map was built from.
-        name: ``/bins`` column; defaults to ``metator_<mode>``.
-        chunksize: Pixels read per chunk.
-        store: Write the weights into the file.
-        force: Replace an existing column of that name.
-        commands: Command lines to record in ``metadata["commands"]``.
-
-    Returns:
-        The :class:`Normalization`.
-
-    Raises:
-        ValueError: If the mode needs a coverage or site count that was not
-            given, or one was given that the mode does not use.
-    """
-    mode = canonical_metator_mode(mode)
-    if mode not in METATOR_COVERAGE_MODES and coverage is not None:
-        raise ValueError(
-            f"MetaTOR's {mode!r} normalization does not use the coverage; drop "
-            "--coverage."
-        )
-    if mode not in METATOR_SITES_MODES and (sites is not None or enzymes or fasta):
-        raise ValueError(
-            f"MetaTOR's {mode!r} normalization does not use restriction sites; "
-            "drop --sites/--enzyme/--fasta."
-        )
-    name = name or f"metator_{mode}"
-    mc = _open_target(uri, name, store=store, force=force)
-    contigs = mc.contigs
-    attrs: dict[str, object] = {"mode": mode}
-    depends = [DEPENDS_ON_PIXELS]
-
-    cov = None
-    if mode in METATOR_COVERAGE_MODES:
-        if coverage is None:
-            raise ValueError(
-                f"MetaTOR's {mode!r} normalization divides by each contig's "
-                "shotgun coverage: name the /contigs column that holds it with "
-                "--coverage (MetaTOR's contig table calls it Shotgun_coverage)."
-            )
-        cov = _numeric_contig_column(contigs, coverage, what="coverage")
-        attrs["coverage"] = f"{CONTIG_COLUMN_PREFIX}{coverage}"
-        depends.append(f"{CONTIG_COLUMN_PREFIX}{coverage}")
-
-    rs = None
-    if mode in METATOR_SITES_MODES:
-        found = _contig_sites(
-            mc, sites=sites, enzymes=enzymes, fasta=fasta, plus_one=True
-        )
-        if found is None:
-            raise ValueError(
-                f"MetaTOR's {mode!r} normalization needs each contig's "
-                "restriction-site count: a /contigs column with --sites "
-                "(MetaTOR's Restriction_site), or --enzyme with --fasta to count them."
-            )
-        rs = found.counts
-        attrs.update(found.attrs)
-        depends.extend(found.depends)
-
-    hits = _contig_hit_counts(mc, chunksize) if mode in METATOR_HIT_MODES else None
-    contig_weights = metator_contig_weights(
-        mode,
-        hits=hits,
-        lengths=contigs["length"].to_numpy(dtype=np.float64),
-        coverage=cov,
-        sites=rs,
-    )
-    attrs[DEPENDS_ATTR] = depends
-    return _finish(
-        mc,
-        "metator",
-        name,
-        contig_weights[mc._bin_contig_ids],
-        attrs,
-        store=store,
-        force=force,
-        commands=commands,
-    )
-
-
-# ----------------------------------------------------------------------------
-# MGE score (Bignaud et al. 2025)
-# ----------------------------------------------------------------------------
-
-
-class _IntraSignal(NamedTuple):
-    """Intra contacts of every contig and genome, and where they were measured."""
-
-    long_per_contig: np.ndarray
-    inter_contig_per_genome: np.ndarray
-    source: str
-
-
-def _intra_signal(mc: MetaCooler, min_distance: int, chunksize: int) -> _IntraSignal:
-    """Intra-contig contacts at least *min_distance* apart, per contig.
-
-    Also returns the contacts between two contigs of each genome.  Taken from
-    the QC block when ``create pairs`` measured it on read positions at this
-    very threshold -- exact -- and otherwise tallied from the pixels, where a
-    distance is the gap between two bin midpoints.
-    """
-    from metacooler.qc import ContactQC
-
-    contigs = mc.contigs
-    genomes = mc.genomes
-    inter_col = f"qc_{QC_CATEGORIES[2]}"
-    block = mc.metadata.get(QC_METADATA_KEY)
-    if (
-        isinstance(block, dict)
-        and block.get("source") == "pairs"
-        and block.get("distance_threshold") is not None
-        and int(block["distance_threshold"]) == min_distance
-        and "qc_intra_contig_long" in contigs.columns
-        and inter_col in genomes.columns
-    ):
-        logger.info(
-            "Intra-contig contacts at least %d bp apart taken from the QC block "
-            "(measured on read positions)",
-            min_distance,
-        )
-        return _IntraSignal(
-            contigs["qc_intra_contig_long"].to_numpy(dtype=np.float64),
-            genomes[inter_col].to_numpy(dtype=np.float64),
-            "qc",
-        )
-
-    from metacooler.ops.qc import tally_map
-
-    binsize = mc.binsize
-    binsize = None if binsize is None else int(binsize)
-    if binsize is not None and binsize > min_distance:
-        logger.warning(
-            "Bin size (%d bp) is larger than --min-distance (%d bp): pairs closer "
-            "than a bin apart fall on the diagonal and are all left out. Re-create "
-            "the map with 'create pairs --qc-threshold %d' to measure them on read "
-            "positions.",
-            binsize,
-            min_distance,
-            min_distance,
-        )
-    else:
-        logger.info(
-            "Intra-contig contacts at least %d bp apart measured between bin "
-            "midpoints (no QC block at that threshold from 'create pairs')",
-            min_distance,
-        )
-    tally = ContactQC(
-        n_genomes=len(genomes),
-        distance_threshold=min_distance,
-        source="pixels",
-        unbinned_genome=unbinned_genome_id(genomes["name"]),
-        n_contigs=len(contigs),
-    )
-    tally_map(mc, tally, chunksize=chunksize)
-    per_contig = tally.per_contig
-    assert per_contig is not None  # n_contigs was given
-    return _IntraSignal(
-        per_contig[:, 1].astype(np.float64),
-        tally.per_genome[:, 2].astype(np.float64),
-        "pixels",
-    )
-
-
-def normalize_mge(
-    uri: str | Path,
-    *,
-    min_distance: int = DEFAULT_MGE_MIN_DISTANCE,
-    scope: str = "contig",
-    name: str | None = None,
-    chunksize: int = DEFAULT_CHUNKSIZE,
-    store: bool = True,
-    force: bool = False,
-    commands: Sequence[str] = (),
-) -> Normalization:
-    """Normalize a map by the intra contacts of each contig: the MGE score.
-
-    MetaTOR's ``mge`` module (Bignaud et al., Nat. Microbiol. 2025) bins mobile
-    genetic elements on ``S_ij = x_ij / sqrt(x_ii x_jj)``, where ``x_ij`` are
-    the contacts between contigs ``i`` and ``j`` and ``x_ii`` the contacts
-    inside contig ``i`` once pairs less than 1 kb apart are dropped.  The
-    weight of a contig is ``1 / sqrt(x_ii)``, so the normalized contacts
-    between two contigs are their score.  With ``scope="genome"``, ``x`` is
-    instead all the contacts inside the contig's genome -- the same score
-    between genomes.
-
-    Args:
-        uri: ``file.metacool`` or ``file.mmetacool::entries/<name>``.
-        min_distance: Intra-contig pairs closer than this are left out of
-            ``x_ii``.  Exact when ``create pairs`` measured the QC block at
-            this threshold (``--qc-threshold``); otherwise measured between
-            bin midpoints.
-        scope: ``contig`` (the paper's score) or ``genome``.
-        name: ``/bins`` column; defaults to ``mge`` (``mge_genome`` for the
-            genome scope).
-        chunksize: Pixels read per chunk.
-        store: Write the weights into the file.
-        force: Replace an existing column of that name.
-        commands: Command lines to record in ``metadata["commands"]``.
-
-    Returns:
-        The :class:`Normalization`.
-
-    Raises:
-        ValueError: On an unknown *scope* or a negative *min_distance*.
-    """
-    if scope not in MGE_SCOPES:
-        raise ValueError(f"scope must be one of {', '.join(MGE_SCOPES)}, got {scope!r}")
-    if min_distance < 0:
-        raise ValueError(f"min_distance must be >= 0, got {min_distance}")
-    name = name or ("mge" if scope == "contig" else "mge_genome")
-    mc = _open_target(uri, name, store=store, force=force)
-    signal = _intra_signal(mc, int(min_distance), chunksize)
-    depends = [DEPENDS_ON_PIXELS]
-    intra = signal.long_per_contig
-    if scope == "genome":
-        groups = _contig_groups(mc)
-        n_groups = int(groups.max()) + 1 if len(groups) else 0
-        per_group = np.bincount(groups, weights=intra, minlength=n_groups)
-        # Contacts between two contigs of a genome; an unbinned contig is a
-        # genome of its own, so it has none.
-        genome = mc.contigs["genome_id"].to_numpy(dtype=np.int64)
-        unbinned = unbinned_genome_id(mc.genomes["name"])
-        binned = (
-            np.ones(len(genome), dtype=bool) if unbinned is None else genome != unbinned
-        )
-        group_of_genome = np.full(len(mc.genomes), -1, dtype=np.int64)
-        group_of_genome[genome[binned]] = groups[binned]
-        has_group = group_of_genome >= 0
-        np.add.at(
-            per_group,
-            group_of_genome[has_group],
-            signal.inter_contig_per_genome[has_group],
-        )
-        intra = per_group[groups]
-        depends.append(DEPENDS_ON_ASSIGNMENT)
-    contig_weights = inverse_sqrt(intra)
-    attrs: dict[str, object] = {
-        "scope": scope,
-        "min_distance": int(min_distance),
-        "intra_source": signal.source,
-        DEPENDS_ATTR: depends,
     }
     return _finish(
         mc,
-        "mge",
         name,
-        contig_weights[mc._bin_contig_ids],
-        attrs,
-        store=store,
-        force=force,
-        commands=commands,
-    )
-
-
-# ----------------------------------------------------------------------------
-# NormCC
-# ----------------------------------------------------------------------------
-
-
-def normalize_normcc(
-    uri: str | Path,
-    *,
-    sites: str | None = None,
-    enzymes: Sequence[str] | None = None,
-    fasta: str | Path | None = None,
-    min_length: int = DEFAULT_MIN_LENGTH,
-    min_signal: float = DEFAULT_MIN_SIGNAL,
-    spurious: float = DEFAULT_SPURIOUS_QUANTILE,
-    name: str = "normcc",
-    chunksize: int = DEFAULT_CHUNKSIZE,
-    store: bool = True,
-    force: bool = False,
-    commands: Sequence[str] = (),
-) -> Normalization:
-    """Normalize a map with NormCC, MetaCC's regression normalization.
-
-    NormCC (Du & Sun, Nat. Commun. 2023) fits one negative binomial regression
-    (dispersion fixed at 1) of each contig's total contacts with the other
-    contigs on the logs of its restriction-site count, its length and its
-    intra-contig contacts -- which stand in for its coverage, so no coverage is
-    needed.  A contact between contigs ``i`` and ``j`` is normalized as
-    ``raw * max(mu) / sqrt(mu_i mu_j)``, ``mu`` being the fitted means: the
-    weight of a contig is ``sqrt(max(mu) / mu_i)``.  Without sites (no
-    *sites* nor *enzymes*), the site term is left out, as in MetaCC's mode for
-    an unknown enzyme.
-
-    As in MetaCC, contigs shorter than *min_length*, with no intra-contig
-    contact, no site, or no contact of at least *min_signal* with another long
-    contig are left out (masked).  The *spurious* quantile of the normalized
-    contacts between two kept contigs is stored as the spurious-contact cutoff
-    (``network --drop-spurious`` drops the contig pairs below it).
-
-    Args:
-        uri: ``file.metacool`` or ``file.mmetacool::entries/<name>``.
-        sites: ``/contigs`` column of restriction-site counts, used as they
-            are.  Or count them with *enzymes*.
-        enzymes: Enzymes whose sites are counted in *fasta*.
-        fasta: The assembly the map was built from.
-        min_length: Shorter contigs are left out.
-        min_signal: Contigs whose largest contact with another contig is
-            smaller are left out.
-        spurious: Quantile stored as the spurious-contact cutoff.
-        name: ``/bins`` column.
-        chunksize: Pixels read per chunk.
-        store: Write the weights into the file.
-        force: Replace an existing column of that name.
-        commands: Command lines to record in ``metadata["commands"]``.
-
-    Returns:
-        The :class:`Normalization`.
-
-    Raises:
-        ValueError: If too few contigs pass the filters to fit the regression.
-    """
-    _check_quantile(spurious, "spurious")
-    mc = _open_target(uri, name, store=store, force=force)
-    contigs = mc.contigs
-    lengths = contigs["length"].to_numpy(dtype=np.float64)
-    found = _contig_sites(mc, sites=sites, enzymes=enzymes, fasta=fasta, plus_one=False)
-
-    matrix = _contig_matrix(mc, chunksize)
-    intra = matrix.diagonal()
-    off = _off_diagonal(matrix)
-    long_enough = lengths >= min_length
-    keep = (
-        long_enough & (_largest_contact(off, long_enough) >= min_signal) & (intra > 0)
-    )
-    covariates = ["intercept"]
-    columns = [np.ones(len(lengths))]
-    if found is not None:
-        keep &= np.isfinite(found.counts) & (found.counts > 0)
-        covariates.append("log_sites")
-        columns.append(np.log(np.where(keep, found.counts, 1.0)))
-    covariates += ["log_length", "log_intra_contacts"]
-    columns += [np.log(np.maximum(lengths, 1.0)), np.log(np.where(keep, intra, 1.0))]
-    n_kept = int(keep.sum())
-    if n_kept <= len(covariates):
-        raise ValueError(
-            f"Only {n_kept} contig(s) pass NormCC's filters (length >= {min_length} "
-            f"bp, an intra-contig contact, a contact of at least {min_signal} with "
-            "another contig"
-            + (", a restriction site" if found is not None else "")
-            + f"), too few to fit {len(covariates)} coefficients."
-        )
-    signal = off @ keep.astype(np.float64)
-    X = np.column_stack(columns)[keep]
-    beta = fit_nb_glm(signal[keep], X, alpha=1.0)
-    mu = np.exp(X @ beta)
-    contig_weights = np.full(len(lengths), np.nan)
-    contig_weights[keep] = np.sqrt(mu.max() / mu)
-    cutoff, n_contacts = _spurious_cutoff(off, contig_weights, keep, spurious)
-    logger.info(
-        "NormCC fitted on %s contig(s): %s; spurious-contact cutoff %.6g "
-        "(the %g quantile of %s normalized contig-pair contacts)",
-        f"{n_kept:,}",
-        ", ".join(f"{c}={b:.4g}" for c, b in zip(covariates, beta, strict=True)),
-        cutoff,
-        spurious,
-        f"{n_contacts:,}",
-    )
-    attrs: dict[str, object] = {
-        "covariates": covariates,
-        "coefficients": beta,
-        "dispersion": 1.0,
-        "min_length": int(min_length),
-        "min_signal": min_signal,
-        "n_contigs_fitted": n_kept,
-        "spurious_quantile": spurious,
-        SPURIOUS_CUTOFF_ATTR: cutoff,
-        SPURIOUS_RULE_ATTR: "<",
-        **(found.attrs if found is not None else {}),
-        DEPENDS_ATTR: [
-            DEPENDS_ON_PIXELS,
-            *(found.depends if found is not None else []),
-        ],
-    }
-    return _finish(
-        mc,
-        "normcc",
-        name,
-        contig_weights[mc._bin_contig_ids],
-        attrs,
-        store=store,
-        force=force,
-        commands=commands,
-    )
-
-
-# ----------------------------------------------------------------------------
-# HiCzin
-# ----------------------------------------------------------------------------
-
-
-def normalize_hiczin(
-    uri: str | Path,
-    *,
-    coverage: str,
-    sites: str | None = None,
-    enzymes: Sequence[str] | None = None,
-    fasta: str | Path | None = None,
-    min_length: int = DEFAULT_MIN_LENGTH,
-    min_signal: float = DEFAULT_MIN_SIGNAL,
-    spurious: float = DEFAULT_SPURIOUS_QUANTILE,
-    max_pairs: int = DEFAULT_MAX_PAIRS,
-    seed: int = 0,
-    name: str = "hiczin",
-    chunksize: int = DEFAULT_CHUNKSIZE,
-    store: bool = True,
-    force: bool = False,
-    commands: Sequence[str] = (),
-) -> Normalization:
-    """Normalize a map with HiCzin, the normalization of HiCBin.
-
-    HiCzin (Du et al., J. Comput. Biol. 2022) fits a zero-inflated negative
-    binomial regression of the contacts between two contigs of the *same
-    species* -- the contacts that are genuine -- on the logs of the products of
-    their restriction-site counts, lengths and coverages, each standardised.  It
-    learns those pairs from a taxonomic labelling; a metacool file has a better
-    one, its genome assignment, so the pairs here are the pairs of contigs of
-    one genome (``__unbinned__`` contigs excluded), zero contacts included.  A
-    contact is normalized by its fitted mean (the count model), which is one
-    factor per contig.  Without sites, the site term is left out (HiCzin_LC).
-
-    As in HiCBin, contigs shorter than *min_length*, or whose largest contact
-    with another long contig is below *min_signal*, are left out; a zero
-    coverage is raised to the smallest positive one and a zero site count to
-    1.  The *spurious* quantile of the positive normalized contacts of the
-    fitted pairs is stored as the spurious-contact cutoff (a contact at or
-    below it is spurious).
-
-    Args:
-        uri: ``file.metacool`` or ``file.mmetacool::entries/<name>``.
-        coverage: ``/contigs`` column of shotgun coverages.
-        sites: ``/contigs`` column of restriction-site counts, or count them
-            with *enzymes*.
-        enzymes: Enzymes whose sites are counted in *fasta*.
-        fasta: The assembly the map was built from.
-        min_length: Shorter contigs are left out.
-        min_signal: Contigs whose largest contact with another contig is
-            smaller are left out.
-        spurious: Quantile stored as the spurious-contact cutoff.
-        max_pairs: Fit on at most this many pairs, a uniform sample of them
-            when the genomes hold more (0: all of them).
-        seed: Seed of that sample.
-        name: ``/bins`` column.
-        chunksize: Pixels read per chunk.
-        store: Write the weights into the file.
-        force: Replace an existing column of that name.
-        commands: Command lines to record in ``metadata["commands"]``.
-
-    Returns:
-        The :class:`Normalization`.
-
-    Raises:
-        ValueError: If no genome has two contigs passing the filters, or a
-            covariate is constant across the fitted pairs.
-    """
-    _check_quantile(spurious, "spurious")
-    if max_pairs < 0:
-        raise ValueError(f"max_pairs must be >= 0, got {max_pairs}")
-    mc = _open_target(uri, name, store=store, force=force)
-    contigs = mc.contigs
-    lengths = contigs["length"].to_numpy(dtype=np.float64)
-    cov = _numeric_contig_column(contigs, coverage, what="coverage")
-    found = _contig_sites(mc, sites=sites, enzymes=enzymes, fasta=fasta, plus_one=False)
-
-    matrix = _contig_matrix(mc, chunksize)
-    off = _off_diagonal(matrix)
-    long_enough = lengths >= min_length
-    keep = (
-        long_enough
-        & (_largest_contact(off, long_enough) >= min_signal)
-        & np.isfinite(cov)
-    )
-    if found is not None:
-        keep &= np.isfinite(found.counts)
-    positive = keep & (cov > 0)
-    if not positive.any():
-        raise ValueError(
-            "No contig passing HiCzin's filters has a positive coverage in "
-            f"/contigs/{coverage}."
-        )
-    cov = np.where(keep & (cov == 0), cov[positive].min(), cov)
-
-    covariates = []
-    logs = []
-    if found is not None:
-        covariates.append("log_sites")
-        logs.append(np.log(np.where(found.counts > 0, found.counts, 1.0)))
-    covariates += ["log_length", "log_coverage"]
-    logs += [np.log(np.maximum(lengths, 1.0)), np.log(np.where(cov > 0, cov, 1.0))]
-    log_cov = np.column_stack(logs)
-
-    # The pairs of kept contigs of one genome, enumerated genome by genome.
-    genome = contigs["genome_id"].to_numpy(dtype=np.int64)
-    unbinned = unbinned_genome_id(mc.genomes["name"])
-    member = keep if unbinned is None else keep & (genome != unbinned)
-    candidates = np.flatnonzero(member)
-    order = candidates[np.argsort(genome[candidates], kind="stable")]
-    _, starts, sizes = np.unique(genome[order], return_index=True, return_counts=True)
-    total = int(np.sum(sizes * (sizes - 1) // 2))
-    if total == 0:
-        raise ValueError(
-            "HiCzin fits the contacts between contigs of one genome, but no genome "
-            f"has two contigs passing its filters (length >= {min_length} bp, a "
-            f"contact of at least {min_signal} with another contig, a coverage)."
-        )
-    sampled = bool(max_pairs) and total > max_pairs
-    if sampled:
-        rng = np.random.default_rng(seed)
-        index = np.sort(rng.choice(total, size=max_pairs, replace=False))
-    else:
-        index = np.arange(total, dtype=np.int64)
-    group, a, b = pairs_within_groups(sizes, index)
-    ci = order[starts[group] + a]
-    cj = order[starts[group] + b]
-    y = np.asarray(matrix[ci, cj]).ravel()
-
-    pair_logs = log_cov[ci] + log_cov[cj]
-    means = pair_logs.mean(axis=0)
-    sds = pair_logs.std(axis=0, ddof=1) if len(y) > 1 else np.zeros(len(covariates))
-    # Identical values can leave a standard deviation of rounding error.
-    constant = [
-        c
-        for c, s, m in zip(covariates, sds, means, strict=True)
-        if not s > 1e-9 * max(1.0, abs(m))
-    ]
-    if constant:
-        raise ValueError(
-            f"HiCzin standardises its covariates, but {', '.join(constant)} is "
-            "constant across the fitted pairs."
-        )
-    X = np.column_stack([np.ones(len(y)), (pair_logs - means) / sds])
-    fit = fit_zinb(y, X)
-
-    contig_weights = np.full(len(lengths), np.nan)
-    contig_weights[keep] = hiczin_contig_weights(fit.beta, means, sds, log_cov[keep])
-    normalized = y * contig_weights[ci] * contig_weights[cj]
-    positive_norm = normalized[normalized > 0]
-    cutoff = (
-        float(np.quantile(positive_norm, spurious))
-        if positive_norm.size
-        else float("nan")
-    )
-    logger.info(
-        "HiCzin fitted on %s pair(s) of contigs of one genome%s (%s with a "
-        "contact): count model %s, theta=%.4g; spurious-contact cutoff %.6g",
-        f"{len(y):,}",
-        f" sampled from {total:,}" if sampled else "",
-        f"{int(np.count_nonzero(y)):,}",
-        ", ".join(
-            f"{c}={v:.4g}"
-            for c, v in zip(["intercept", *covariates], fit.beta, strict=True)
-        ),
-        fit.theta,
-        cutoff,
-    )
-    attrs: dict[str, object] = {
-        "covariates": ["intercept", *covariates],
-        "coefficients": fit.beta,
-        "zero_inflation_coefficients": fit.gamma,
-        "theta": fit.theta,
-        "covariate_means": means,
-        "covariate_sds": sds,
-        "converged": fit.converged,
-        "min_length": int(min_length),
-        "min_signal": min_signal,
-        "coverage": f"{CONTIG_COLUMN_PREFIX}{coverage}",
-        "n_pairs_fitted": len(y),
-        "n_pairs_total": total,
-        "seed": seed if sampled else None,
-        "spurious_quantile": spurious,
-        SPURIOUS_CUTOFF_ATTR: cutoff,
-        SPURIOUS_RULE_ATTR: "<=",
-        **(found.attrs if found is not None else {}),
-        DEPENDS_ATTR: [
-            DEPENDS_ON_PIXELS,
-            DEPENDS_ON_ASSIGNMENT,
-            f"{CONTIG_COLUMN_PREFIX}{coverage}",
-            *(found.depends if found is not None else []),
-        ],
-    }
-    return _finish(
-        mc,
-        "hiczin",
-        name,
-        contig_weights[mc._bin_contig_ids],
-        attrs,
+        weights,
+        method="ice",
+        depends_on=depends,
+        parameters=parameters,
         store=store,
         force=force,
         commands=commands,

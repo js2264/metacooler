@@ -16,6 +16,7 @@ from numpy.testing import assert_allclose, assert_array_equal
 from metacooler.api import MetaCooler
 from metacooler.io import weights as W
 from metacooler.io.annotate import annotate
+from metacooler.io.clusters import write_clusters
 from metacooler.io.dump import dump_table
 from metacooler.io.network import network
 from metacooler.io.reassign import reassign
@@ -29,15 +30,46 @@ def community(tmp_path_factory) -> MetaHiC:
     return make_metahic(tmp_path_factory.mktemp("community"), seed=11)
 
 
+def _hits_from_pairs(community: MetaHiC, names: list[str]) -> np.ndarray:
+    """Hi-C hits per contig as ``metator network`` counts them: one per read
+    end, so a pair inside a contig counts twice for it."""
+    pairs = pd.read_csv(community.pairs, sep="\t", comment="#", header=None)
+    counts = pd.concat([pairs[1], pairs[3]]).value_counts()
+    return counts.reindex(names, fill_value=0).to_numpy(dtype=float)
+
+
 @pytest.fixture
 def mapfile(tmp_path: Path, community: MetaHiC) -> Path:
-    """The community map with an ICE (per genome), a MetaTOR and a NormCC weight."""
+    """The community map with three weights.
+
+    ``weight`` is ``normalize ice`` (per genome).  The other two are MetaTOR's
+    ``empirical_hit`` and ``abundance`` normalizations, computed here, outside
+    metacooler, and stored as any tool would store its own: ``1 / sqrt(hits)``
+    and ``1 / sqrt(coverage)`` for every bin of a contig.
+    """
     path = tmp_path / "map.metacool"
     shutil.copy2(community.metacool, path)
     N.normalize_ice(path)
-    N.normalize_metator(path)
-    N.normalize_metator(path, mode="abundance", coverage="cov")
-    N.normalize_normcc(path)
+    mc = MetaCooler(path)
+    contigs = mc.contigs
+    hits = _hits_from_pairs(community, contigs["name"].tolist())
+    contig_of_bin = mc._bin_contig_ids
+    W.store_weights(
+        path,
+        "empirical_hit",
+        (1 / np.sqrt(hits))[contig_of_bin],
+        method="metator",
+        depends_on=["pixels"],
+        parameters={"mode": "empirical_hit"},
+    )
+    W.store_weights(
+        path,
+        "abundance",
+        (1 / np.sqrt(contigs["cov"].to_numpy(float)))[contig_of_bin],
+        method="metator",
+        depends_on=["pixels", "contigs/cov"],
+        parameters={"mode": "abundance"},
+    )
     return path
 
 
@@ -71,21 +103,22 @@ def test_network_balances_bin_edges(tmp_path: Path, mapfile: Path):
     assert_allclose(edges["value"], expected["value"])
 
 
-def test_network_contig_edges_are_metators_network(tmp_path: Path, mapfile: Path):
+def test_network_contig_edges_are_metators_network(
+    tmp_path: Path, mapfile: Path, community: MetaHiC
+):
+    """A contig edge normalized by stored ``1 / sqrt(hits)`` weights is MetaTOR's
+    ``empirical_hit`` edge: its contacts over ``sqrt(hits_i * hits_j)``."""
     out = tmp_path / "edges.tsv"
-    network(
-        mapfile, level="contig", balance="metator_empirical_hit", out=out, header=True
-    )
+    network(mapfile, level="contig", balance="empirical_hit", out=out, header=True)
     edges = _read_tsv(out)
-    mc = MetaCooler(mapfile)
-    names = mc.contigs["name"].tolist()
-    hits = N._contig_hit_counts(mc, 1000)
+    names = MetaCooler(mapfile).contigs["name"].tolist()
+    hits = pd.Series(_hits_from_pairs(community, names), index=names)
     raw = _read_tsv(_raw_contig_edges(tmp_path, mapfile))
-    i = raw["node1"].map(names.index).to_numpy()
-    j = raw["node2"].map(names.index).to_numpy()
     merged = edges.merge(raw, on=["node1", "node2"], suffixes=("", "_raw"))
     assert len(merged) == len(raw) == len(edges)
-    assert_allclose(merged["value"], merged["value_raw"] / np.sqrt(hits[i] * hits[j]))
+    hits_1 = hits[merged["node1"]].to_numpy()
+    hits_2 = hits[merged["node2"]].to_numpy()
+    assert_allclose(merged["value"], merged["value_raw"] / np.sqrt(hits_1 * hits_2))
 
 
 def _raw_contig_edges(tmp_path: Path, mapfile: Path) -> Path:
@@ -98,10 +131,10 @@ def test_network_genome_edges_sum_the_normalized_contacts(
     tmp_path: Path, mapfile: Path
 ):
     out = tmp_path / "edges.tsv"
-    network(mapfile, level="genome", balance="metator_abundance", out=out, header=True)
+    network(mapfile, level="genome", balance="abundance", out=out, header=True)
     edges = _read_tsv(out)
     mc = MetaCooler(mapfile)
-    px = _weighted_pixels(mc, "metator_abundance")
+    px = _weighted_pixels(mc, "abundance")
     genome_of_bin = mc.contigs["genome_id"].to_numpy()[mc._bin_contig_ids]
     g1 = genome_of_bin[px["bin1_id"].to_numpy()]
     g2 = genome_of_bin[px["bin2_id"].to_numpy()]
@@ -117,94 +150,20 @@ def test_network_genome_edges_sum_the_normalized_contacts(
     assert_allclose(merged["value"], merged["value_ref"])
 
 
-def test_network_drops_spurious_contig_pairs(tmp_path: Path, mapfile: Path):
-    mc = MetaCooler(mapfile)
-    found = W.spurious_cutoff(mc, "normcc")
-    assert found is not None
-    cutoff, rule = found
-    assert rule == "<"
-    kept = tmp_path / "kept.tsv"
-    every = tmp_path / "every.tsv"
-    network(mapfile, balance="normcc", drop_spurious=True, out=kept, header=True)
-    network(mapfile, balance="normcc", out=every, header=True)
-    kept_edges, all_edges = _read_tsv(kept), _read_tsv(every)
-    inter = all_edges["node1"] != all_edges["node2"]
-    spurious = inter & (all_edges["value"] < cutoff)
-    assert spurious.any()
-    assert len(kept_edges) == len(all_edges) - int(spurious.sum())
-    kept_inter = kept_edges[kept_edges["node1"] != kept_edges["node2"]]
-    assert (kept_inter["value"] >= cutoff).all()
-
-    genome_level = tmp_path / "genomes.tsv"
-    network(
-        mapfile,
-        level="genome",
-        balance="normcc",
-        drop_spurious=True,
-        out=genome_level,
-        header=True,
-    )
-    # Genome pairs are ordered by genome id, as network writes them.
-    genome_id = dict(zip(mc.contigs["name"], mc.contigs["genome_id"], strict=True))
-    names = mc.genomes["name"].to_numpy()
-    g1 = kept_edges["node1"].map(genome_id).to_numpy()
-    g2 = kept_edges["node2"].map(genome_id).to_numpy()
-    expected = (
-        pd.DataFrame(
-            {
-                "node1": names[np.minimum(g1, g2)],
-                "node2": names[np.maximum(g1, g2)],
-                "value": kept_edges["value"],
-            }
-        )
-        .groupby(["node1", "node2"], as_index=False)["value"]
-        .sum()
-    )
-    merged = _read_tsv(genome_level).merge(expected, on=["node1", "node2"])
-    assert len(merged) == len(expected)
-    assert_allclose(merged["value_x"], merged["value_y"])
-
-
-def test_network_spurious_rule_at_the_cutoff(tmp_path: Path, mapfile: Path):
-    n = len(MetaCooler(mapfile).bins())
-    W.store_weights(
-        mapfile, "flat", np.ones(n), {"spurious_cutoff": 1.0, "spurious_rule": "<="}
-    )
-    out = tmp_path / "e.tsv"
-    network(mapfile, balance="flat", drop_spurious=True, out=out, header=True)
-    edges = _read_tsv(out)
-    inter = edges[edges["node1"] != edges["node2"]]
-    assert (inter["value"] > 1.0).all()
-
-
 def test_network_with_every_bin_masked(tmp_path: Path, mapfile: Path):
     n = len(MetaCooler(mapfile).bins())
-    W.store_weights(mapfile, "masked", np.full(n, np.nan), {"spurious_cutoff": 1.0})
-    out = tmp_path / "e.tsv"
-    network(mapfile, level="genome", balance="masked", drop_spurious=True, out=out)
-    assert out.read_text() == ""
+    W.store_weights(
+        mapfile, "masked", np.full(n, np.nan), method="x", depends_on=["pixels"]
+    )
+    for level in ("bin", "contig", "genome"):
+        out = tmp_path / f"{level}.tsv"
+        network(mapfile, level=level, balance="masked", out=out)
+        assert out.read_text() == ""
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "error", "match"),
-    [
-        ({"drop_spurious": True}, ValueError, "pass --balance"),
-        (
-            {"balance": "normcc", "drop_spurious": True, "level": "bin"},
-            ValueError,
-            "contig pairs",
-        ),
-        (
-            {"balance": "weight", "drop_spurious": True},
-            ValueError,
-            "no spurious-contact cutoff",
-        ),
-        ({"balance": "nope"}, KeyError, "No weight column"),
-    ],
-)
-def test_network_refuses(mapfile: Path, kwargs, error, match):
-    with pytest.raises(error, match=match):
-        network(mapfile, **kwargs)
+def test_network_refuses_a_missing_weight(mapfile: Path):
+    with pytest.raises(KeyError, match="No weight column 'nope'"):
+        network(mapfile, balance="nope")
 
 
 # ----------------------------------------------------------------------------
@@ -277,7 +236,7 @@ def test_dump_header_of_an_empty_selection_names_the_balanced_column(
         ps=False,
     )
     n = len(MetaCooler(path).bins())
-    W.store_weights(path, "w", np.ones(n), {})
+    W.store_weights(path, "w", np.ones(n), method="x", depends_on=["pixels"])
     out = tmp_path / "px.tsv"
     dump_table(path, "pixels", out=out, header=True, balance="w")
     assert out.read_text().strip().split("\t") == [
@@ -306,12 +265,12 @@ def test_weigh_block_multiplies_both_axes():
 
 def test_aggregate_sparse_sums_normalized_pixels(mapfile: Path):
     mc = MetaCooler(mapfile)
-    w = W.read_weights(mc, "metator_empirical_hit")
+    w = W.read_weights(mc, "empirical_hit")
     agg = _aggregate_sparse(mc, level="genome", weights=w).toarray()
     raw = _aggregate_sparse(mc, level="genome").toarray()
     assert agg.dtype == np.float64
     assert not np.allclose(agg, raw)
-    px = _weighted_pixels(mc, "metator_empirical_hit")
+    px = _weighted_pixels(mc, "empirical_hit")
     assert np.trace(agg) + np.triu(agg, 1).sum() == pytest.approx(px["value"].sum())
 
 
@@ -368,17 +327,17 @@ def test_reassign_relabel_drops_what_the_assignment_defined(
         reassign(mapfile, _table(tmp_path / "t.tsv", {"c0": "G1"}), out, layout="keep")
     columns = _bins_columns(out)
     assert "weight" not in columns  # balanced per genome
-    assert {"metator_empirical_hit", "metator_abundance", "normcc"} <= columns
+    assert {"empirical_hit", "abundance"} <= columns
     assert "Dropped normalization weight(s) 'weight'" in caplog.text
     with h5py.File(out) as f:
-        assert f["bins/normcc"].attrs["normalization"] == "normcc"
+        assert f["bins/abundance"].attrs["normalization"] == "metator"
 
 
 def test_reassign_regroup_carries_weights_with_their_attributes(
     tmp_path: Path, mapfile: Path
 ):
     source = MetaCooler(mapfile)
-    before = W.read_weights(source, "metator_empirical_hit")
+    before = W.read_weights(source, "empirical_hit")
     out = tmp_path / "regrouped.metacool"
     reassign(mapfile, _table(tmp_path / "t.tsv", {"c0": "G2"}), out)
     result = MetaCooler(out)
@@ -386,18 +345,27 @@ def test_reassign_regroup_carries_weights_with_their_attributes(
     columns = _bins_columns(out)
     assert "weight" not in columns
     with h5py.File(out) as f:
-        attrs = dict(f["bins/metator_empirical_hit"].attrs)
+        attrs = dict(f["bins/empirical_hit"].attrs)
     assert attrs["normalization"] == "metator"
     assert attrs["mode"] == "empirical_hit"
-    # The weights moved with their bins: same multiset of values.
-    after = W.read_weights(result, "metator_empirical_hit")
-    assert_allclose(np.sort(after), np.sort(before))
+    assert list(attrs["depends_on"]) == ["pixels"]
+    # The weights moved with their bins: each bin keeps its contig's weight.
+    after = W.read_weights(result, "empirical_hit")
+    old = dict(zip(source.contigs["name"], before[_first_bins(source)], strict=True))
+    new = dict(zip(result.contigs["name"], after[_first_bins(result)], strict=True))
+    assert new == pytest.approx(old)
+
+
+def _first_bins(mc: MetaCooler) -> np.ndarray:
+    """The first bin of every contig, in ``/contigs`` order."""
+    with mc.open() as grp:
+        return grp["indexes/chrom_offset"][:-1]
 
 
 def test_reassign_that_moves_nothing_keeps_every_weight(tmp_path: Path, mapfile: Path):
     out = tmp_path / "same.metacool"
     reassign(mapfile, _table(tmp_path / "t.tsv", {"c0": "G0"}), out)
-    assert "weight" in _bins_columns(out)
+    assert {"weight", "empirical_hit", "abundance"} <= _bins_columns(out)
 
 
 def test_reassign_in_place_drops_what_the_assignment_defined(
@@ -408,21 +376,48 @@ def test_reassign_in_place_drops_what_the_assignment_defined(
     )
     columns = _bins_columns(mapfile)
     assert "weight" not in columns
-    assert "metator_empirical_hit" in columns
+    assert {"empirical_hit", "abundance"} <= columns
+
+
+def test_reassign_to_a_round_drops_a_genome_scoped_ice_weight(
+    tmp_path: Path, mapfile: Path, caplog
+):
+    """A clustering round is a new assignment like any table: the per-genome
+    ICE weight goes, the weights that never read the assignment stay."""
+    rounds = {"A": ["c0", "c3", "c4", "c5"], "B": ["c1", "c2"], "C": ["c6", "c7", "c8"]}
+    write_clusters(
+        mapfile,
+        ["r"],
+        pd.DataFrame({"round": "r", "name": list(rounds)}),
+        pd.DataFrame(
+            [("r", name, c) for name, contigs in rounds.items() for c in contigs],
+            columns=["round", "cluster", "contig"],
+        ),
+    )
+    out = tmp_path / "round.metacool"
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        reassign(mapfile, output=out, round="r")
+    columns = _bins_columns(out)
+    assert "weight" not in columns
+    assert {"empirical_hit", "abundance"} <= columns
+    assert "Dropped normalization weight(s) 'weight'" in caplog.text
+    assert set(MetaCooler(out).genomes["name"]) >= {"A", "B", "C"}
 
 
 def test_annotate_drops_weights_that_read_a_changed_column(
-    tmp_path: Path, mapfile: Path
+    tmp_path: Path, mapfile: Path, caplog
 ):
     table = tmp_path / "cov.tsv"
     names = MetaCooler(mapfile).contigs["name"].tolist()
     table.write_text(
         "contig_name\tcov\n" + "".join(f"{n}\t{i + 1}\n" for i, n in enumerate(names))
     )
-    annotate(mapfile, contigs_table=table, replace=True, inplace=True)
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        annotate(mapfile, contigs_table=table, replace=True, inplace=True)
     columns = _bins_columns(mapfile)
-    assert "metator_abundance" not in columns
-    assert {"weight", "metator_empirical_hit", "normcc"} <= columns
+    assert "abundance" not in columns  # stored with depends_on contigs/cov
+    assert {"weight", "empirical_hit"} <= columns
+    assert "Dropped normalization weight(s) 'abundance'" in caplog.text
 
 
 def test_annotate_of_another_column_keeps_every_weight(tmp_path: Path, mapfile: Path):
@@ -431,14 +426,13 @@ def test_annotate_of_another_column_keeps_every_weight(tmp_path: Path, mapfile: 
     table.write_text("contig_name\tgc\n" + "".join(f"{n}\t0.5\n" for n in names))
     out = tmp_path / "annotated.metacool"
     annotate(mapfile, out, contigs_table=table)
-    assert {"weight", "metator_abundance"} <= _bins_columns(out)
+    assert {"weight", "empirical_hit", "abundance"} <= _bins_columns(out)
 
 
 def test_describe_weights_lists_every_method(mapfile: Path):
     rows = {r["name"]: r["method"] for r in W.describe_weights(MetaCooler(mapfile))}
     assert rows == {
         "weight": "ice",
-        "metator_empirical_hit": "metator",
-        "metator_abundance": "metator",
-        "normcc": "normcc",
+        "empirical_hit": "metator",
+        "abundance": "metator",
     }

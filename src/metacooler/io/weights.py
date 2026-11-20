@@ -1,21 +1,25 @@
-"""Normalization weights: the per-bin columns ``metacooler normalize`` stores.
+"""Normalization weights: per-bin columns of ``/bins``, from any tool.
 
-Every normalization metacooler offers *factorises*: the normalized value of a
-pixel is its raw count times one factor for each of its two bins,
-``raw[i, j] * w[i] * w[j]``.  That is exactly how cooler stores a balancing
-vector, so a normalization is stored the same way -- one ``float64`` column of
-``/bins``, ``NaN`` for a masked bin, multiplicative -- and a file keeps working
-in every tool that reads cooler weights (``cooler.Cooler.matrix(balance=...)``,
-``cooler dump --balanced``, cooltools, HiGlass).  Several normalizations can
-sit side by side under different names.  The pixels are never rewritten.
+A normalization that *factorises* -- the normalized value of a pixel is its
+raw count times one factor for each of its two bins, ``raw[i, j] * w[i] *
+w[j]`` -- is stored the way cooler stores a balancing vector: one ``float64``
+column of ``/bins``, ``NaN`` for a masked bin, multiplicative.  A map keeps
+working in every tool that reads cooler weights
+(``cooler.Cooler.matrix(balance=...)``, ``cooler dump --balanced``,
+cooltools, HiGlass), several normalizations sit side by side under different
+names, and the pixels are never rewritten.
 
-A weight column written by metacooler carries, as HDF5 attributes, the method
-that produced it (:data:`METHOD_ATTR`), its parameters, cooler's
-``divisive_weights=False``, and what it was computed from
-(:data:`DEPENDS_ATTR`): the pixels, and possibly the genome assignment and
-named ``/contigs`` columns.  A weight is *derived data*, like the QC block:
-the writers that change what it depends on drop it (:func:`stale_weights`)
-rather than leave a file whose normalized values no longer mean anything.
+``metacooler normalize ice`` stores its weights here, and so can any other
+tool: :func:`store_weights` writes a weight column, :func:`read_weights`
+reads one back -- what ``show``, ``dump`` and ``network --balance`` do.
+
+A weight column carries, as HDF5 attributes, the method that produced it
+(:data:`METHOD_ATTR`), its parameters, cooler's ``divisive_weights=False``,
+the metacooler version that stored it, and what it was computed from
+(:data:`DEPENDS_ATTR`): the pixels, the genome assignment, named ``/contigs``
+columns.  A weight is *derived data*, like the QC block: the writers that
+change what it depends on drop it (:func:`drop_stale_weights`) rather than
+leave a map whose normalized values no longer mean anything.
 
 This module is the single place that reads and writes those columns.
 """
@@ -31,6 +35,7 @@ from typing import TYPE_CHECKING
 import h5py
 import numpy as np
 
+from metacooler._version import __version__
 from metacooler.io._utils import write_column
 
 if TYPE_CHECKING:
@@ -47,16 +52,19 @@ BIN_COORDINATE_COLUMNS = ("chrom", "start", "end")
 #: column cooler would silently invert.
 DIVISIVE_WEIGHT_NAMES = frozenset({"KR", "VC", "VC_SQRT"})
 
-#: Attribute naming the metacooler method that wrote a column (``ice``,
-#: ``metator``, ``mge``, ``normcc``, ``hiczin``).  A weight column without it
-#: was written by another tool, typically ``cooler balance``.
+#: Attribute naming the method that produced a column: ``ice``, or the name
+#: the tool that stored it gave.  A weight column without it was written by
+#: another route, typically ``cooler balance``.
 METHOD_ATTR = "normalization"
 
 #: Attribute listing what a weight was computed from, so that a later edit of
-#: the file can tell whether it still holds (see :func:`stale_weights`).
+#: the map can tell whether it still holds (see :func:`stale_weights`).
 DEPENDS_ATTR = "depends_on"
 
-#: :data:`DEPENDS_ATTR` entry for the pixel table.  Every weight has it.
+#: Attribute recording the metacooler version that stored a column.
+VERSION_ATTR = "metacooler_version"
+
+#: :data:`DEPENDS_ATTR` entry for the pixel table.
 DEPENDS_ON_PIXELS = "pixels"
 
 #: :data:`DEPENDS_ATTR` entry for the contig-to-genome assignment
@@ -68,11 +76,11 @@ DEPENDS_ON_ASSIGNMENT = "genome_id"
 #: read, e.g. ``contigs/Shotgun_coverage``.
 CONTIG_COLUMN_PREFIX = "contigs/"
 
-#: Attributes recording a spurious-contact cutoff (NormCC, HiCzin): contig
-#: pairs whose normalized contact is below it -- or at it, under the ``<=``
-#: rule -- are deemed spurious.
-SPURIOUS_CUTOFF_ATTR = "spurious_cutoff"
-SPURIOUS_RULE_ATTR = "spurious_rule"
+#: Attributes :func:`store_weights` writes itself, which a method's parameters
+#: cannot take over.
+RESERVED_WEIGHT_ATTRS = frozenset(
+    {METHOD_ATTR, DEPENDS_ATTR, VERSION_ATTR, "divisive_weights"}
+)
 
 
 def check_weight_name(name: str) -> None:
@@ -100,6 +108,81 @@ def check_weight_name(name: str) -> None:
             f"(raw / (w_i * w_j)), but metacooler writes multiplicative weights; "
             "pick another name."
         )
+
+
+def check_depends_on(
+    depends_on: str | Iterable[str], contig_columns: Iterable[str]
+) -> list[str]:
+    """Validate the :data:`DEPENDS_ATTR` entries of a weight about to be stored.
+
+    An entry is ``pixels``, ``genome_id`` (the contig-to-genome assignment) or
+    ``contigs/<column>``, naming a column stored in the map's ``/contigs``.  A
+    typo would leave a weight no edit can invalidate, so anything else is
+    refused, as is a column the map does not hold -- a user's column named
+    ``genome``, say, is stored as ``user_genome``.  ``pixels`` is not
+    required: a weight computed from a coverage column alone depends on that
+    column only.
+
+    Args:
+        depends_on: The entries, in any order (repeats are dropped), or a
+            single entry.
+        contig_columns: The columns of the map's ``/contigs``.
+
+    Returns:
+        The entries, without repeats, in the order given.
+
+    Raises:
+        ValueError: If there is no entry, or an entry is none of the above.
+    """
+    if isinstance(depends_on, str):
+        depends_on = [depends_on]
+    entries = list(dict.fromkeys(str(entry) for entry in depends_on))
+    if not entries:
+        raise ValueError(
+            "depends_on must name what the weights were computed from: "
+            "'pixels', 'genome_id' or 'contigs/<column>'."
+        )
+    columns = [c for c in contig_columns if c != "genome_id"]
+    bad = []
+    for entry in entries:
+        if entry in (DEPENDS_ON_PIXELS, DEPENDS_ON_ASSIGNMENT):
+            continue
+        column = entry.removeprefix(CONTIG_COLUMN_PREFIX)
+        if column == "genome_id":
+            raise ValueError(
+                "Name the genome assignment as 'genome_id' in depends_on, not "
+                "'contigs/genome_id': that is the entry a reassignment drops a "
+                "weight for."
+            )
+        if column == entry or column not in columns:
+            bad.append(entry)
+    if bad:
+        raise ValueError(
+            f"depends_on entries must be 'pixels', 'genome_id' or "
+            f"'contigs/<column>' naming a stored /contigs column; got "
+            f"{', '.join(repr(b) for b in bad)}. Stored /contigs columns: "
+            f"{', '.join(columns) or 'none'}."
+        )
+    return entries
+
+
+def weight_attributes(
+    method: str,
+    depends_on: Sequence[str],
+    parameters: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """The attributes :func:`store_weights` writes with a weight column.
+
+    ``None`` parameters are left out.
+    """
+    attrs: dict[str, object] = {
+        METHOD_ATTR: method,
+        DEPENDS_ATTR: list(depends_on),
+        "divisive_weights": False,
+    }
+    attrs.update({k: v for k, v in (parameters or {}).items() if v is not None})
+    attrs[VERSION_ATTR] = __version__
+    return attrs
 
 
 def weight_columns(bins: h5py.Group) -> list[str]:
@@ -140,11 +223,19 @@ def _decoded(value: object) -> object:
     return value
 
 
+def _open_map(source: MetaCooler | str | Path) -> MetaCooler:
+    """*source* as an open map: a ``MetaCooler`` as it is, a URI opened."""
+    from metacooler.api import MetaCooler
+
+    return source if isinstance(source, MetaCooler) else MetaCooler(source)
+
+
 def depends_on(dataset: h5py.Dataset) -> set[str]:
     """Return the :data:`DEPENDS_ATTR` entries of a weight column.
 
-    A column metacooler did not write has none, and is treated as depending on
-    the pixels alone -- what ``cooler balance`` computes from.
+    A column without the attribute -- one ``cooler balance`` wrote -- is
+    treated as depending on the pixels alone, what ``cooler balance``
+    computes from.
     """
     raw = _decoded(dataset.attrs.get(DEPENDS_ATTR))
     if raw is None:
@@ -210,8 +301,8 @@ def warn_dropped_weights(names: Sequence[str], why: str) -> None:
     if names:
         logger.warning(
             "Dropped normalization weight(s) %s: they were computed from %s, "
-            "which this edit changed. Re-run 'metacooler normalize' to "
-            "recompute them.",
+            "which this edit changed. Recompute them: 'metacooler normalize "
+            "ice' for an ICE weight, or the tool that stored them.",
             ", ".join(repr(n) for n in names),
             why,
         )
@@ -236,34 +327,83 @@ def restore_weight_attrs(bins: h5py.Group, attrs: Mapping[str, Mapping]) -> None
 
 
 def store_weights(
-    path: str | Path,
+    uri: str | Path,
     name: str,
     weights: np.ndarray,
-    attrs: Mapping[str, object],
     *,
-    group_path: str = "/",
+    method: str,
+    depends_on: str | Sequence[str],
+    parameters: Mapping[str, object] | None = None,
     force: bool = False,
     commands: Sequence[str] = (),
 ) -> None:
-    """Write one weight column into ``/bins`` of an existing map, in place.
+    """Store a normalization as a weight column of a map's ``/bins``, in place.
+
+    The way any tool -- a binner, a normalization of its own -- puts a
+    normalization in a map: ``show``, ``dump`` and ``network --balance NAME``
+    then read it, as cooler, cooltools and HiGlass read ``/bins/NAME``.  The
+    normalized value of a pixel is ``raw * weights[bin1] * weights[bin2]``.
+
+    *depends_on* is what lets the map keep the column honest: ``reassign``
+    drops a weight that lists ``genome_id`` when it moves a contig, and
+    ``annotate`` one that lists a ``/contigs`` column it changes.  A weight
+    computed from a coverage column, say, must name that column, or it would
+    outlive the values it was computed from.
 
     Args:
-        path: The metacool file.
-        name: Column name (see :func:`check_weight_name`).
+        uri: ``file.metacool`` or ``file.mmetacool::entries/<name>``.
+        name: The ``/bins`` column (see :func:`check_weight_name`).
         weights: One multiplicative weight per bin, ``NaN`` for a masked bin.
-        attrs: Attributes for the column; ``None`` values are left out.
-        group_path: HDF5 group of the map, for an mmetacool entry.
+        method: The normalization's name, stored as the ``normalization``
+            attribute.
+        depends_on: What the weights were computed from: ``pixels``,
+            ``genome_id`` (the contig-to-genome assignment) and
+            ``contigs/<column>`` for each ``/contigs`` column read (see
+            :func:`check_depends_on`).
+        parameters: The method's own values -- a mode, the tool's version --
+            stored as attributes of the column; ``None`` values are left out.
         force: Replace a column of that name if there is one.
         commands: Command lines to append to ``metadata["commands"]``.
 
     Raises:
-        ValueError: If *name* is not a valid weight name, *weights* does not
-            have one value per bin, or the column exists and *force* is not set.
+        ValueError: If *name* cannot hold a weight column, or is taken and
+            *force* is not set; if *method* is empty; if *depends_on* is not
+            valid; if a parameter takes the name of an attribute this function
+            writes; or if *weights* does not hold one value per bin.
+
+    Example:
+        A tool normalizing each contig by its Hi-C hits, as MetaTOR's
+        ``empirical_hit`` does, stores ``1 / sqrt(hits)`` for every bin of
+        the contig::
+
+            metacooler.store_weights(
+                "map.metacool",
+                "empirical_hit",
+                weights,
+                method="metator",
+                depends_on=["pixels"],
+                parameters={"mode": "empirical_hit"},
+            )
+
+        and ``metacooler network map.metacool --balance empirical_hit``
+        gives its normalized contig network.
     """
     check_weight_name(name)
+    if not isinstance(method, str) or not method.strip():
+        raise ValueError("method must name the normalization the weights are.")
+    params = dict(parameters or {})
+    taken = sorted(RESERVED_WEIGHT_ATTRS & params.keys())
+    if taken:
+        raise ValueError(
+            f"Parameter name(s) {', '.join(repr(k) for k in taken)} are attributes "
+            "store_weights writes itself; rename them."
+        )
     values = np.asarray(weights, dtype=np.float64)
-    with h5py.File(path, "r+") as f:
-        grp = f[group_path.strip("/")] if group_path.strip("/") else f
+    from metacooler.api import MetaCooler
+
+    mc = MetaCooler(uri)
+    with mc.open("r+") as grp:
+        entries = check_depends_on(depends_on, grp["contigs"].keys())
         bins = grp["bins"]
         n_bins = int(bins["start"].shape[0])
         if values.shape != (n_bins,):
@@ -274,15 +414,14 @@ def store_weights(
         if name in bins:
             if not force:
                 raise ValueError(
-                    f"/bins/{name} already exists in {path}. Pass --force to "
-                    "replace it, or --name to store this normalization beside it."
+                    f"/bins/{name} already exists in {mc.uri}: store these "
+                    "weights under another name, or replace that column with "
+                    "force=True."
                 )
             del bins[name]
         dataset = write_column(bins, name, values)
-        dataset.attrs["divisive_weights"] = False
-        for key, value in attrs.items():
-            if value is not None:
-                dataset.attrs[key] = _attr_value(value)
+        for key, value in weight_attributes(method, entries, params).items():
+            dataset.attrs[key] = _attr_value(value)
         if commands:
             raw = grp.attrs.get("metadata", "{}")
             if isinstance(raw, bytes):
@@ -292,21 +431,24 @@ def store_weights(
             grp.attrs["metadata"] = json.dumps(metadata)
 
 
-def read_weights(mc: MetaCooler, name: str) -> np.ndarray:
+def read_weights(source: MetaCooler | str | Path, name: str) -> np.ndarray:
     """Return a map's weight column as multiplicative weights, one per bin.
 
     A column cooler reads as divisive (:data:`DIVISIVE_WEIGHT_NAMES`, or one
     whose ``divisive_weights`` attribute is true) is inverted, so the result
-    always means ``normalized = raw * w[i] * w[j]``.  Masked bins are ``NaN``.
+    always means ``normalized = raw * w[bin1] * w[bin2]``.  Masked bins are
+    ``NaN``.
 
     Args:
-        mc: The open map.
+        source: ``file.metacool``, ``file.mmetacool::entries/<name>``, or an
+            open ``MetaCooler``.
         name: The ``/bins`` column.
 
     Raises:
         KeyError: If the map has no such weight column.
         ValueError: If the column does not hold one number per bin.
     """
+    mc = _open_map(source)
     with mc.open() as grp:
         bins = grp["bins"]
         node = bins.get(name) if name not in BIN_COORDINATE_COLUMNS else None
@@ -315,7 +457,8 @@ def read_weights(mc: MetaCooler, name: str) -> np.ndarray:
             listing = ", ".join(available) if available else "none"
             raise KeyError(
                 f"No weight column {name!r} in /bins of {mc.uri} (weight columns: "
-                f"{listing}). Compute one with 'metacooler normalize'."
+                f"{listing}). Compute one with 'metacooler normalize ice', or "
+                "store another tool's with metacooler.store_weights."
             )
         n_bins = int(bins["start"].shape[0])
         if node.dtype.kind not in "fiu" or node.shape != (n_bins,):
@@ -334,36 +477,21 @@ def read_weights(mc: MetaCooler, name: str) -> np.ndarray:
     return values
 
 
-def spurious_cutoff(mc: MetaCooler, name: str) -> tuple[float, str] | None:
-    """Return the spurious-contact cutoff stored with a weight column, if any.
-
-    Returns:
-        ``(cutoff, rule)`` -- a contig pair whose normalized contact is below
-        the cutoff (rule ``"<"``) or at most the cutoff (rule ``"<="``) is
-        spurious -- or ``None`` if the method records no cutoff.
-    """
-    with mc.open() as grp:
-        node = grp["bins"].get(name)
-        if not isinstance(node, h5py.Dataset):
-            return None
-        cutoff = node.attrs.get(SPURIOUS_CUTOFF_ATTR)
-        rule = _decoded(node.attrs.get(SPURIOUS_RULE_ATTR, "<"))
-    if cutoff is None:
-        return None
-    return float(cutoff), str(rule)
-
-
-def describe_weights(mc: MetaCooler) -> list[dict[str, object]]:
+def describe_weights(source: MetaCooler | str | Path) -> list[dict[str, object]]:
     """Describe every weight column of a map: name, method, and attributes.
+
+    Args:
+        source: ``file.metacool``, ``file.mmetacool::entries/<name>``, or an
+            open ``MetaCooler``.
 
     Returns:
         One dict per weight column, in ``/bins`` order, with ``name``,
-        ``method`` (``None`` for a column metacooler did not write),
-        ``n_masked`` (bins whose weight is ``NaN``) and ``attrs`` (every
-        attribute, decoded).
+        ``method`` (``None`` for a column without a ``normalization``
+        attribute), ``n_masked`` (bins whose weight is ``NaN``) and ``attrs``
+        (every attribute, decoded).
     """
     rows: list[dict[str, object]] = []
-    with mc.open() as grp:
+    with _open_map(source).open() as grp:
         bins = grp["bins"]
         for name in weight_columns(bins):
             node = bins[name]

@@ -103,20 +103,19 @@ A normalization is stored as cooler stores a balancing vector: one `float64`
 column of `/bins`, one **multiplicative** weight per bin, `NaN` for a masked
 bin. The normalized value of a pixel is `count × w[bin1_id] × w[bin2_id]`, which
 is what `cooler.Cooler.matrix(balance=NAME)` computes. Several columns may
-coexist; `metacooler normalize` writes them (`weight` for ICE, by default) and
-`show`, `dump` and `network --balance NAME` read them. Pixels are never
-rewritten.
+coexist. `metacooler normalize ice` writes one (`weight`, by default), any
+other tool stores its own with `metacooler.store_weights`, and `show`, `dump`
+and `network --balance NAME` read them. Pixels are never rewritten.
 
-A column metacooler wrote carries HDF5 attributes:
+A column written by `normalize ice` or `store_weights` carries HDF5 attributes:
 
 | Attribute | Description |
 |-----------|-------------|
-| `normalization` | The method: `ice`, `metator`, `mge`, `normcc` or `hiczin`. |
+| `normalization` | The method: `ice`, or the name the writer gave its own (`store_weights(method=...)`). |
 | `divisive_weights` | Always `false`, as `cooler balance` writes it. |
-| `depends_on` | What the weights were computed from: `pixels`, plus `genome_id` for a weight computed per genome (or fitted on the pairs of contigs of one genome), plus `contigs/<column>` for every `/contigs` column read (a coverage, a site count). |
-| `spurious_cutoff`, `spurious_rule` | NormCC and HiCzin: a contig pair whose normalized contact is below the cutoff (`<`) or at most the cutoff (`<=`) is spurious. |
-| *parameters* | The method's parameters and fit statistics: `scope`, `mode`, `converged`, `coefficients`, … |
-| `metacooler_version` | The version that computed them. |
+| `depends_on` | What the weights were computed from, a list of: `pixels`; `genome_id`, the contig-to-genome assignment, for a weight computed per genome (or fitted on the pairs of contigs of one genome); `contigs/<column>` for each `/contigs` column read (a coverage, a site count). `normalize ice` writes `pixels`, plus `genome_id` at its default `genome` scope. |
+| *parameters* | The method's parameters and fit statistics — for `ice`: `scope`, `ignore_diags`, `mad_max`, `converged`, `var`, … — or the writer's own (`store_weights(parameters=...)`). |
+| `metacooler_version` | The version that stored them. |
 
 A column without these attributes — one `cooler balance` wrote — is read as
 depending on the pixels alone. Names cooler reads as divisive (`KR`, `VC`,
