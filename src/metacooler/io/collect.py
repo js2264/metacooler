@@ -41,6 +41,7 @@ from metacooler.io._utils import (
     check_ascii_names,
     check_output_not_an_input,
     chrom_codes,
+    drop_dump_columns,
     read_user_table,
     rename_key_columns,
     report_unmatched_rows,
@@ -54,6 +55,7 @@ from metacooler.io.colspec import (
     CONTIG_METADATA_FORMAT_DEFAULT,
     CONTIGS_FORMAT_ALIASES,
     GENOMES_FORMAT_DEFAULT,
+    dumped_table,
     parse_column_spec,
     resolve_column_spec,
 )
@@ -589,8 +591,9 @@ def _read_contig_metadata(
     The table is a TSV whose contig-name column *fmt* names (by default the
     column called ``contig_name``).  An optional genome column says which
     genome each row describes: the second column of a two-column *fmt*, or
-    else the header column called ``genome_name``.  Every other column is
-    metadata.
+    else the header column called ``genome_name`` -- or ``genome``, in a
+    table ``dump -t contigs -H`` wrote, whose computed columns (``length``,
+    the QC columns) are left out.  Every other column is metadata.
 
     Args:
         path: The table.
@@ -623,6 +626,9 @@ def _read_contig_metadata(
     if path.stat().st_size == 0:
         raise ValueError(f"Contigs table is empty: {path}")
     table = read_user_table(path, kind="Contigs table", header=spec.header)
+    dump = spec.header and dumped_table(table.columns) == "contigs"
+    if dump:
+        table = drop_dump_columns(table, "contigs", kind="Contigs table", path=path)
     positions = resolve_column_spec(
         spec, list(table.columns), kind="Contigs table", path=path, keys=ASSIGNMENT_KEYS
     )
@@ -636,8 +642,10 @@ def _read_contig_metadata(
         # The optional genome column is found by its header name, as it always
         # was; it is a check, so a table without one simply skips it.
         labels = [str(column) for column in table.columns]
-        if "genome_name" in labels and labels.index("genome_name") != contig_col:
-            keys[labels.index("genome_name")] = "genome_name"
+        for name in ("genome_name", "genome") if dump else ("genome_name",):
+            if name in labels and labels.index(name) != contig_col:
+                keys[labels.index(name)] = "genome_name"
+                break
     # Positional, never by name: see rename_key_columns.
     table = rename_key_columns(table, keys, kind="Contigs table")
     _type_contig_metadata(table, keys=("contig_name", "genome_name"))

@@ -1378,29 +1378,162 @@ def _filter_by_genomes_and_contigs(
     return selected
 
 
-def contigs_with_genome_names(mc: MetaCooler) -> pd.DataFrame:
-    """The ``/contigs`` table with a ``genome`` column holding the genome *name*.
+#: The key column of each table as ``dump`` prints it and ``--filter`` reads
+#: it: a contig by its name, a genome by its name, a contig's genome by the
+#: genome's name -- never by the row numbers the file stores them under.
+CONTIG_KEY = "contig"
+GENOME_KEY = "genome"
+#: The keys each table is shown under, besides its own columns.
+TABLE_KEYS: dict[str, tuple[str, ...]] = {
+    "contigs": (CONTIG_KEY, GENOME_KEY),
+    "genomes": (GENOME_KEY,),
+}
 
-    ``/contigs`` stores only the integer ``genome_id``, but a filter is written
-    against names (``contigs.genome == MAG_01``), and ``create`` evaluates the
-    same expressions before any id exists.  Deriving the column here is what
-    makes the filter language identical on both sides.
 
-    A contig table that already carries its own ``genome`` column keeps it:
-    ``genome`` is not one of ``_CONTIGS_RESERVED_COLUMNS``, so a user column of
-    that name survives creation verbatim, and overwriting it here would filter
-    on something other than what ``dump`` prints.
+def shown_names(columns: Iterable[object], table: str) -> dict[str, str]:
+    """``{stored name: shown name}`` for the stored columns that take a key's name.
+
+    A map written before ``contig`` and ``genome`` were reserved may store a
+    user column of either name. Where ``dump`` and ``--filter`` show *table*,
+    that column takes the name ``create`` now stores it under,
+    ``user_<name>`` -- with one more ``user_`` while that is taken too --
+    so the key keeps its meaning. ``annotate`` reads the same names back.
 
     Args:
-        mc: Open ``MetaCooler`` instance.
+        columns: The table's stored column names, in order.
+        table: ``"contigs"`` or ``"genomes"``.
 
     Returns:
-        The contigs table, with a ``genome`` column.
+        The renamed columns only: empty for a map written since.
     """
-    contigs = mc.contigs
-    if "genome" in contigs.columns:
-        return contigs
-    return contigs.assign(genome=contigs["genome_id"].map(mc.genomes["name"]))
+    keys = TABLE_KEYS[table]
+    taken = {str(c) for c in columns} | set(keys)
+    shown: dict[str, str] = {}
+    for column in map(str, columns):
+        if column in keys:
+            new = f"user_{column}"
+            while new in taken:
+                new = f"user_{new}"
+            taken.add(new)
+            shown[column] = new
+    return shown
+
+
+def contigs_view(
+    contigs: pd.DataFrame, genome_names: pd.Series | np.ndarray
+) -> pd.DataFrame:
+    """``/contigs`` keyed by name: ``contig``, ``genome``, ``length``, the rest.
+
+    The table as ``dump -t contigs`` prints it and ``--filter contigs.*``
+    reads it: the contig's name, its genome's name (not the ``genome_id`` row
+    number), its length, then every other stored column, in order, a stored
+    column of a key's name shown as :func:`shown_names` says. Built from the
+    stored columns themselves, which pandas shares rather than copies: no
+    name is turned into a Python object.
+
+    Args:
+        contigs: ``/contigs`` as stored (``MetaCooler.contigs``, or the table
+            ``create`` is about to write).
+        genome_names: ``/genomes/name``, by genome id.
+
+    Returns:
+        A new frame, indexed as *contigs* (by contig id).
+    """
+    genome = (
+        pd.Series(genome_names)
+        .reset_index(drop=True)
+        .iloc[contigs["genome_id"].to_numpy(np.int64)]
+        .set_axis(contigs.index)
+    )
+    view = contigs.drop(columns=["name", "genome_id"]).rename(
+        columns=shown_names(contigs.columns, "contigs")
+    )
+    view.insert(0, CONTIG_KEY, contigs["name"])
+    view.insert(1, GENOME_KEY, genome)
+    return view
+
+
+def genomes_view(genomes: pd.DataFrame) -> pd.DataFrame:
+    """``/genomes`` keyed by name: ``genome``, then every other stored column.
+
+    The table as ``dump -t genomes`` prints it and ``--filter genomes.*``
+    reads it, a stored ``genome`` column shown as :func:`shown_names` says.
+
+    Args:
+        genomes: ``/genomes`` as stored, or the table ``create`` is about to
+            write.
+
+    Returns:
+        A new frame, indexed as *genomes* (by genome id).
+    """
+    view = genomes.drop(columns="name").rename(
+        columns=shown_names(genomes.columns, "genomes")
+    )
+    view.insert(0, GENOME_KEY, genomes["name"])
+    return view
+
+
+def contigs_filter_frame(
+    contigs: pd.DataFrame, genome_names: pd.Series | np.ndarray
+) -> pd.DataFrame:
+    """What ``--filter contigs.*`` reads: :func:`contigs_view`, plus ``name``
+    and ``genome_id`` as stored, so a filter written for a map's own columns
+    (``contigs.name``) keeps working."""
+    return contigs_view(contigs, genome_names).assign(
+        name=contigs["name"], genome_id=contigs["genome_id"]
+    )
+
+
+def genomes_filter_frame(genomes: pd.DataFrame) -> pd.DataFrame:
+    """What ``--filter genomes.*`` reads: :func:`genomes_view`, plus ``name``
+    as stored (see :func:`contigs_filter_frame`)."""
+    return genomes_view(genomes).assign(name=genomes["name"])
+
+
+#: The columns ``dump`` computes from the map, besides the keys: a dump read
+#: back keeps none of them, since they are the map's to compute.
+_DUMP_COMPUTED = {
+    "contigs": frozenset({"length"}),
+    "genomes": frozenset({"length", "n_contigs", "n_bins"}),
+}
+
+
+def drop_dump_columns(
+    frame: pd.DataFrame, table: str, *, kind: str, path: str | Path
+) -> pd.DataFrame:
+    """A table that ``dump -H`` wrote, without the columns ``dump`` computed.
+
+    ``length``, ``n_contigs``, ``n_bins`` and the QC columns are the map's to
+    compute: read back as metadata, they would only be stored again under
+    ``user_`` names. The keys and every other column -- the user's metadata,
+    under the names it is stored under -- are kept.
+
+    Args:
+        frame: The table as read.
+        table: Which dump it is, ``"contigs"`` or ``"genomes"`` (see
+            :func:`metacooler.io.colspec.dumped_table`).
+        kind: Human-readable table name, for the log.
+        path: The table, for the log.
+
+    Returns:
+        *frame* without those columns.
+    """
+    from metacooler.qc import is_qc_column
+
+    computed = [
+        column
+        for column in frame.columns
+        if str(column) in _DUMP_COMPUTED[table] or is_qc_column(table, str(column))
+    ]
+    if computed:
+        logger.info(
+            "%s %s is a dump: its column(s) %s are computed from the map, and not "
+            "read.",
+            kind,
+            path,
+            ", ".join(repr(str(c)) for c in computed),
+        )
+    return frame.drop(columns=computed)
 
 
 def resolve_contig_selection(
@@ -1445,7 +1578,8 @@ def resolve_contig_selection(
     if not named and not parsed:
         return None
 
-    all_contigs = contigs_with_genome_names(mc)
+    all_genomes = genomes_filter_frame(mc.genomes)
+    all_contigs = contigs_filter_frame(mc.contigs, mc.genomes["name"])
     if named:
         selected = _filter_by_genomes_and_contigs(mc, genomes=genomes, contigs=contigs)
     else:
@@ -1453,7 +1587,6 @@ def resolve_contig_selection(
     if not parsed:
         return selected
 
-    all_genomes = mc.genomes
     keep_genome_ids = set(
         all_genomes.index[filter_mask(all_genomes, parsed, table="genomes")]
     )

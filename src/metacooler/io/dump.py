@@ -14,9 +14,11 @@ from metacooler.api import MetaCooler, _merge_ranges, _ranges_to_ids
 from metacooler.io._utils import (
     check_output_path,
     chrom_codes,
+    contigs_view,
+    genomes_view,
     resolve_contig_selection,
 )
-from metacooler.schema import DENSE_MATRIX_BIN_LIMIT
+from metacooler.schema import CLUSTER_DUMP_KEYS, DENSE_MATRIX_BIN_LIMIT
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -89,7 +91,17 @@ def _selected_pixels(
 
 def dump_table(
     uri: str | Path,
-    table: Literal["bins", "chroms", "contigs", "genomes", "pixels", "indexes", "all"],
+    table: Literal[
+        "bins",
+        "chroms",
+        "contigs",
+        "genomes",
+        "pixels",
+        "indexes",
+        "clusters",
+        "members",
+        "all",
+    ],
     genomes: list[str] | None = None,
     contigs: list[str] | None = None,
     filters: list[str] | None = None,
@@ -148,6 +160,8 @@ def dump_table(
         # ``chroms`` is intentionally omitted: it is the cooler soft-link alias
         # of ``contigs[["name", "length"]]`` and would duplicate the contigs file.
         tables = ("genomes", "contigs", "bins", "pixels", "indexes")
+        if mc.cluster_rounds:
+            tables += ("clusters", "members")
         # Guard every destination up front so a clash on the last table does
         # not leave the first four already overwritten.
         for tbl in tables:
@@ -196,22 +210,34 @@ def dump_table(
         if selected_contig_ids is not None:
             df = df.loc[df.index.isin(selected_contig_ids)]
     elif table == "contigs":
-        df = mc.contigs.copy()
+        # Keyed by name: contig, genome (its name, not the row number the
+        # file stores), length, then every other column.
+        df = contigs_view(mc.contigs, mc.genomes["name"])
         if selected_contig_ids is not None:
             df = df.loc[df.index.isin(selected_contig_ids)]
-        # Surface the genome/MAG name alongside the internal integer genome_id.
-        df["genome"] = df["genome_id"].map(mc.genomes["name"])
-        core = ["name", "length", "genome", "genome_id"]
-        extras = [c for c in df.columns if c not in core]
-        df = df[core + extras]
     elif table == "genomes":
-        df = mc.genomes
+        df = genomes_view(mc.genomes)
         if selected_contig_ids is not None:
             sel_genome_ids = set(mc.contigs.loc[list(selected_contig_ids), "genome_id"])
             df = df.loc[df.index.isin(sel_genome_ids)]
-        core = ["name", "length", "n_contigs"]
-        extras = [c for c in df.columns if c not in core]
-        df = df[core + extras]
+    elif table in ("clusters", "members"):
+        # The clustering rounds: every cluster, or every membership, that
+        # holds a selected contig -- found through the contig index, so a
+        # selection reads its own memberships only.
+        if selected_contig_ids is None:
+            df = mc.cluster_members() if table == "members" else mc.clusters
+            df = df.rename(columns=CLUSTER_DUMP_KEYS)
+        else:
+            contig_ids = np.array(sorted(selected_contig_ids), dtype=np.int64)
+            cluster_ids, counts = mc._memberships_of(contig_ids)
+            if table == "members":
+                # In the order of the stored members: cluster, then contig.
+                contig_ids = np.repeat(contig_ids, counts)
+                order = np.lexsort((contig_ids, cluster_ids))
+                df = mc._name_memberships(cluster_ids[order], contig_ids[order])
+            else:
+                df = mc._clusters_of(np.unique(cluster_ids))
+                df = df.rename(columns=CLUSTER_DUMP_KEYS)
     elif table == "pixels":
         # Pre-compute filter parameters that are independent of chunk
         valid_bin_ids: np.ndarray | None = None

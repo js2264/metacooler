@@ -27,6 +27,10 @@ def cmd_tree(metacool_path: str, verbose: bool, quiet: bool) -> None:
 
     file_path, group_path = parse_uri(metacool_path)
 
+    # The groups of a map, in this order; chroms is a shim (soft link to
+    # contigs) and is omitted. clusters is optional.
+    _MAP_GROUPS = ("genomes", "contigs", "bins", "pixels", "indexes", "clusters")
+
     def _build_tree(name: str, obj, parent: Tree) -> None:
         if isinstance(obj, h5py.Group):
             node = parent.add(f"[bold]{name}/[/bold]")
@@ -43,7 +47,7 @@ def cmd_tree(metacool_path: str, verbose: bool, quiet: bool) -> None:
         if group_path != "/":
             # URI points to a specific entry — show its tree
             entry = f[group_path]
-            for key in ("genomes", "contigs", "bins", "pixels", "indexes"):
+            for key in _MAP_GROUPS:
                 if key in entry:
                     _build_tree(key, entry[key], tree)
         elif is_mmetacooler(file_path):
@@ -53,13 +57,12 @@ def cmd_tree(metacool_path: str, verbose: bool, quiet: bool) -> None:
                 for entry_name in f["entries"]:
                     entry_node = entries_node.add(f"[bold]{entry_name}/[/bold]")
                     entry = f["entries"][entry_name]
-                    for key in ("genomes", "contigs", "bins", "pixels", "indexes"):
+                    for key in _MAP_GROUPS:
                         if key in entry:
                             _build_tree(key, entry[key], entry_node)
         elif is_metacooler(file_path):
-            # Metacool file: show core tables in fixed order.
-            # chroms is a shim (soft link to contigs) and is omitted.
-            for key in ("genomes", "contigs", "bins", "pixels", "indexes"):
+            # Metacool file: show its groups in a fixed order.
+            for key in _MAP_GROUPS:
                 if key in f:
                     _build_tree(key, f[key], tree)
         else:

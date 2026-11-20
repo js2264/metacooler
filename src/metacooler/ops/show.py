@@ -349,11 +349,11 @@ def _apply_filters(
         filter_mask,
         parse_filters,
     )
-    from metacooler.io._utils import contigs_with_genome_names
+    from metacooler.io._utils import contigs_filter_frame, genomes_filter_frame
 
     parsed = parse_filters(filters)
-    genomes_df = mc.genomes
-    contigs_df = contigs_with_genome_names(mc)
+    genomes_df = genomes_filter_frame(mc.genomes)
+    contigs_df = contigs_filter_frame(mc.contigs, mc.genomes["name"])
     kept_genomes = set(
         genomes_df.loc[filter_mask(genomes_df, parsed, table="genomes"), "name"]
     )

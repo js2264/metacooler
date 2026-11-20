@@ -40,6 +40,7 @@ file.metacool  (HDF5)
 ├── /bins       ← genomic bins
 ├── /pixels     ← contacts
 ├── /indexes    ← fast-access offset arrays
+├── /clusters   ← optional: the clustering rounds that led to /genomes
 └── /chroms     → soft link to /contigs               ← cooler compat
 ```
 
@@ -54,7 +55,7 @@ One row per genome / MAG.
 | `n_contigs` | `int32` | Number of contigs assigned to this genome. |
 | `n_bins` | `int64` | Number of bins across all contigs of this genome. |
 | `qc_*` | `int64` / `float64` | Optional per-genome contact-quality columns (see [Contact-quality block](#qc-block)). Present when the file was created with `--qc` (the default) or annotated with `metacooler qc --store`. |
-| *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`), at creation or later with `metacooler annotate`. Stored as fixed-length bytes or numeric arrays. |
+| *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`), at creation or later with `metacooler annotate`. Stored as fixed-length bytes or numeric arrays. A column called `genome` is stored as `user_genome`: `genome` is the key `dump` prints this table under. |
 
 The row *set* is derived from the contig-to-genome assignments: one row per
 distinct genome name in `/contigs`. A `--genomes` metadata table only supplies
@@ -78,7 +79,7 @@ link `/chroms → /contigs` makes it transparent to the cooler ecosystem.
 | `length` | `int32` | Contig length in bp. |
 | `genome_id` | `int32` | Zero-based index into `/genomes`. |
 | `qc_intra_contig_short`, `qc_intra_contig_long` | `int64` / `float64` | Optional per-contig contact-quality columns (see [Contact-quality block](#qc-block)), present whenever the `metadata["qc"]` block was stored with them. |
-| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`), at creation or later with `metacooler annotate`. ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. |
+| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`), at creation or later with `metacooler annotate`. ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. A column called `contig` or `genome` is stored as `user_contig` / `user_genome`: those are the keys `dump` prints this table under. |
 
 Row order is determined by the `--contig-order` strategy chosen at creation time
 and stored in the `contig-ordering` attribute.
@@ -124,6 +125,87 @@ per-genome blocks under a genome-grouped `contig-ordering` (`genome-then-length`
 `genome-then-alpha`). Under `fasta`, `alpha`, `cool` or `custom` ordering a
 genome's contigs may be scattered, so readers must fall back to filtering
 `/contigs/genome_id` rather than slicing with `genome_offset`.
+
+### `/clusters` group { #clusters }
+
+Optional. The clustering rounds of the latest run of a method that groups
+contigs into genomes, whatever the method: the successive steps of one binner
+([metaTOR](https://github.com/koszullab/metaTOR) writes its overlapping,
+recursive and final clusters), the bin sets of several binners and the bins a
+refiner keeps from them, or clusters that share contigs. They are kept
+without being written into `/genomes` and `/contigs`, which hold the current
+assignment: `/clusters` says how a method reached one, and nothing requires
+them to agree (a later `reassign` changes `/genomes`, not `/clusters`;
+`reassign --round` makes a round the map's genomes). A cluster is a set of
+contigs; a contig may be a member of several clusters, of one round or of
+several.
+
+```
+/clusters
+├── @rounds                  ← JSON list, one object per round, in order
+├── table/                   ← one row per cluster, every round
+├── members/                 ← one row per (cluster, contig)
+└── indexes/
+    ├── cluster_offset       ← members/ rows of each cluster
+    ├── contig_offset        ← contig_clusters rows of each contig
+    └── contig_clusters      ← members/cluster_id, ordered by contig, then cluster
+```
+
+**`@rounds`**, a JSON list of objects, one per round, in the order the tool
+made them. Each has a `name` — non-empty, ASCII, unique — and any other keys:
+by convention `tool`, `version`, `parameters` and `date`.
+
+**`table/`**, one row per cluster:
+
+| Dataset | dtype | Description |
+|---------|-------|-------------|
+| `round` | `int32` | Zero-based index into `@rounds`. Rows come round by round, in the order of `@rounds`. |
+| `name` | `S<n>` (fixed bytes) | Cluster name, non-empty, ASCII, unique within its round. |
+| `parent` | `int32` | Row of `table/` of the cluster it was split from, in an earlier round; `-1` for none. |
+| `n_contigs` | `int32` | Number of member contigs. |
+| `length` | `int64` | Total length of its member contigs, in bp. |
+| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …), named anything but `genome` (below), `parent_round` (the round of `parent`, which `MetaCooler.clusters` computes) and `cluster` (what `dump` calls `name`). |
+
+Not stored: **`genome`**, the genome of the map whose contigs a cluster holds
+exactly, which `MetaCooler.clusters` and `dump -t clusters` add after
+`length`. It is computed from `/contigs/genome_id` whenever a map is read, so
+it always says which clusters the map's current genomes are, whatever made
+them, and follows a `reassign`; `__unbinned__` is no genome. A stored
+`table/genome` is refused.
+
+**`members/`**, one row per membership, sorted by `(cluster_id, contig_id)`,
+each pair at most once:
+
+| Dataset | dtype | Description |
+|---------|-------|-------------|
+| `cluster_id` | `int32` | Row of `table/`. |
+| `contig_id` | `int32` | Row of `/contigs`. |
+
+**`indexes/`** looks the memberships up both ways, each in one slice:
+
+| Dataset | dtype | Description |
+|---------|-------|-------------|
+| `cluster_offset` | `int64`, `n_clusters + 1` | The members of cluster `i` are the rows `cluster_offset[i]` to `cluster_offset[i + 1]` of `members/`. |
+| `contig_offset` | `int64`, `n_contigs + 1` | The clusters of contig `j` are the rows `contig_offset[j]` to `contig_offset[j + 1]` of `contig_clusters`. |
+| `contig_clusters` | `int32`, one per member | `members/cluster_id`, ordered by `contig_id`, then `cluster_id`: the members transposed. Clusters are numbered round by round, so a contig's clusters come in the order of the rounds. |
+
+Both are derived from `members/`, and `validate()` checks them against it.
+
+The group holds one run: writing clusters (`metacooler.write_clusters`)
+replaces it whole, and earlier runs are kept only as the provenance their tool
+leaves in the metadata. The commands that write a map from a map keep it:
+`annotate` and the `.mmetacool` entries as stored; `reassign` too, with the
+contig ids renumbered when it re-groups the contigs; `binnify` by contig and
+`zoomify`, whose contigs are those of their source (`binnify --level genome`
+makes other contigs, and warns that it drops the group); `merge`, which keeps the first
+input's and warns about an input whose clusters differ. `create` and `collect`
+write maps without clusters, and `extract`, `aggregate` and `flatten` write
+plain cooler files. metacooler 0.3.0 and earlier read a map with this group.
+Of the maps they write from it, those they copy keep it as stored —
+`annotate`, a relabelling `reassign`, the `.mmetacool` entries, and the base
+level of `zoomify`, a copy of the map — and those they rewrite drop it: a
+re-grouping `reassign`, `binnify`, `merge`, and the coarser levels of
+`zoomify`.
 
 ### Storage filters
 

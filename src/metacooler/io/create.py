@@ -28,6 +28,8 @@ from metacooler.io._utils import (
     aggregate_pixels,
     check_ascii_names,
     check_output_path,
+    contigs_filter_frame,
+    genomes_filter_frame,
     infer_binsize,
     pixel_keys,
     pixels_from_keys,
@@ -115,11 +117,14 @@ _PAIRS_READ_BLOCK_MAX_BYTES = 128 * 1024**2  # 128 MiB (~1.2 M pairs)
 # is free to carry extra columns, but one of these names would collide.  The
 # QC columns are reserved unconditionally, not only when QC is computed, so a
 # user column called ``qc_inter_genome`` means the same thing on every file.
+# A user column of one of these names is stored as ``user_<name>``: the
+# columns metacooler writes, and the keys ``dump`` names the tables by
+# (``genome``, ``contig``; see io._utils.contigs_view).
 _GENOMES_RESERVED_COLUMNS = frozenset(
-    {"name", "length", "n_contigs", "n_bins"} | set(QC_GENOME_COLUMNS)
+    {"name", "length", "n_contigs", "n_bins", "genome"} | set(QC_GENOME_COLUMNS)
 )
 _CONTIGS_RESERVED_COLUMNS = frozenset(
-    {"name", "length", "genome_id"} | set(QC_CONTIG_COLUMNS)
+    {"name", "length", "genome_id", "contig", "genome"} | set(QC_CONTIG_COLUMNS)
 )
 # In /genomes the whole qc_* namespace is metacooler's (see qc.is_qc_column):
 # every writer that derives a map from another strips it. A user column there
@@ -1070,16 +1075,17 @@ def _apply_create_filters(
     contigs_df = _build_contigs_table(
         order, contig_lengths, contig_genome_map, genomes_df, contig_df
     )
-    contigs_df = contigs_df.assign(
-        genome=contigs_df["genome_id"].map(genomes_df["name"])
-    )
     hints: dict[str, str] = {}
     if genome_n_bins is not None:
         # Same position _compute_all_offsets gives the column in the output.
         genomes_df.insert(
             3, "n_bins", genomes_df["name"].map(genome_n_bins).astype(np.int64)
         )
-    else:
+    # The tables as dump prints them, plus their stored names (see
+    # contigs_filter_frame): one filter, one meaning, before and after.
+    contigs_df = contigs_filter_frame(contigs_df, genomes_df["name"])
+    genomes_df = genomes_filter_frame(genomes_df)
+    if genome_n_bins is None:
         hints["n_bins"] = (
             "no bin has been tiled yet, so a genome's bin count is not known "
             "during 'create'. Filter on genomes.length or genomes.n_contigs "

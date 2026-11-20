@@ -12,6 +12,7 @@ from metacooler.cli._options import (
     contigs_format_option,
     force_option,
     genomes_format_option,
+    option_given,
     quiet_option,
     verbose_option,
 )
@@ -31,14 +32,27 @@ if TYPE_CHECKING:
     "--contigs",
     "contigs_table",
     type=click.Path(exists=True, path_type=Path),
-    required=True,
+    default=None,
     help=(
         "Contig-to-genome assignment table. It need not list every contig — "
         "see [cyan]--missing[/cyan]. Only its two name columns are read; extra "
-        "columns are ignored."
+        "columns are ignored. Give it or [cyan]--round[/cyan]."
     ),
 )
 @contigs_format_option
+@click.option(
+    "--round",
+    "round_name",
+    default=None,
+    metavar="NAME",
+    help=(
+        "Take the assignment from a clustering round of the map "
+        "([cyan]dump -t clusters[/cyan] lists them) instead of a table: each "
+        "contig of the round goes to the genome named after its cluster, and "
+        "the clusters' own columns become the genomes' metadata. A round in "
+        "which a contig is in two clusters is refused."
+    ),
+)
 @click.option(
     "-o",
     "--output",
@@ -71,15 +85,15 @@ if TYPE_CHECKING:
 @click.option(
     "--missing",
     type=click.Choice(["keep", "unbinned"]),
-    default="keep",
-    show_default=True,
+    default=None,
     help=(
-        "What to do with a contig the table does not mention. "
+        "What to do with a contig the table (or the round) does not mention. "
         "[cyan]keep[/cyan]: leave it in its current genome, so a short table "
         "is an incremental edit. [cyan]unbinned[/cyan]: move it to "
         "[cyan]__unbinned__[/cyan], so the table is authoritative — use it for "
         "the output of a fresh binning run. Neither drops a contig; use "
-        "[cyan]extract[/cyan] for that."
+        "[cyan]extract[/cyan] for that. [dim]\\[default: keep with "
+        "--contigs, unbinned with --round][/dim]"
     ),
 )
 @click.option(
@@ -134,13 +148,14 @@ if TYPE_CHECKING:
 @quiet_option
 def cmd_reassign(
     metacool_path: str,
-    contigs_table: Path,
+    contigs_table: Path | None,
     contigs_format: str,
+    round_name: str | None,
     output: Path | None,
     inplace: bool,
     genomes_table: Path | None,
     genomes_format: str,
-    missing: Literal["keep", "unbinned"],
+    missing: Literal["keep", "unbinned"] | None,
     layout: str,
     metadata: Path | None,
     qc: bool,
@@ -156,7 +171,8 @@ def cmd_reassign(
     their bins are those of the source file, and every pixel keeps its count.
     Only the genome each contig belongs to changes, along with everything
     derived from it — the /genomes table, the genome_id column, and (when the
-    layout has to be restored) the order the contigs are stored in.
+    layout has to be restored) the order the contigs are stored in. The new
+    assignment is a --contigs table, or a --round of the map's own clusters.
     """
     from metacooler.cli._provenance import load_metadata_file, reconstruct_command
     from metacooler.cli.logging_utils import setup_logging
@@ -164,6 +180,16 @@ def cmd_reassign(
 
     setup_logging(verbose, command_name="metacooler reassign", quiet=quiet)
 
+    if (contigs_table is None) == (round_name is None):
+        raise click.UsageError(
+            "Pass the new assignment as a --contigs table or as a --round of "
+            "the map's clusters, and not both."
+        )
+    if round_name is not None and option_given("contigs_format"):
+        raise click.UsageError(
+            "--contigs-format says how to read a --contigs table; --round takes "
+            "the assignment from the map itself."
+        )
     if inplace and output is not None:
         raise click.UsageError(
             "--inplace rewrites the input file, so -o/--output is not expected. "
@@ -189,6 +215,7 @@ def cmd_reassign(
         uri=metacool_path,
         contig_genome_map=contigs_table,
         output=output,
+        round=round_name,
         contig_table_format=contigs_format,
         genomes_table=genomes_table,
         genomes_table_format=genomes_format,
