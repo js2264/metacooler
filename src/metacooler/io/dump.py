@@ -236,7 +236,7 @@ def dump_table(
                 order = np.lexsort((contig_ids, cluster_ids))
                 df = mc._name_memberships(cluster_ids[order], contig_ids[order])
             else:
-                df = mc.clusters.loc[np.unique(cluster_ids)]
+                df = mc._clusters_of(np.unique(cluster_ids))
                 df = df.rename(columns=CLUSTER_DUMP_KEYS)
     elif table == "pixels":
         # Pre-compute filter parameters that are independent of chunk

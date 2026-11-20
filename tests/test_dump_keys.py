@@ -330,3 +330,101 @@ def test_a_dump_reads_back_from_the_cli(plain: Path, tmp_path: Path):
         ],
     )
     assert result.exit_code == 0, flat(result.output)
+
+
+# ---------------------------------------------------------------------------
+# A dump read back keeps none of what dump computed
+# ---------------------------------------------------------------------------
+
+
+def test_a_contigs_dump_reads_back_into_annotate(plain: Path, tmp_path: Path):
+    """annotate given a dump stores none of the columns dump computed (length,
+    the QC columns), and checks its genome column rather than storing it."""
+    dumped = tmp_path / "dumped.tsv"
+    dump_table(plain, "contigs", header=True, out=dumped)
+    before = list(MetaCooler(plain).contigs.columns)
+    annotate(plain, contigs_table=dumped, inplace=True)
+    assert list(MetaCooler(plain).contigs.columns) == before
+    # The genome column is checked: a dump placing c1 elsewhere is refused.
+    dumped.write_text(dumped.read_text().replace("c1\tMAG_1", "c1\tMAG_2"))
+    with pytest.raises(ValueError, match="does not belong to in this map"):
+        annotate(plain, contigs_table=dumped, inplace=True)
+
+
+def test_a_contigs_dump_reads_back_into_create(plain: Path, tmp_path: Path):
+    dumped = tmp_path / "dumped.tsv"
+    dump_table(plain, "contigs", header=True, out=dumped)
+    out = tmp_path / "again.metacool"
+    from_pairs(
+        out,
+        bins=tmp_path / "bins.bed",
+        pairs=tmp_path / "lib.pairs",
+        contig_genome_map=dumped,
+        ps=False,
+    )
+    assert list(MetaCooler(out).contigs.columns) == list(
+        MetaCooler(plain).contigs.columns
+    )
+
+
+def test_a_genomes_dump_reads_back(plain: Path, tmp_path: Path):
+    notes = tmp_path / "notes.tsv"
+    notes.write_text("genome_name\tnote\nMAG_1\tfirst\nMAG_2\tsecond\n")
+    annotate(plain, genomes_table=notes, inplace=True)
+    dumped = tmp_path / "genomes_dump.tsv"
+    dump_table(plain, "genomes", header=True, out=dumped)
+    out = tmp_path / "out.metacool"
+    reassign(plain, {"c1": "MAG_1"}, out, genomes_table=dumped)
+    genomes = MetaCooler(out).genomes
+    assert genomes["note"].tolist() == ["first", "second"]
+    assert not [c for c in genomes.columns if c.startswith("user_")]
+
+
+def test_a_table_that_is_not_a_dump_keeps_a_genome_column(plain: Path, tmp_path: Path):
+    """Only a dump's genome column is checked: in any other table, a column
+    called genome (a taxonomy) is metadata, stored as user_genome."""
+    table = tmp_path / "taxonomy.tsv"
+    table.write_text("contig\tgenome\tdepth\nc1\tE.coli\t3\nc2\tB.subtilis\t4\n")
+    annotate(plain, contigs_table=table, inplace=True)
+    contigs = MetaCooler(plain).contigs
+    assert contigs["user_genome"].tolist() == ["E.coli", "B.subtilis"]
+    assert contigs["depth"].tolist() == [3, 4]
+
+
+# ---------------------------------------------------------------------------
+# annotate reaches a column an older map stores under a key's name
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_drops_an_older_column_by_its_shown_name(plain: Path):
+    _store(plain, "contigs", "genome", ["E.coli", "B.subtilis"])
+    _store(plain, "genomes", "genome", ["GCF_1", "GCF_2"])
+    with pytest.raises(
+        ValueError,
+        match=r"dropped by the name dump shows it under: contigs\.user_genome",
+    ):
+        annotate(plain, drop=["contigs.genome"], inplace=True)
+    annotate(plain, drop=["contigs.user_genome", "genomes.user_genome"], inplace=True)
+    mc = MetaCooler(plain)
+    assert "genome" not in mc.contigs.columns and "genome" not in mc.genomes.columns
+
+
+def test_annotate_replaces_an_older_column_by_its_shown_name(
+    plain: Path, tmp_path: Path
+):
+    """A table column called genome is stored as user_genome, the name dump
+    shows the older map's genome column under: it replaces that column, which
+    is then stored under the new name."""
+    _store(plain, "contigs", "genome", ["E.coli", "B.subtilis"])
+    same = tmp_path / "same.tsv"
+    same.write_text("contig_name\tgenome\nc1\tE.coli\nc2\tB.subtilis\n")
+    annotate(plain, contigs_table=same, inplace=True)  # nothing changes
+    assert MetaCooler(plain).contigs["genome"].tolist() == ["E.coli", "B.subtilis"]
+    changed = tmp_path / "changed.tsv"
+    changed.write_text("contig_name\tgenome\nc1\tE.coli\nc2\tB.sub\n")
+    with pytest.raises(ValueError, match="contigs.user_genome"):
+        annotate(plain, contigs_table=changed, inplace=True)
+    annotate(plain, contigs_table=changed, inplace=True, replace=True)
+    contigs = MetaCooler(plain).contigs
+    assert "genome" not in contigs.columns
+    assert contigs["user_genome"].tolist() == ["E.coli", "B.sub"]

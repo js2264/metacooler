@@ -164,7 +164,7 @@ by convention `tool`, `version`, `parameters` and `date`.
 | `parent` | `int32` | Row of `table/` of the cluster it was split from, in an earlier round; `-1` for none. |
 | `n_contigs` | `int32` | Number of member contigs. |
 | `length` | `int64` | Total length of its member contigs, in bp. |
-| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …), named anything but `genome` (below) and `cluster` (what `dump` calls `name`). |
+| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …), named anything but `genome` (below), `parent_round` (the round of `parent`, which `MetaCooler.clusters` computes) and `cluster` (what `dump` calls `name`). |
 
 Not stored: **`genome`**, the genome of the map whose contigs a cluster holds
 exactly, which `MetaCooler.clusters` and `dump -t clusters` add after

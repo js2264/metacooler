@@ -1219,6 +1219,11 @@ def reassign(
             "Pass the new assignment as a table (contig_genome_map) or as a "
             "clustering round of the map (round=...), and not both."
         )
+    if round is not None and contig_table_format != CONTIGS_FORMAT_DEFAULT:
+        raise ValueError(
+            "contig_table_format says how to read a reassignment table; "
+            "round=... takes the assignment from the map itself."
+        )
     if inplace and output is not None:
         raise ValueError(
             "inplace rewrites the input file, so no output path is expected; "
@@ -1270,13 +1275,15 @@ def reassign(
         missing = "keep" if round is None else "unbinned"
     assignment, report = _apply_reassignment(before, table, missing)
     _log_report(report, len(contig_names))
+    kept: list[str] = []
     if round is not None and missing == "keep":
         kept = sorted(set(assignment.values()) - set(table.values()) - {UNBINNED})
         if kept:
             logger.warning(
                 "With missing='keep', %d genome(s) of the source keep the "
-                "contigs that round %r does not hold, next to its clusters: %s. "
-                "Pass missing='unbinned' to take the round alone.",
+                "contigs that round %r does not hold, next to its clusters, and "
+                "their metadata: %s. Pass missing='unbinned' to take the round "
+                "alone.",
                 len(kept),
                 round,
                 _names(kept),
@@ -1330,15 +1337,23 @@ def reassign(
             "then stop being contiguous)."
         )
 
+    restated = {before[c] for c in report.moved} | {assignment[c] for c in report.moved}
     if genomes_table is not None:
         genome_metadata = _load_extra_genomes_table(genomes_table, genomes_table_format)
     elif round_genomes is not None:
-        genome_metadata = round_genomes
+        # The round's clusters bring their columns; the genomes a round leaves
+        # in place (missing='keep') keep theirs, as any reassignment carries them.
+        carried = (
+            _carry_genome_metadata(old_genomes, set(kept), restated) if kept else None
+        )
+        genome_metadata = (
+            round_genomes
+            if carried is None
+            else pd.concat([round_genomes, carried], ignore_index=True)
+        )
     else:
         genome_metadata = _carry_genome_metadata(
-            old_genomes,
-            set(assignment.values()),
-            {before[c] for c in report.moved} | {assignment[c] for c in report.moved},
+            old_genomes, set(assignment.values()), restated
         )
     genomes = _build_genomes_table(
         contig_order=contig_order,

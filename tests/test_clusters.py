@@ -1080,6 +1080,24 @@ def test_names_that_are_not_ascii_are_decoded_all_the_same():
     assert api_module._decode_names(raw).tolist() == ["c1", "caf\u00e9"]
 
 
+def test_the_genome_of_some_clusters_is_read_from_their_members(
+    clustered: Path, reads: str
+):
+    """dump -t clusters with a selection computes the genome column from the
+    selected clusters' members alone: the same answer as for every cluster."""
+    _one_round(clustered, {"A": ["c1", "c2"], "E": [], "B": ["c3"], "M": ["c3", "c4"]})
+    mc = MetaCooler(clustered)
+    every = mc.clusters
+    for rows in ([0], [1], [0, 2, 3], [1, 3], [0, 1, 2, 3]):
+        some = mc._clusters_of(np.array(rows))
+        pd.testing.assert_frame_equal(
+            some.drop(columns="genome"), every.iloc[rows].drop(columns="genome")
+        )
+        # None, or NaN in a column pandas reads as text: no genome either way.
+        assert _genomes_of(some) == _genomes_of(every.iloc[rows])
+    assert _genomes_of(every) == ["MAG_A", "-", "-", "MAG_B"]
+
+
 def test_one_round_is_read_alone(clustered: Path, reads: str):
     """cluster_members(round) reads that round's slice: the same rows as
     every membership filtered to the round."""
@@ -1333,6 +1351,48 @@ def test_a_round_that_is_the_genomes_moves_nothing(
         "MAG_B": 0.6,
     }
     validate(clustered, full=True)
+
+
+def test_a_stored_parent_round_is_refused(clustered: Path):
+    """MetaCooler.clusters computes parent_round, so a stored one would give
+    the frame two columns of that name."""
+    _corrupt(
+        clustered,
+        lambda g: g["table"].create_dataset("parent_round", data=np.zeros(5, "S1")),
+    )
+    with pytest.raises(MetaCoolerFormatError, match="table/parent_round is reserved"):
+        MetaCooler(clustered)
+
+
+def test_the_genomes_a_round_leaves_in_place_keep_their_metadata(
+    clustered: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """With missing='keep', a genome the round does not replace keeps its
+    columns, as any reassignment carries them; the round's clusters bring
+    theirs."""
+    table = tmp_path / "genomes.tsv"
+    table.write_text("genome_name\tcompl\nMAG_A\t90\nMAG_B\t80\n")
+    annotate(clustered, genomes_table=table, inplace=True)
+    out = tmp_path / "out.metacool"
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        reassign(clustered, output=out, round="recursive", missing="keep")
+    genomes = MetaCooler(out).genomes.set_index("name")
+    assert genomes.loc["MAG_B", "compl"] == 80
+    assert genomes.loc["O1_1", "completeness"] == 60.0
+    assert np.isnan(genomes.loc["MAG_B", "completeness"])
+    assert "keep the contigs that round 'recursive' does not hold" in caplog.text
+    # MAG_B lost c3 to O1_2: its carried value is named as computed elsewhere.
+    assert "contig set changed: MAG_B" in caplog.text
+
+
+def test_a_round_takes_no_table_format(clustered: Path):
+    with pytest.raises(ValueError, match="contig_table_format says how to read"):
+        reassign(
+            clustered,
+            output=clustered.with_name("out.metacool"),
+            round="overlapping",
+            contig_table_format="metator",
+        )
 
 
 def test_reassign_round_from_the_cli(clustered: Path, tmp_path: Path):

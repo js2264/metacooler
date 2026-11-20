@@ -38,9 +38,9 @@
   clustering round of the map its genomes: each contig of the round goes to
   the genome named after its cluster, and the clusters' columns become the
   genomes' metadata. The contigs the round does not hold go to
-  `__unbinned__` by default (`--missing keep` leaves them where they were),
-  and a round in which a contig is in two clusters is refused. `--contigs` is
-  no longer required: one of the two is.
+  `__unbinned__` by default (`--missing keep` leaves them where they were, in
+  genomes that keep their metadata), and a round in which a contig is in two
+  clusters is refused. `--contigs` is no longer required: one of the two is.
 
 ### Changed
 
@@ -58,7 +58,12 @@
   `--genomes-format` also read the `contig` and `genome` columns of a table
   `dump -H` wrote, when it has none of `contig_name` and `genome_name` (only
   both, for an assignment table: one with `contig_name` and no `genome_name`
-  is refused as before), so `reassign --contigs <dump>` needs no format.
+  is refused as before), so `reassign --contigs <dump>` needs no format. A
+  table that starts as a dump does is read as one, by every command: the
+  columns `dump` computed from the map (`length`, `n_contigs`, `n_bins`, the
+  QC columns) are left out rather than stored as `user_` metadata, and a
+  contigs dump's `genome` column is checked by `annotate` and `collect`, as a
+  `genome_name` column is.
 - **A pairs file's compression is read from its content**, whatever its name:
   gzip and bgzip, bzip2, zstd and lz4, from the file's first bytes, and plain
   text otherwise. It was read from the file's suffix, so a gzip file named
@@ -75,8 +80,9 @@
   `contig` and `genome` are now reserved like `name` and `length`: a user
   column of either name is stored as `user_contig` / `user_genome` (in
   `/genomes` too, for `genome`), and one that a map written before holds is
-  printed and filtered as `user_contig` / `user_genome`. So `contigs.genome` is
-  always the contig's genome, in a dump and in a filter.
+  printed and filtered as `user_contig` / `user_genome`, and `annotate` drops
+  or replaces it by that name (storing it under that name then). So
+  `contigs.genome` is always the contig's genome, in a dump and in a filter.
 - **`reassign` writes the same tables whichever path it takes.** When the
   contigs keep their rows (the relabel path), `/contigs` now lists its columns
   in the order `create` and the regroup path write them: `genome_id` third,

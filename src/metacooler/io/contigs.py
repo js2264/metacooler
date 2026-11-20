@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from metacooler.io._utils import read_user_table, rename_key_columns
+from metacooler.io._utils import drop_dump_columns, read_user_table, rename_key_columns
 from metacooler.io.colspec import (
     ASSIGNMENT_KEYS,
     CONTIGS_FORMAT_ALIASES,
     CONTIGS_FORMAT_DEFAULT,
+    dumped_table,
     parse_column_spec,
     resolve_column_spec,
 )
@@ -112,6 +113,8 @@ def parse_contigs_table(
     _check_not_empty(path, "Contig table")
 
     df = read_user_table(path, kind="Contig table", header=spec.header)
+    if spec.header and dumped_table(df.columns) == "contigs":
+        df = drop_dump_columns(df, "contigs", kind="Contig table", path=path)
     contig_col, genome_col = resolve_column_spec(
         spec,
         list(df.columns),

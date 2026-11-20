@@ -542,39 +542,65 @@ class MetaCooler:
             members; empty, with the columns above, when the map has no
             ``/clusters``.
         """
-        table = self._cluster_table.copy()
-        table.insert(CLUSTER_VIEW_GENOME_POSITION, "genome", self._cluster_genomes())
+        return self._clusters_of(None)
+
+    def _clusters_of(self, rows: np.ndarray | None) -> pd.DataFrame:
+        """:attr:`clusters`, of the clusters *rows* only (``None``: every one),
+        their genome column computed from their own members alone."""
+        table = self._cluster_table if rows is None else self._cluster_table.iloc[rows]
+        table = table.copy()
+        table.insert(
+            CLUSTER_VIEW_GENOME_POSITION, "genome", self._cluster_genomes(rows)
+        )
         return table
 
-    def _cluster_genomes(self) -> np.ndarray:
+    def _cluster_genomes(self, rows: np.ndarray | None = None) -> np.ndarray:
         """The genome each cluster is, by name, or ``None``: one pass over the
-        members, against ``/contigs/genome_id``.
+        clusters' members, against ``/contigs/genome_id``.
 
         A cluster is genome G when every one of its contigs is in G and it
         holds as many as G does: its members are distinct contigs.
+
+        Args:
+            rows: Clusters (rows of ``table/``) to read the members of; ``None``
+                for every cluster, in one read.
         """
-        out = np.full(len(self._cluster_table), None, dtype=object)
+        every = rows is None
+        n = len(self._cluster_table)
+        rows = (
+            np.arange(n, dtype=np.int64) if rows is None else np.asarray(rows, np.int64)
+        )
+        out = np.full(len(rows), None, dtype=object)
         with self.open() as grp:
-            if CLUSTERS_GROUP not in grp:
+            if CLUSTERS_GROUP not in grp or not len(rows):
                 return out
             offsets = grp[CLUSTERS_GROUP]["indexes"]["cluster_offset"][()]
-            contig_ids = grp[CLUSTERS_GROUP]["members"]["contig_id"][()]
+            offsets = np.asarray(offsets, dtype=np.int64)
+            counts = offsets[rows + 1] - offsets[rows]
+            held = counts > 0
+            if not held.any():
+                return out
+            members = grp[CLUSTERS_GROUP]["members"]["contig_id"]
+            lo, counts = offsets[rows][held], counts[held]
+            if every:
+                contig_ids, starts = members[()], lo
+            else:
+                # The members of the clusters asked for, end to end.
+                positions = np.repeat(lo - np.cumsum(counts) + counts, counts)
+                positions += np.arange(int(counts.sum()))
+                contig_ids = _read_rows(members, positions)
+                starts = np.cumsum(counts) - counts
         names = self.genomes["name"].to_numpy(dtype=object)
         genome_ids = self._contig_genome_ids
-        held = np.diff(offsets) > 0
-        if not held.any():
-            return out
         of_members = genome_ids[np.asarray(contig_ids, dtype=np.int64)]
-        starts = np.asarray(offsets[:-1], dtype=np.int64)[held]
         lowest = np.minimum.reduceat(of_members, starts)
         highest = np.maximum.reduceat(of_members, starts)
         sizes = np.bincount(genome_ids, minlength=len(names))
-        rows = np.flatnonzero(held)
-        exact = (lowest == highest) & (np.diff(offsets)[held] == sizes[lowest])
+        exact = (lowest == highest) & (counts == sizes[lowest])
         unbinned = unbinned_genome_id(names)
         if unbinned is not None:
             exact &= lowest != unbinned
-        out[rows[exact]] = names[lowest[exact]]
+        out[np.flatnonzero(held)[exact]] = names[lowest[exact]]
         return out
 
     def _check_round(self, round: str) -> None:

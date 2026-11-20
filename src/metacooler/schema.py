@@ -302,9 +302,10 @@ CLUSTER_VIEW_GENOME_POSITION = 6
 #: How ``dump -t clusters`` names a cluster's ``name``: ``cluster``, as
 #: ``dump -t members`` does.
 CLUSTER_DUMP_KEYS = {"name": "cluster"}
-#: Names no tool column of ``/clusters/table`` may take: the computed genome,
-#: and the key ``dump`` names a cluster by.
-CLUSTER_RESERVED_COLUMNS = (CLUSTER_GENOME_COLUMN, "cluster")
+#: Names no tool column of ``/clusters/table`` may take: the columns
+#: ``MetaCooler.clusters`` computes (the genome, and the parent's round), and
+#: the key ``dump`` names a cluster by.
+CLUSTER_RESERVED_COLUMNS = (CLUSTER_GENOME_COLUMN, "parent_round", "cluster")
 
 
 def cluster_rounds(clusters: h5py.Group) -> list[dict]:
@@ -366,9 +367,9 @@ def _check_clusters_structure(clusters: h5py.Group, n_contigs: int) -> None:
     for name in CLUSTER_RESERVED_COLUMNS:
         if isinstance(table, h5py.Group) and name in table:
             raise MetaCoolerFormatError(
-                f"/clusters/table/{name} is reserved: the genome a cluster is, "
-                "which metacooler computes, and the name dump gives a cluster "
-                "cannot be stored"
+                f"/clusters/table/{name} is reserved: genome and parent_round "
+                "are computed when the map is read, and cluster is the name "
+                "dump gives a cluster's name, so none of them is stored"
             )
     lengths = {}
     for table, columns in (

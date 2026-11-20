@@ -32,7 +32,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
 #: Trailing token of a spec saying that the table has no header line.
@@ -83,6 +83,29 @@ GENOMES_KEYS = ("genome",)
 #: default names but every one of these is read through them (see
 #: :func:`resolve_column_spec`).
 _DUMPED_NAMES = {"contig_name": "contig", "genome_name": "genome"}
+
+#: The leading columns of the tables ``dump -H`` writes, which tell a table
+#: read back for one of its dumps (see :func:`dumped_table`).
+DUMP_HEADERS = {
+    "contigs": ("contig", "genome", "length"),
+    "genomes": ("genome", "length", "n_contigs"),
+}
+
+
+def dumped_table(labels: Iterable[object]) -> str | None:
+    """Which table a table read back is a dump of, by its leading columns.
+
+    Every table ``dump -H`` writes starts with its keys and ``length``
+    (:data:`DUMP_HEADERS`), so a table that starts so is read as one: the
+    columns ``dump`` computed are left out, and a contigs dump's genome
+    column is the genome, not metadata.
+
+    Returns:
+        ``"contigs"``, ``"genomes"``, or ``None`` for any other table.
+    """
+    head = tuple(str(label) for label in list(labels)[:3])
+    return next((table for table, names in DUMP_HEADERS.items() if head == names), None)
+
 
 logger = logging.getLogger("metacooler")
 
