@@ -153,13 +153,51 @@ def _exit_on_broken_pipe() -> NoReturn:
     raise SystemExit(_BROKEN_PIPE_EXIT_CODE)
 
 
-class MetaCoolerGroup(click.RichGroup):
+class MetaCoolerCommand(click.RichCommand):
+    """Command whose help starts every panel's help text at the same column.
+
+    rich-click lays each panel out on its own, so the help column of one
+    panel lands wherever its contents put it (see ``cli/_help_layout.py``).
+    This is rich-click's ``format_options`` with one extra step: align the
+    rendered panels before writing them.
+    """
+
+    def format_options(self, ctx: click.Context, formatter: click.HelpFormatter):
+        from rich.table import Table
+        from rich_click.rich_panel import construct_panels
+
+        from metacooler.cli._help_layout import align_help_columns
+
+        assert isinstance(ctx, click.RichContext)
+        assert isinstance(formatter, click.RichHelpFormatter)
+        panels = [
+            panel.render(self, ctx, formatter)
+            for panel in construct_panels(self, ctx, formatter)
+        ]
+        # rich-click does not draw a panel whose table has no row.
+        panels = [
+            p
+            for p in panels
+            if not isinstance(p.renderable, Table) or p.renderable.rows
+        ]
+        align_help_columns(panels, formatter.console)
+        for panel in panels:
+            formatter.write(panel)
+
+
+class MetaCoolerGroup(MetaCoolerCommand, click.RichGroup):
     """Root group that reports expected domain errors as clean CLI messages.
 
     Every subcommand (including nested ``create`` subcommands) is invoked
     through this group, so wrapping :meth:`invoke` gives uniform error output
     without a ``try/except`` in each ``cmd_*`` module.
+
+    Its commands are :class:`MetaCoolerCommand`, and its subgroups (``create``,
+    ``metadata``) are of its own class, so every help page is aligned.
     """
+
+    command_class = MetaCoolerCommand
+    group_class = type
 
     def invoke(self, ctx):
         try:
