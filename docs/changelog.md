@@ -44,6 +44,21 @@
 
 ### Changed
 
+- **Every dump is keyed by name**, so the dumps join on their key columns.
+  `dump -t contigs` prints `contig`, `genome` (the name of the genome the contig
+  is in) and `length`, then the other columns; it no longer prints `name`, nor
+  the internal `genome_id`, a row number that every `reassign` renumbers.
+  `dump -t genomes` prints `genome` where it printed `name`, and `dump -t
+  clusters` calls a cluster `cluster`, as `-t members` does. `-t chroms` keeps
+  cooler's own `name` and `length`. A script that reads `name` or `genome_id`
+  from a dump needs updating. `--filter` reads the dump's names
+  (`contigs.contig`, `contigs.genome`, `genomes.genome`), and still the names
+  the file stores the keys under (`contigs.name`, `contigs.genome_id`,
+  `genomes.name`). And a dump reads back: the default `--contigs-format` and
+  `--genomes-format` also read the `contig` and `genome` columns of a table
+  `dump -H` wrote, when it has none of `contig_name` and `genome_name` (only
+  both, for an assignment table: one with `contig_name` and no `genome_name`
+  is refused as before), so `reassign --contigs <dump>` needs no format.
 - **A pairs file's compression is read from its content**, whatever its name:
   gzip and bgzip, bzip2, zstd and lz4, from the file's first bytes, and plain
   text otherwise. It was read from the file's suffix, so a gzip file named
@@ -53,6 +68,15 @@
 
 ### Fixed
 
+- **`contigs.genome` means one thing.** `dump -t contigs` printed the name of
+  each contig's genome in its `genome` column, but a user column called
+  `genome` (a taxonomy, say), which `/contigs` stored as given, took its place
+  under `--filter contigs.genome` on an existing map, and not during `create`.
+  `contig` and `genome` are now reserved like `name` and `length`: a user
+  column of either name is stored as `user_contig` / `user_genome` (in
+  `/genomes` too, for `genome`), and one that a map written before holds is
+  printed and filtered as `user_contig` / `user_genome`. So `contigs.genome` is
+  always the contig's genome, in a dump and in a filter.
 - **`reassign` writes the same tables whichever path it takes.** When the
   contigs keep their rows (the relabel path), `/contigs` now lists its columns
   in the order `create` and the regroup path write them: `genome_id` third,

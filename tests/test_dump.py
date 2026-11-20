@@ -22,9 +22,9 @@ class TestDumpTable:
         dump_table(tiny_metacooler, "contigs", header=True, out=out)
         result = out.read_text()
         assert "contig_A" in result
-        # The genome name is surfaced alongside the internal integer genome_id.
-        assert "genome" in result
-        assert "genome_id" in result
+        # Keyed by name: the genome's name, never the internal genome_id.
+        assert result.splitlines()[0].split("\t")[:3] == ["contig", "genome", "length"]
+        assert "genome_id" not in result
         assert "MAG_1" in result
 
     def test_dump_bins(self, tiny_metacooler, tmp_path):
@@ -198,25 +198,23 @@ class TestDumpTable:
         assert "__unbinned__" in captured.out
 
     def test_dump_contigs_core_columns_first(self, tiny_metacooler, tmp_path):
-        """Core columns (name, length, genome, genome_id) precede extra columns."""
+        """Keyed by name: contig, genome, length precede the other columns, and
+        the internal genome_id is not printed."""
         out = tmp_path / "contigs.tsv"
         dump_table(tiny_metacooler, "contigs", header=True, out=out)
         lines = out.read_text().strip().split("\n")
         header = lines[0].split("\t")
-        assert header[0] == "name"
-        assert header[1] == "length"
-        assert header[2] == "genome"
-        assert header[3] == "genome_id"
+        assert header[:3] == ["contig", "genome", "length"]
+        assert "genome_id" not in header and "name" not in header
 
     def test_dump_genomes_core_columns_first(self, tiny_metacooler, tmp_path):
-        """Core columns (name, length, n_contigs) appear before extra columns."""
+        """Keyed by name: genome, length, n_contigs precede the other columns."""
         out = tmp_path / "genomes.tsv"
         dump_table(tiny_metacooler, "genomes", header=True, out=out)
         lines = out.read_text().strip().split("\n")
         header = lines[0].split("\t")
-        assert header[0] == "name"
-        assert header[1] == "length"
-        assert header[2] == "n_contigs"
+        assert header[:3] == ["genome", "length", "n_contigs"]
+        assert "name" not in header
 
     def test_dump_unknown_table_raises(self, tiny_metacooler, tmp_path):
         out = tmp_path / "out.tsv"
@@ -245,20 +243,18 @@ class TestDumpTable:
         ):
             dump_table(tiny_metacooler, "pixels", pixels_format="wide", out=out)
 
-    def test_dump_contigs_shows_genome_name_and_id(self, tiny_metacooler, tmp_path):
-        """The genome NAME is surfaced alongside the internal integer genome_id."""
+    def test_dump_contigs_names_the_genome(self, tiny_metacooler, tmp_path):
+        """A contig's genome is printed by NAME, the internal genome_id not at all."""
         import pandas as pd
 
         out = tmp_path / "contigs.tsv"
         dump_table(tiny_metacooler, "contigs", header=True, out=out)
         df = pd.read_csv(out, sep="\t")
-        assert "genome" in df.columns
-        assert "genome_id" in df.columns
+        assert "genome_id" not in df.columns
         # The genome column holds names, not indices.
         assert set(df["genome"]) <= {"MAG_1", "MAG_2", "__unbinned__"}
-        assert pd.api.types.is_integer_dtype(df["genome_id"])
         # contig_D is unassigned -> __unbinned__ (a name, not an id).
-        row = df.loc[df["name"] == "contig_D"].iloc[0]
+        row = df.loc[df["contig"] == "contig_D"].iloc[0]
         assert row["genome"] == "__unbinned__"
 
     def test_dump_indexes_mmetacool_entry(self, tiny_mmetacool):

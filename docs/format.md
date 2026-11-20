@@ -55,7 +55,7 @@ One row per genome / MAG.
 | `n_contigs` | `int32` | Number of contigs assigned to this genome. |
 | `n_bins` | `int64` | Number of bins across all contigs of this genome. |
 | `qc_*` | `int64` / `float64` | Optional per-genome contact-quality columns (see [Contact-quality block](#qc-block)). Present when the file was created with `--qc` (the default) or annotated with `metacooler qc --store`. |
-| *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`), at creation or later with `metacooler annotate`. Stored as fixed-length bytes or numeric arrays. |
+| *extra columns* | any | Optional metadata columns from the `--genomes` table (e.g. `phylum`, `completeness`, `contamination`), at creation or later with `metacooler annotate`. Stored as fixed-length bytes or numeric arrays. A column called `genome` is stored as `user_genome`: `genome` is the key `dump` prints this table under. |
 
 The row *set* is derived from the contig-to-genome assignments: one row per
 distinct genome name in `/contigs`. A `--genomes` metadata table only supplies
@@ -79,7 +79,7 @@ link `/chroms → /contigs` makes it transparent to the cooler ecosystem.
 | `length` | `int32` | Contig length in bp. |
 | `genome_id` | `int32` | Zero-based index into `/genomes`. |
 | `qc_intra_contig_short`, `qc_intra_contig_long` | `int64` / `float64` | Optional per-contig contact-quality columns (see [Contact-quality block](#qc-block)), present whenever the `metadata["qc"]` block was stored with them. |
-| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`), at creation or later with `metacooler annotate`. ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. |
+| *extra columns* | any | Optional metadata columns from the `--contigs` table (e.g. `gc_content`, `coverage`), at creation or later with `metacooler annotate`. ASCII only: cooler reads every column of this group. Every member of the group must be a dataset; a `/` in a user column name is stored as `_`, since HDF5 would read it as a nested group. A column called `contig` or `genome` is stored as `user_contig` / `user_genome`: those are the keys `dump` prints this table under. |
 
 Row order is determined by the `--contig-order` strategy chosen at creation time
 and stored in the `contig-ordering` attribute.
@@ -164,7 +164,7 @@ by convention `tool`, `version`, `parameters` and `date`.
 | `parent` | `int32` | Row of `table/` of the cluster it was split from, in an earlier round; `-1` for none. |
 | `n_contigs` | `int32` | Number of member contigs. |
 | `length` | `int64` | Total length of its member contigs, in bp. |
-| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …), named anything but `genome` (below). |
+| *extra columns* | any | Optional per-cluster columns (completeness, contamination, …), named anything but `genome` (below) and `cluster` (what `dump` calls `name`). |
 
 Not stored: **`genome`**, the genome of the map whose contigs a cluster holds
 exactly, which `MetaCooler.clusters` and `dump -t clusters` add after

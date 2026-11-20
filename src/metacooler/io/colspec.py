@@ -28,6 +28,7 @@ while it parses its options, before any file is opened.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -76,6 +77,14 @@ GENOMES_FORMAT_DEFAULT = "genome_name"
 # metadata table only the contig (its genome column is an optional check).
 ASSIGNMENT_KEYS = ("contig", "genome")
 GENOMES_KEYS = ("genome",)
+
+#: The key columns of the default specs as ``dump`` names them, which a table
+#: written by ``dump -H`` carries in their place: a table that has none of the
+#: default names but every one of these is read through them (see
+#: :func:`resolve_column_spec`).
+_DUMPED_NAMES = {"contig_name": "contig", "genome_name": "genome"}
+
+logger = logging.getLogger("metacooler")
 
 # How many header names to quote when a named column is missing.
 _MAX_QUOTED_COLUMNS = 20
@@ -245,6 +254,43 @@ def _same_column_message(
     )
 
 
+def _as_dumped(
+    spec: ColumnSpec, names: Sequence[str], *, kind: str, path: str | Path
+) -> ColumnSpec:
+    """*spec*, reading the key columns of a ``dump`` when the table is one.
+
+    ``dump -H`` names the key columns ``contig`` and ``genome``, where the
+    default specs read ``contig_name`` and ``genome_name``. A spec whose every
+    named column is one of those defaults reads the dump's names instead, but
+    only when the table has none of the defaults and every one of the dump's:
+    a table with ``contig_name`` and no ``genome_name`` is refused as before,
+    rather than read through some other column that happens to be called
+    ``genome``.
+    """
+    named = [column for column in spec.columns if isinstance(column, str)]
+    if not named or not all(column in _DUMPED_NAMES for column in named):
+        return spec
+    if any(column in names for column in named):
+        return spec
+    if not all(_DUMPED_NAMES[column] in names for column in named):
+        return spec
+    columns = tuple(
+        _DUMPED_NAMES[column] if isinstance(column, str) else column
+        for column in spec.columns
+    )
+    dumped = ", ".join(repr(_DUMPED_NAMES[column]) for column in named)
+    logger.info(
+        "%s %s has no column %s but %s, as dump names them: reading those.",
+        kind,
+        path,
+        " or ".join(repr(column) for column in named),
+        dumped,
+    )
+    return dataclasses.replace(
+        spec, columns=columns, text=f"{spec.text}, read as {dumped}"
+    )
+
+
 def resolve_column_spec(
     spec: ColumnSpec,
     labels: Sequence[object],
@@ -275,6 +321,7 @@ def resolve_column_spec(
             absent from its header, or two entries resolve to one column.
     """
     names = [str(label) for label in labels]
+    spec = _as_dumped(spec, names, kind=kind, path=path)
     wanted = sum(column is not None for column in spec.columns)
     if len(names) < wanted:
         what = " and the ".join(keys[:wanted])

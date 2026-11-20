@@ -296,7 +296,7 @@ def test_a_scratch_group_left_behind_is_cleared(clustered: Path):
         ([{"name": "a", "when": object()}], CLUSTERS, MEMBERS, "JSON-serialisable"),
         (ROUNDS, CLUSTERS.drop(columns="round"), MEMBERS, "needs a 'round' column"),
         (ROUNDS, CLUSTERS.drop(columns="parent"), MEMBERS, "given by two columns"),
-        (ROUNDS, CLUSTERS.assign(n_contigs=1), MEMBERS, "computed by metacooler"),
+        (ROUNDS, CLUSTERS.assign(n_contigs=1), MEMBERS, "names are metacooler's"),
         (
             ROUNDS,
             CLUSTERS.rename(columns={"lineage": "a/b"}),
@@ -1149,14 +1149,16 @@ def test_the_genome_of_clusters_without_contigs(clustered: Path, tmp_path: Path)
     assert plain.empty and "genome" in plain.columns
 
 
-def test_genome_is_no_column_a_tool_may_store(clustered: Path):
-    with pytest.raises(ValueError, match="computed by metacooler .*: genome"):
-        _one_round(clustered, {"K": ["c1"]}, genome=["MAG_A"])
+@pytest.mark.parametrize("name", ["genome", "cluster"])
+def test_genome_and_cluster_are_no_columns_a_tool_may_store(clustered: Path, name):
+    """genome is computed, and cluster is what dump calls a cluster's name."""
+    with pytest.raises(ValueError, match=f"Rename: {name}"):
+        _one_round(clustered, {"K": ["c1"]}, **{name: ["x"]})
     _corrupt(
         clustered,
-        lambda g: g["table"].create_dataset("genome", data=np.zeros(5, "S1")),
+        lambda g: g["table"].create_dataset(name, data=np.zeros(5, "S1")),
     )
-    with pytest.raises(MetaCoolerFormatError, match="table/genome is reserved"):
+    with pytest.raises(MetaCoolerFormatError, match=f"table/{name} is reserved"):
         MetaCooler(clustered)
 
 
@@ -1368,7 +1370,7 @@ def test_dump_the_clusters_and_their_members(clustered: Path):
     lines = result.output.strip().splitlines()
     assert lines[0].split("\t")[:7] == [
         "round",
-        "name",
+        "cluster",
         "parent_round",
         "parent",
         "n_contigs",

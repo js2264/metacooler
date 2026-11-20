@@ -1378,29 +1378,105 @@ def _filter_by_genomes_and_contigs(
     return selected
 
 
-def contigs_with_genome_names(mc: MetaCooler) -> pd.DataFrame:
-    """The ``/contigs`` table with a ``genome`` column holding the genome *name*.
+#: The key column of each table as ``dump`` prints it and ``--filter`` reads
+#: it: a contig by its name, a genome by its name, a contig's genome by the
+#: genome's name -- never by the row numbers the file stores them under.
+CONTIG_KEY = "contig"
+GENOME_KEY = "genome"
 
-    ``/contigs`` stores only the integer ``genome_id``, but a filter is written
-    against names (``contigs.genome == MAG_01``), and ``create`` evaluates the
-    same expressions before any id exists.  Deriving the column here is what
-    makes the filter language identical on both sides.
 
-    A contig table that already carries its own ``genome`` column keeps it:
-    ``genome`` is not one of ``_CONTIGS_RESERVED_COLUMNS``, so a user column of
-    that name survives creation verbatim, and overwriting it here would filter
-    on something other than what ``dump`` prints.
+def _shown_as(column: str, taken: set[str]) -> str:
+    """The name a stored column that takes a key's name is shown under:
+    ``user_<column>``, as ``create`` now stores a user column of that name."""
+    new = f"user_{column}"
+    while new in taken:
+        new = f"user_{new}"
+    taken.add(new)
+    return new
+
+
+def contigs_view(
+    contigs: pd.DataFrame, genome_names: pd.Series | np.ndarray
+) -> pd.DataFrame:
+    """``/contigs`` keyed by name: ``contig``, ``genome``, ``length``, the rest.
+
+    The table as ``dump -t contigs`` prints it and ``--filter contigs.*``
+    reads it: the contig's name, its genome's name (not the ``genome_id`` row
+    number), its length, then every other stored column, in order. A stored
+    column called ``contig`` or ``genome`` -- a user column that a map written
+    before those names were reserved kept as given -- is shown as
+    ``user_contig`` / ``user_genome``, the names ``create`` now stores it
+    under.
 
     Args:
-        mc: Open ``MetaCooler`` instance.
+        contigs: ``/contigs`` as stored (``MetaCooler.contigs``, or the table
+            ``create`` is about to write).
+        genome_names: ``/genomes/name``, by genome id.
 
     Returns:
-        The contigs table, with a ``genome`` column.
+        A new frame, indexed as *contigs* (by contig id).
     """
-    contigs = mc.contigs
-    if "genome" in contigs.columns:
-        return contigs
-    return contigs.assign(genome=contigs["genome_id"].map(mc.genomes["name"]))
+    names = np.asarray(genome_names, dtype=object)
+    rest = [c for c in contigs.columns if c not in ("name", "length", "genome_id")]
+    taken = {str(c) for c in contigs.columns} | {CONTIG_KEY, GENOME_KEY}
+    shown = {
+        c: _shown_as(str(c), taken) if c in (CONTIG_KEY, GENOME_KEY) else c
+        for c in rest
+    }
+    view = pd.DataFrame(
+        {
+            CONTIG_KEY: contigs["name"].to_numpy(dtype=object),
+            GENOME_KEY: names[contigs["genome_id"].to_numpy(np.int64)],
+            "length": contigs["length"].to_numpy(),
+        },
+        index=contigs.index,
+    )
+    if not rest:
+        return view
+    return pd.concat([view, contigs[rest].rename(columns=shown)], axis=1)
+
+
+def genomes_view(genomes: pd.DataFrame) -> pd.DataFrame:
+    """``/genomes`` keyed by name: ``genome``, then every other stored column.
+
+    The table as ``dump -t genomes`` prints it and ``--filter genomes.*``
+    reads it. A stored column called ``genome`` (see :func:`contigs_view`) is
+    shown as ``user_genome``.
+
+    Args:
+        genomes: ``/genomes`` as stored, or the table ``create`` is about to
+            write.
+
+    Returns:
+        A new frame, indexed as *genomes* (by genome id).
+    """
+    taken = {str(c) for c in genomes.columns} | {GENOME_KEY}
+    rest = genomes.drop(columns="name")
+    view = rest.rename(
+        columns={GENOME_KEY: _shown_as(GENOME_KEY, taken)}
+        if GENOME_KEY in rest.columns
+        else {}
+    )
+    view.insert(0, GENOME_KEY, genomes["name"].to_numpy(dtype=object))
+    return view
+
+
+def contigs_filter_frame(
+    contigs: pd.DataFrame, genome_names: pd.Series | np.ndarray
+) -> pd.DataFrame:
+    """What ``--filter contigs.*`` reads: :func:`contigs_view`, plus ``name``
+    and ``genome_id`` as stored, so a filter written for a map's own columns
+    (``contigs.name``) keeps working."""
+    return contigs_view(contigs, genome_names).assign(
+        name=contigs["name"].to_numpy(dtype=object),
+        genome_id=contigs["genome_id"].to_numpy(),
+    )
+
+
+def genomes_filter_frame(genomes: pd.DataFrame) -> pd.DataFrame:
+    """What ``--filter genomes.*`` reads: :func:`genomes_view`, plus ``name``
+    as stored (see :func:`contigs_filter_frame`)."""
+    return genomes_view(genomes).assign(name=genomes["name"].to_numpy(dtype=object))
 
 
 def resolve_contig_selection(
@@ -1445,7 +1521,8 @@ def resolve_contig_selection(
     if not named and not parsed:
         return None
 
-    all_contigs = contigs_with_genome_names(mc)
+    all_genomes = genomes_filter_frame(mc.genomes)
+    all_contigs = contigs_filter_frame(mc.contigs, mc.genomes["name"])
     if named:
         selected = _filter_by_genomes_and_contigs(mc, genomes=genomes, contigs=contigs)
     else:
@@ -1453,7 +1530,6 @@ def resolve_contig_selection(
     if not parsed:
         return selected
 
-    all_genomes = mc.genomes
     keep_genome_ids = set(
         all_genomes.index[filter_mask(all_genomes, parsed, table="genomes")]
     )
