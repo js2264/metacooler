@@ -339,16 +339,26 @@ def test_the_package_exports_the_weight_api():
 # ----------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "filters",
+    [{"min_nnz": 2}, {"min_nnz": 0, "min_count": 50}],
+    ids=["min_nnz", "min_count"],
+)
 def test_ice_by_genome_is_cooler_cis_only_when_every_contig_is_a_genome(
-    tmp_path: Path, community: MetaHiC
+    tmp_path: Path, community: MetaHiC, filters
 ):
+    # Contigs of 2 to 8 bins: at cooler's default min_nnz of 10, every bin of
+    # a contig balanced on its own is masked, on both sides, and the
+    # comparison would hold vacuously.
     path = _rebuild(tmp_path, community, lambda n: f"G_{n}", "per_contig")
-    ours = N.normalize_ice(path, store=False, tol=1e-12, max_iters=2000).weights
+    ours = N.normalize_ice(path, store=False, tol=1e-12, max_iters=2000, **filters)
     ref, _ = cooler.balance_cooler(
-        cooler.Cooler(str(path)), cis_only=True, tol=1e-12, max_iters=2000
+        cooler.Cooler(str(path)), cis_only=True, tol=1e-12, max_iters=2000, **filters
     )
-    assert_array_equal(np.isnan(ours), np.isnan(ref))
-    assert_allclose(ours, ref, rtol=1e-9)
+    assert ours.attrs["converged"]
+    assert np.isfinite(ours.weights).sum() >= len(ours.weights) // 3
+    assert_array_equal(np.isnan(ours.weights), np.isnan(ref))
+    assert_allclose(ours.weights, ref, rtol=1e-9)
 
 
 def test_ice_by_genome_is_cooler_global_when_there_is_one_genome(
@@ -366,7 +376,18 @@ def test_ice_by_genome_is_cooler_global_when_there_is_one_genome(
     ref, _ = cooler.balance_cooler(
         cooler.Cooler(str(path)), mad_max=0, ignore_diags=1, tol=1e-12, max_iters=2000
     )
+    assert ours.attrs["converged"]
+    assert np.isfinite(ours.weights).sum() >= len(ours.weights) // 2
     assert_allclose(ours.weights, ref, rtol=1e-9)
+
+
+def test_ice_by_genome_rereads_a_map_too_large_to_cache(mapfile: Path, monkeypatch):
+    """Past the cache, every iteration re-reads the pixels: same weights."""
+    cached = N.normalize_ice(mapfile, store=False, chunksize=97)
+    monkeypatch.setattr(N, "_ICE_CACHE_PIXELS", 50)
+    reread = N.normalize_ice(mapfile, store=False, chunksize=97)
+    assert np.isfinite(cached.weights).any()
+    assert_array_equal(reread.weights, cached.weights)
 
 
 def test_ice_ignore_diags_stops_at_a_contig_boundary(community: MetaHiC):
