@@ -111,10 +111,11 @@ A column written by `normalize ice` or `store_weights` carries HDF5 attributes:
 
 | Attribute | Description |
 |-----------|-------------|
-| `normalization` | The method: `ice`, or the name the writer gave its own (`store_weights(method=...)`). |
+| `normalization` | The method: `ice`, `normcc` or `hiczin`, or the name the writer gave its own (`store_weights(method=...)`). |
 | `divisive_weights` | Always `false`, as `cooler balance` writes it. |
-| `depends_on` | What the weights were computed from, a list of: `pixels`; `genome_id`, the contig-to-genome assignment, for a weight computed per genome (or fitted on the pairs of contigs of one genome); `contigs/<column>` for each `/contigs` column read (a coverage, a site count). `normalize ice` writes `pixels`, plus `genome_id` at its default `genome` scope. |
-| *parameters* | The method's parameters and fit statistics — for `ice`: `scope`, `ignore_diags`, `mad_max`, `converged`, `var`, … — or the writer's own (`store_weights(parameters=...)`). |
+| `depends_on` | What the weights were computed from, a list of: `pixels`; `genome_id`, the contig-to-genome assignment, for a weight computed per genome (or fitted on the pairs of contigs of one genome); `contigs/<column>` for each `/contigs` column read (a coverage, a site count). `normalize ice` writes `pixels`, plus `genome_id` at its default `genome` scope; `hiczin` writes `genome_id` and its coverage column. |
+| `spurious_cutoff`, `spurious_rule` | Optional: a contig pair whose normalized contact is below the cutoff (`<`) or at most the cutoff (`<=`) is spurious. NormCC and HiCzin store one; `network --drop-spurious` applies it. |
+| *parameters* | The method's parameters and fit statistics — `scope`, `converged`, `coefficients`, … — or the writer's own (`store_weights(parameters=...)`). |
 | `metacooler_version` | The version that stored them. |
 
 A column without these attributes — one `cooler balance` wrote — is read as

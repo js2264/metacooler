@@ -1,11 +1,12 @@
-"""metacooler normalize — balance a map and list the weights it carries.
+"""metacooler normalize — compute normalization weights and store them in /bins.
 
-``normalize ice`` balances a map, by default genome by genome, and stores the
-weights as a column of ``/bins``, as ``cooler balance`` does: the pixels are
-never rewritten, and the column is read back with ``show``/``dump``/``network
---balance NAME`` -- or by cooler, cooltools and HiGlass, which apply
-``/bins/NAME`` the same way.  ``normalize list`` lists every weight column of a
-map, including those another tool stored with
+``normalize ice`` balances a map, by default genome by genome; ``normalize
+normcc`` and ``normalize hiczin`` are MetaCC's and HiCBin's normalizations.
+Each stores a weight column in the map itself, as ``cooler balance`` does: the
+pixels are never rewritten, and the column is read back with
+``show``/``dump``/``network --balance NAME`` -- or by cooler, cooltools and
+HiGlass, which apply ``/bins/NAME`` the same way.  ``normalize list`` lists
+every weight column of a map, including those another tool stored with
 :func:`metacooler.io.weights.store_weights`.
 """
 
@@ -15,9 +16,16 @@ from pathlib import Path
 
 import rich_click as click
 
-from metacooler.cli._options import quiet_option, verbose_option
+from metacooler.cli._options import parse_comma_list, quiet_option, verbose_option
 from metacooler.cli.main import MetaCoolURI, cli
 from metacooler.schema import DEFAULT_CHUNKSIZE
+
+#: Defaults shown in ``--help``; the API's own live in metacooler.ops.normalize,
+#: which is not imported here so that ``--help`` stays fast.
+_MIN_LENGTH = "1000"
+_MIN_SIGNAL = 2.0
+_SPURIOUS = 0.05
+_MAX_PAIRS = 1_000_000
 
 
 def _common_options(default_name: str):
@@ -51,6 +59,73 @@ def _common_options(default_name: str):
     return decorate
 
 
+def _sites_options(f):
+    """``--sites`` / ``--enzyme`` / ``--fasta``: where restriction sites come from."""
+    f = click.option(
+        "--fasta",
+        type=click.Path(exists=True, dir_okay=False, path_type=Path),
+        default=None,
+        help="Assembly FASTA (plain or [cyan].gz[/cyan]) to count the sites of "
+        "[cyan]--enzyme[/cyan] in.",
+    )(f)
+    f = click.option(
+        "--enzyme",
+        "enzymes",
+        type=str,
+        multiple=True,
+        callback=parse_comma_list,
+        help="Restriction enzyme(s) of the library (comma-separated or repeated): "
+        "names such as [cyan]DpnII[/cyan], [cyan]HinfI[/cyan], [cyan]Arima[/cyan], "
+        "or IUPAC sites such as [cyan]GATC[/cyan]. Needs [cyan]--fasta[/cyan].",
+    )(f)
+    f = click.option(
+        "--sites",
+        type=str,
+        default=None,
+        metavar="COLUMN",
+        help="[cyan]/contigs[/cyan] column holding each contig's restriction-site "
+        "count, used as is.",
+    )(f)
+    return f
+
+
+def _filter_options(f):
+    """The contig filters of MetaCC and HiCBin, and the spurious-contact quantile."""
+    f = click.option(
+        "--spurious",
+        type=click.FloatRange(min=0, max=1, max_open=True),
+        default=_SPURIOUS,
+        show_default=True,
+        help="Quantile of the normalized contig-pair contacts stored as the "
+        "spurious-contact cutoff (see [cyan]network --drop-spurious[/cyan]).",
+    )(f)
+    f = click.option(
+        "--min-signal",
+        type=click.FloatRange(min=0),
+        default=_MIN_SIGNAL,
+        show_default=True,
+        help="Leave out contigs whose largest contact with another contig is smaller.",
+    )(f)
+    f = click.option(
+        "--min-length",
+        type=str,
+        default=_MIN_LENGTH,
+        show_default=True,
+        help="Leave out shorter contigs. Accepts [cyan]bp/kb/Mb[/cyan] suffixes.",
+    )(f)
+    return f
+
+
+def _distance(value: str, option: str) -> int:
+    """Parse a distance option, reporting a bad value against the option."""
+    from metacooler.filters import parse_distance
+
+    try:
+        return parse_distance(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint=option) from exc
+
+
 def _start(verbose: bool, quiet: bool, command: str) -> list[str]:
     """Set up logging and return the command line to record as provenance."""
     from metacooler.cli._provenance import reconstruct_command
@@ -63,7 +138,7 @@ def _start(verbose: bool, quiet: bool, command: str) -> list[str]:
 @cli.group(
     name="normalize",
     help="""
-Balance a map and store the weights in [cyan]/bins[/cyan].
+Compute normalization weights and store them in [cyan]/bins[/cyan].
 
 A weight column holds one weight per bin, as [cyan]cooler balance[/cyan] writes
 it: the normalized contact of two bins is the raw count times both weights, NaN
@@ -75,7 +150,7 @@ same way with [cyan]metacooler.store_weights[/cyan] in Python.
 """,
 )
 def normalize() -> None:
-    """Group for ``normalize ice`` and ``normalize list``."""
+    """Group for the normalization methods and ``normalize list``."""
 
 
 @normalize.command(
@@ -177,8 +252,133 @@ def normalize_ice_cmd(
     )
 
 
+@normalize.command(
+    name="normcc",
+    help="""
+NormCC, the normalization of MetaCC (Du & Sun, Nat. Commun. 2023).
+
+A negative binomial regression of each contig's contacts with the other contigs
+on its restriction sites, length and intra-contig contacts (which stand in for
+coverage). Without [cyan]--sites[/cyan] or [cyan]--enzyme[/cyan], the site term
+is left out, as in MetaCC.
+""",
+)
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
+@_sites_options
+@_filter_options
+@_common_options("normcc")
+def normalize_normcc_cmd(
+    metacool_path: str,
+    sites: str | None,
+    enzymes: list[str],
+    fasta: Path | None,
+    min_length: str,
+    min_signal: float,
+    spurious: float,
+    name: str,
+    chunksize: int,
+    force: bool,
+    verbose: bool,
+    quiet: bool,
+) -> None:
+    """Normalize a map with NormCC."""
+    commands = _start(verbose, quiet, "normcc")
+    from metacooler.ops.normalize import normalize_normcc
+
+    normalize_normcc(
+        metacool_path,
+        sites=sites,
+        enzymes=enzymes or None,
+        fasta=fasta,
+        min_length=_distance(min_length, "--min-length"),
+        min_signal=min_signal,
+        spurious=spurious,
+        name=name,
+        chunksize=chunksize,
+        force=force,
+        commands=commands,
+    )
+
+
+@normalize.command(
+    name="hiczin",
+    help="""
+HiCzin, the normalization of HiCBin (Du et al., J. Comput. Biol. 2022).
+
+A zero-inflated negative binomial regression of the contacts between contigs of
+one genome on their restriction sites, lengths and coverages. HiCzin learns
+those pairs from a taxonomic labelling; here they come from the genome
+assignment. Without [cyan]--sites[/cyan] or [cyan]--enzyme[/cyan], the site term
+is left out (HiCzin_LC).
+""",
+)
+@click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
+@click.option(
+    "--coverage",
+    type=str,
+    required=True,
+    metavar="COLUMN",
+    help="[cyan]/contigs[/cyan] column holding each contig's shotgun coverage.",
+)
+@_sites_options
+@_filter_options
+@click.option(
+    "--max-pairs",
+    type=click.IntRange(min=0),
+    default=_MAX_PAIRS,
+    show_default=True,
+    help="Fit on a uniform sample of at most this many pairs of contigs "
+    "(0: all of them).",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Seed of that sample.",
+)
+@_common_options("hiczin")
+def normalize_hiczin_cmd(
+    metacool_path: str,
+    coverage: str,
+    sites: str | None,
+    enzymes: list[str],
+    fasta: Path | None,
+    min_length: str,
+    min_signal: float,
+    spurious: float,
+    max_pairs: int,
+    seed: int,
+    name: str,
+    chunksize: int,
+    force: bool,
+    verbose: bool,
+    quiet: bool,
+) -> None:
+    """Normalize a map with HiCzin."""
+    commands = _start(verbose, quiet, "hiczin")
+    from metacooler.ops.normalize import normalize_hiczin
+
+    normalize_hiczin(
+        metacool_path,
+        coverage=coverage,
+        sites=sites,
+        enzymes=enzymes or None,
+        fasta=fasta,
+        min_length=_distance(min_length, "--min-length"),
+        min_signal=min_signal,
+        spurious=spurious,
+        max_pairs=max_pairs,
+        seed=seed,
+        name=name,
+        chunksize=chunksize,
+        force=force,
+        commands=commands,
+    )
+
+
 #: Attributes shown by ``normalize list``, in order, when a column has them.
-_LIST_DETAILS = ("scope", "converged")
+_LIST_DETAILS = ("scope", "converged", "spurious_cutoff")
 
 
 @normalize.command(

@@ -13,16 +13,23 @@
     the MAD filter's medians taken per genome); `--scope contig|global` are
     cooler's. Where the groupings coincide the weights are cooler's, bit for
     bit.
+  - `normalize normcc`: MetaCC's negative binomial regression (Du & Sun
+    2023).
+  - `normalize hiczin`: HiCzin's zero-inflated negative binomial regression
+    (Du et al. 2022), fitted on the pairs of contigs of one genome.
   - `normalize list`: the weight columns of a map and how they were computed,
     whoever stored them.
 
-  metacooler computes ICE only. Any other tool stores its own normalization
-  the same way with **`metacooler.store_weights`**, naming what the weights
-  were computed from (`depends_on`: the pixels, the genome assignment,
-  `/contigs` columns), and `metacooler.read_weights` reads a column back.
-  Python: `metacooler.normalize_ice`.
+  Restriction sites come from a `/contigs` column (`--sites`) or are counted
+  from `--enzyme` in `--fasta`. Any other tool stores its own normalization the
+  same way with **`metacooler.store_weights`**, naming what the weights were
+  computed from (`depends_on`: the pixels, the genome assignment, `/contigs`
+  columns), and `metacooler.read_weights` reads a column back. Python:
+  `metacooler.normalize_ice`, `normalize_normcc`, `normalize_hiczin`.
 - **`--balance NAME`** on `show`, `dump` (a `balanced` column, as
-  `cooler dump --balanced`) and `network`, for any weight column.
+  `cooler dump --balanced`) and `network`, for any weight column;
+  **`network --drop-spurious`** drops the contig pairs below the
+  spurious-contact cutoff NormCC and HiCzin store.
 - **Normalization weights are dropped when they go stale.** `reassign` drops
   the weights that depend on the genome assignment when a contig changes genome
   — and, when it rewrites the map, restores the attributes of the weights it

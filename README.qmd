@@ -156,7 +156,7 @@ display(Markdown(f"```yaml\n{content}\n```"))
 - **Metacool identity**: `metacooler-format="HDF5::MetaCooler"` attribute + `genomes/` group
 - **Implement genomes table**: `name`, `length`, `n_contigs`, `n_bins`, plus optional metadata columns
 - **Support multi-contigs and multi-genomes visualization**: `show` command at `--level bin/contig/genome`
-- **Normalize metagenome-aware**: `normalize ice` balances genome by genome and stores cooler-style weights in `/bins`, beside those any other tool stores with `metacooler.store_weights`; `show`/`dump`/`network --balance` read them, and so does cooler itself
+- **Normalize metagenome-aware**: `normalize ice` (balancing genome by genome), `normcc` (MetaCC) and `hiczin` (HiCzin) store cooler-style weights in `/bins`, beside those any other tool stores with `metacooler.store_weights`; `show`/`dump`/`network --balance` read them, and so does cooler itself
 - **Report contact quality**: the 3D ratio and its intra-contig / intra-MAG / inter-MAG breakdown, tallied at creation time into `metadata.qc` and per-MAG `/genomes` columns, recomputable with `qc`
 - **Export P(s)**: contact probability vs genomic distance, pooled or per MAG, as a table and a log-log plot (`ps`). `create pairs` writes the per-MAG curve at base-pair resolution beside the output as `<output>.ps.tsv`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
