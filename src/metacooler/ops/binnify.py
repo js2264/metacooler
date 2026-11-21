@@ -740,6 +740,7 @@ def _write_rebinned_metacool(
     import h5py
 
     from metacooler.io._utils import _finalize_metacool_file, write_cooler
+    from metacooler.io.staging import recorded_uri
     from metacooler.schema import validate
 
     # Pre-compute index offsets from the bins DataFrame
@@ -764,7 +765,9 @@ def _write_rebinned_metacool(
     # qc_* columns of the tables below, per genome and per contig.
     metadata = strip_qc_metadata(source_metadata)
     history = list(metadata.get("binnify", []))
-    history.append({"source": str(source_uri), "binsize": int(binsize), "level": level})
+    history.append(
+        {"source": recorded_uri(source_uri), "binsize": int(binsize), "level": level}
+    )
     metadata["binnify"] = history
     genomes = strip_qc_columns(genomes)
     contigs = strip_contig_qc_columns(contigs)

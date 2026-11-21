@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import contextlib
-import functools
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import cooler
 import h5py
@@ -32,6 +31,52 @@ from metacooler.schema import (
 
 if TYPE_CHECKING:
     from typing import Literal
+
+T = TypeVar("T")
+
+
+class _cached(Generic[T]):  # noqa: N801 - a decorator, as cached_property is
+    """What a :class:`MetaCooler` reads once and keeps, checked on every read.
+
+    Like :func:`functools.cached_property`, the value is computed on its first
+    read and kept in the instance's ``__dict__``, under its own name; unlike
+    it, every read of it -- the first and every later one -- checks first that
+    the map's file is still the one the map opened
+    (:meth:`MetaCooler._check_unchanged`), so that nothing read from a map
+    since replaced or written is answered.  A data descriptor, so that the
+    value kept does not shadow it.
+    """
+
+    def __init__(self, compute: Callable[[Any], T]) -> None:
+        self._compute = compute
+        self._name = getattr(compute, "__name__", "")  # set by __set_name__ too
+        self.__doc__ = compute.__doc__
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._name = name
+
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> _cached[T]: ...
+
+    @overload
+    def __get__(self, instance: MetaCooler, owner: type | None = None) -> T: ...
+
+    def __get__(
+        self, instance: MetaCooler | None, owner: type | None = None
+    ) -> T | _cached[T]:
+        if instance is None:
+            return self
+        instance._check_unchanged()
+        kept = instance.__dict__
+        if self._name not in kept:
+            kept[self._name] = self._compute(instance)
+        return kept[self._name]
+
+    def __set__(self, instance: MetaCooler, value: T) -> None:
+        instance.__dict__[self._name] = value
+
+    def __delete__(self, instance: MetaCooler) -> None:
+        instance.__dict__.pop(self._name, None)
 
 
 class MetaCooler:
@@ -122,7 +167,7 @@ class MetaCooler:
         if validate:
             self._check_decodable()
 
-    @functools.cached_property
+    @_cached
     def _clr(self) -> cooler.Cooler:
         """The ``cooler.Cooler`` this map delegates to, opened on first use.
 
@@ -134,7 +179,9 @@ class MetaCooler:
         Every read through it -- a selector's slice or fetch, ``info``,
         ``extent``, ... -- checks before and after that the file is still the
         one this map opened (:meth:`_check_unchanged`): cooler opens the file
-        again for every chunk it reads.
+        again for every chunk it reads.  What cooler keeps from its open
+        (``chromnames``, ``chromsizes``) is checked as every value this object
+        keeps is (:class:`_cached`).
         """
         self._check_unchanged()
         clr = _open_cooler(
@@ -151,8 +198,9 @@ class MetaCooler:
         time, opening its file for each: a read that spanned the replacement
         mixed the bins of one map with the pixels of the other, silently.
         Every read checks before and after it (device, inode, size and
-        modification time, as at open).  A write through this object's own
-        :meth:`open` is not a change.
+        modification time, as at open), and so does every read of what this
+        object keeps (:class:`_cached`).  A write through this object's own
+        :meth:`open` is not a change: it drops what was kept instead.
 
         Raises:
             MapChangedError: If the file is not the one this map opened, or
@@ -197,7 +245,7 @@ class MetaCooler:
         with self.open() as grp:
             return cooler_info(grp)
 
-    @functools.cached_property
+    @_cached
     def _attrs_at_open(self) -> dict:
         return self._attrs()
 
@@ -235,9 +283,9 @@ class MetaCooler:
     # ------------------------------------------------------------------
     # Delegated to cooler.Cooler (pass-through)
     # ------------------------------------------------------------------
-    @functools.cached_property
+    @_cached
     def _bins_cache(self) -> pd.DataFrame:
-        """Cached bin table — bins are immutable once written."""
+        """The bin table, read once and kept (and checked: :class:`_cached`)."""
         return cast(pd.DataFrame, self._clr.bins()[:])
 
     def bins(self, **kw) -> pd.DataFrame:
@@ -474,17 +522,24 @@ class MetaCooler:
     # ------------------------------------------------------------------
     # metacooler-specific properties
     # ------------------------------------------------------------------
-    @functools.cached_property
+    @property
     def genomes(self) -> pd.DataFrame:
         """The ``/genomes`` table as a DataFrame.
 
-        Loaded once and then cached.  The table has at least the columns
-        ``name`` (str), ``length`` (int), and ``n_contigs`` (int).
+        Read once and kept, like every table this object reads more than
+        once; every read of it checks first that the map's file was not
+        replaced or written since the map was opened
+        (:class:`~metacooler.MapChangedError` if it was).  The table has at
+        least the columns ``name`` (str), ``length`` (int), and ``n_contigs``
+        (int).
 
         Returns:
             DataFrame indexed 0 … n_genomes-1 with one row per genome.
         """
-        self._check_unchanged()
+        return self._genomes_table
+
+    @_cached
+    def _genomes_table(self) -> pd.DataFrame:
         key = (
             self._group_path.lstrip("/") + "/genomes"
             if self._group_path != "/"
@@ -494,18 +549,22 @@ class MetaCooler:
         self._check_unchanged()
         return table
 
-    @functools.cached_property
+    @property
     def contigs(self) -> pd.DataFrame:
         """The ``/contigs`` table as a DataFrame.
 
-        Loaded once and then cached.  The table has at least the columns
-        ``name`` (str), ``length`` (int), and ``genome_id`` (int, 0-based
-        index into the :attr:`genomes` table).
+        Read once and kept, and checked on every read as :attr:`genomes` is.
+        The table has at least the columns ``name`` (str), ``length`` (int),
+        and ``genome_id`` (int, 0-based index into the :attr:`genomes`
+        table).
 
         Returns:
             DataFrame indexed 0 … n_contigs-1 with one row per contig.
         """
-        self._check_unchanged()
+        return self._contigs_table
+
+    @_cached
+    def _contigs_table(self) -> pd.DataFrame:
         key = (
             self._group_path.lstrip("/") + "/contigs"
             if self._group_path != "/"
@@ -519,22 +578,27 @@ class MetaCooler:
     # Clustering rounds (see docs/format.md#clusters)
     # ------------------------------------------------------------------
 
-    @functools.cached_property
+    @property
     def cluster_rounds(self) -> list[dict]:
         """The clustering rounds of the map, in the order they were made.
 
         Each is a dict with a ``name`` and what its tool stored with it (by
-        convention ``tool``, ``version``, ``parameters`` and ``date``).
+        convention ``tool``, ``version``, ``parameters`` and ``date``).  Read
+        once and kept, and checked on every read as :attr:`genomes` is.
 
         Returns:
             One dict per round; empty when the map has no ``/clusters``.
         """
+        return self._cluster_rounds
+
+    @_cached
+    def _cluster_rounds(self) -> list[dict]:
         with self.open() as grp:
             if CLUSTERS_GROUP not in grp:
                 return []
             return cluster_rounds(grp[CLUSTERS_GROUP])
 
-    @functools.cached_property
+    @_cached
     def _cluster_table(self) -> pd.DataFrame:
         """``/clusters/table`` with its rounds and parents resolved to names.
 
@@ -567,7 +631,7 @@ class MetaCooler:
         extra = table.drop(columns=list(CLUSTER_TABLE_COLUMNS))
         return pd.concat([out, extra], axis=1)
 
-    @functools.cached_property
+    @property
     def clusters(self) -> pd.DataFrame:
         """One row per cluster of every clustering round.
 
@@ -583,11 +647,17 @@ class MetaCooler:
         says which clusters the map's genomes are, whatever made them, and
         follows a ``reassign``. ``__unbinned__`` is no genome.
 
+        Read once and kept, and checked on every read as :attr:`genomes` is.
+
         Returns:
             DataFrame indexed by cluster id, the ``cluster_id`` of the stored
             members; empty, with the columns above, when the map has no
             ``/clusters``.
         """
+        return self._all_clusters
+
+    @_cached
+    def _all_clusters(self) -> pd.DataFrame:
         return self._clusters_of(None)
 
     def _clusters_of(self, rows: np.ndarray | None) -> pd.DataFrame:
@@ -794,10 +864,10 @@ class MetaCooler:
             columns=["round", "cluster", "contig"],
         )
 
-    @functools.cached_property
+    @_cached
     def _contig_name_strings(self) -> np.ndarray:
         """``/contigs/name`` decoded, as ``str`` objects (cached)."""
-        if "contigs" in self.__dict__:  # the table is loaded already
+        if "_contigs_table" in self.__dict__:  # the table is loaded already
             return self.contigs["name"].to_numpy(dtype=object)
         return _decode_names(self._contig_names_raw)
 
@@ -810,7 +880,7 @@ class MetaCooler:
         most of the column, decoded once and kept.
         """
         ids = np.asarray(contig_ids, dtype=np.int64)
-        if "_contig_name_strings" in self.__dict__ or "contigs" in self.__dict__:
+        if "_contig_name_strings" in self.__dict__ or "_contigs_table" in self.__dict__:
             return self._contig_name_strings[ids]
         if len(ids) <= _POINT_READS:
             with self.open() as grp:
@@ -861,30 +931,30 @@ class MetaCooler:
         with self.open() as grp:
             return grp["indexes"][name][:].astype(np.int64)
 
-    @functools.cached_property
+    @_cached
     def _chrom_offset(self) -> np.ndarray:
         return self._read_index("chrom_offset")
 
-    @functools.cached_property
+    @_cached
     def _genome_offset(self) -> np.ndarray:
         return self._read_index("genome_offset")
 
-    @functools.cached_property
+    @_cached
     def _bin1_offset(self) -> np.ndarray:
         return self._read_index("bin1_offset")
 
-    @functools.cached_property
+    @_cached
     def _bin_contig_ids(self) -> np.ndarray:
         """Contig id of every bin, from ``chrom_offset`` alone (one ``repeat``)."""
         offsets = self._chrom_offset
         return np.repeat(np.arange(len(offsets) - 1, dtype=np.int64), np.diff(offsets))
 
-    @functools.cached_property
+    @_cached
     def _contig_genome_ids(self) -> np.ndarray:
         with self.open() as grp:
             return grp["contigs"]["genome_id"][:].astype(np.int64)
 
-    @functools.cached_property
+    @_cached
     def _contig_names_raw(self) -> np.ndarray:
         """``/contigs/name`` as stored: fixed-width bytes, never decoded."""
         with self.open() as grp:
@@ -905,11 +975,11 @@ class MetaCooler:
         hits = np.flatnonzero(self._contig_names_raw == key)
         return int(hits[0]) if hits.size else None
 
-    @functools.cached_property
+    @_cached
     def _genome_ids(self) -> dict[str, int]:
         return {str(name): i for i, name in enumerate(self.genomes["name"])}
 
-    @functools.cached_property
+    @_cached
     def _genome_grouped(self) -> bool:
         """Whether ``genome_offset`` delimits each genome's contig block."""
         with self.open() as grp:
@@ -1018,7 +1088,7 @@ class MetaCooler:
         )
         return out
 
-    @functools.cached_property
+    @_cached
     def _chrom_dtype(self) -> pd.CategoricalDtype:
         """The dtype cooler gives ``bins.chrom``: the contig names, ordered.
 
@@ -1296,7 +1366,10 @@ class MetaCooler:
                 ``"r+"`` (or ``"a"``) opens for in-place modification, under
                 the map's lock (:func:`metacooler.lock`): that write is *not*
                 staged -- it edits the file itself, as h5py does.  The
-                metacooler writers stage theirs.
+                metacooler writers stage theirs.  Once it ends, what this
+                object kept is read again when next asked for.  On the staged
+                map of an edit session, a write that raises fails the session
+                (see :func:`metacooler.staged_edit`).
 
         Yields:
             The map's group (the root ``h5py.File``, or an entry's group).
@@ -1317,16 +1390,29 @@ class MetaCooler:
                 yield f[key] if key else f
             self._check_unchanged()
             return
-        from metacooler.io.staging import _refuse_the_map_of_a_session, lock
+        from metacooler.io.staging import (
+            _refuse_the_map_of_a_session,
+            _session_write,
+            lock,
+        )
 
         _refuse_the_map_of_a_session(self._store)
         with lock(self._store):
             self._check_unchanged()
             try:
-                with h5py.File(self._store, mode) as f:
+                with _session_write(self._store), h5py.File(self._store, mode) as f:
                     yield f[key] if key else f
             finally:
                 self._state = file_state(self._store)
+                self._forget()
+
+    def _forget(self) -> None:
+        """Drop what this object keeps (:class:`_cached`): its own write changed
+        what it was read from."""
+        for klass in type(self).__mro__:
+            for name, value in vars(klass).items():
+                if isinstance(value, _cached):
+                    self.__dict__.pop(name, None)
 
 
 class _CheckedSelector:

@@ -12,7 +12,8 @@ a fresh copy of the map, edited, validated in full, given the map's mode,
 owner, group and extended attributes, and only then renamed over the map.
 :func:`staged_edit` opens one such copy for several edits: every writer given
 its path writes into it directly, and it is validated and renamed once, over
-the map or onto an output path.  What that guarantees:
+the map or onto an output path (under the output's lock, and staged beside
+it: the map is only read).  What that guarantees:
 
 - **The map is whole, always.**  On any failure -- an error, a validation that
   fails, ``KeyboardInterrupt``, ``SystemExit`` -- the staging directory is
@@ -22,11 +23,16 @@ the map or onto an output path.  What that guarantees:
   its lock's ``uuid``.  Whoever takes the map's lock next -- by a takeover, or
   once the lock was deleted by hand -- removes every staging directory of the
   map that is not its own, naming each: whoever left it no longer holds the
-  lock.
+  lock.  A writer that fails with an edit session's staged map in hand fails
+  the session, which then writes nothing, even if the error was caught.
 - **The map does not grow.**  HDF5 never reclaims the space of what an edit
-  replaces, so a map edited in place grew with every edit.  The staged map is a
-  fresh copy -- every object copied as stored -- so it carries at most what its
-  own edit replaced.
+  replaces, so a map edited in place grew with every edit.  The staged map is
+  written through a fresh file -- every object copied as stored -- when it is
+  installed, whatever wrote it (several writers of an edit session, a
+  relabelling that copied its source byte for byte), so the map holds no
+  space that no object holds.  A writer that records a map (``reassign``'s
+  history, ``binnify``'s) names the map an edit session edits, or copies out,
+  never its staged path (:func:`recorded_uri`).
 - **One writer at a time.**  The lock, ``<map>.lock``, names its holder.  A
   live holder is refused by name; the lock of a process of this host that is
   gone is taken over, under a guard file, so that one process exactly takes
@@ -34,15 +40,23 @@ the map or onto an output path.  What that guarantees:
   the same host name -- is never broken.  Only its holder removes it.  It is
   re-entrant for the thread that holds it, so a caller that holds a map's lock
   for a whole run (metaTOR does) calls the writers, which take it unless their
-  caller holds it; another thread is refused.
+  caller holds it; another thread is refused.  The staged map of an edit
+  session has a lock of its own, naming the session's process, so that no
+  other process -- a forked child included -- writes it.  A lock or a
+  takeover guard is removed by whatever stops its holder as soon as it is
+  created, ``KeyboardInterrupt`` included; only an interrupt in the few
+  bytecodes between a lock's creation and the start of its block leaves it
+  held until the process ends, when it is stale.
 - **What was read is what is replaced.**  A writer that read the map before
   it took the lock (to compute weights, say) hands its
   :class:`metacooler.MetaCooler` to :func:`staged_inplace`, which refuses to
-  copy a file that changed since it was read.  The map is checked once more
-  just before the rename: a program that writes it without metacooler's lock
-  (``cooler balance``, say) while its copy is edited makes the edit fail
-  (:class:`MapChangedError`) rather than lose that change -- and a copy torn by
-  such a write is refused alike.  Only a write in the instant between that
+  copy a file that changed since it was read -- and, for a map read that is
+  not the map written (``store_weights``' ``source``), one whose bins are not
+  the bins written.  A copy torn by a program that writes the map without
+  metacooler's lock (``cooler balance``, say) is refused as soon as it is
+  made, and the map is checked once more just before the rename: such a write
+  while its copy is edited makes the edit fail (:class:`MapChangedError`)
+  rather than lose that change.  Only a write in the instant between that
   check and the rename goes unseen.
 - **Private stays private.**  The staging directory is ``0700`` (keeping the
   set-group-id bit it inherits, so that the staged map takes its directory's
@@ -53,13 +67,16 @@ the map or onto an output path.  What that guarantees:
 - **Symbolic links.**  An in-place edit through a symbolic link edits its
   target: the lock, the staging directory and the replacement are beside the
   target, and the link keeps pointing at the edited map.  An output path that
-  is a link is replaced, never written through.
+  is a link is replaced, never written through.  A hard link to the map is
+  split by an in-place edit, which replaces the file: the other names keep the
+  map as it was.
 
 A read is refused when the map is replaced or written while it is read
 (:class:`MapChangedError`, raised by :class:`metacooler.MetaCooler`, which
-checks the file before and after every read): metacooler reads the pixels a
-chunk at a time, so a read that spanned a replacement would mix the bins of
-one map with the pixels of the other.
+checks the file before and after every read, and before every read of what
+it keeps): metacooler reads the pixels a chunk at a time, so a read that
+spanned a replacement would mix the bins of one map with the pixels of the
+other.
 """
 
 from __future__ import annotations
@@ -83,6 +100,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 import h5py
+import numpy as np
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Sequence
@@ -171,6 +189,19 @@ def _resolved(path: str | Path) -> Path:
     return Path(os.path.realpath(os.path.abspath(path)))
 
 
+def _named(path: str | Path) -> Path:
+    """*path* absolute, the links of its directory followed but not its own
+    name's: the file an output path names (a link there is replaced, not
+    written through)."""
+    path = Path(os.path.abspath(path))
+    return Path(os.path.realpath(path.parent)) / path.name
+
+
+def _lock_file_of(path: Path) -> Path:
+    """The lock file of the file *path* (absolute): ``<path>.lock``."""
+    return path.with_name(path.name + LOCK_SUFFIX)
+
+
 def lock_path(uri: str | Path) -> Path:
     """The lock file of the map *uri*: ``<file>.lock``, next to its file.
 
@@ -180,8 +211,7 @@ def lock_path(uri: str | Path) -> Path:
     directory -- so the lock is the same whatever the working directory, the
     name of the directory, or the link the map is reached through.
     """
-    path = _resolved(map_file(uri))
-    return path.with_name(path.name + LOCK_SUFFIX)
+    return _lock_file_of(_resolved(map_file(uri)))
 
 
 def map_output(output: str | Path) -> Path:
@@ -404,6 +434,14 @@ def _refusal(path: Path, lock_file: Path, holder: dict) -> str:
             f"it is no longer running, delete {lock_file}"
             f"{_staging_of(path, holder)}."
         )
+    staged_for = holder.get("staged_for")
+    if staged_for:
+        return (
+            f"{path} is the staged map of an edit session of another process "
+            f"({_describe(holder)}), which writes it to {staged_for} when the "
+            f"session ends: only that process writes it. Edit {staged_for} once "
+            "the session has ended."
+        )
     return (
         f"{path} is being written by another process ({_describe(holder)}): wait "
         f"for it to end, or, if no such process is running, delete {lock_file}"
@@ -425,6 +463,15 @@ def _record(command: str | None) -> dict:
         "command": command if command is not None else _default_command(),
         "uuid": uuid.uuid4().hex,
     }
+
+
+def _unlink_if_ours(path: Path, record: dict) -> None:
+    """Remove the lock (or guard) file *path* if it is the one *record* made:
+    never one another process created since."""
+    found = _read(path)
+    if isinstance(found, dict) and found.get("uuid") == record["uuid"]:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
 
 
 def _default_command() -> str:
@@ -573,30 +620,32 @@ def _take_over(lock_file: Path, path: Path, stale: dict) -> None:
     guard = lock_file.with_name(lock_file.name + TAKEOVER_SUFFIX)
     mine = _record(None)
     deadline = time.monotonic() + _TAKEOVER_WAIT
-    while not _create(guard, mine):
-        found = _read_settled(guard)
-        if found is _GONE:
-            continue
-        assert isinstance(found, dict)
-        if not found or _is_stale(found):
-            raise MapLockedError(
-                f"{guard} was left by a process that stopped while it took over "
-                f"the stale lock of {path}"
-                + (f" ({_describe(found)})" if found else "")
-                + f": if no process is writing {path}, delete {guard}.",
-                lock_file=guard,
-                holder=found,
-            )
-        if time.monotonic() > deadline:
-            raise MapLockedError(
-                f"{path}: another process ({_describe(found)}) has been taking "
-                f"over its stale lock for {_TAKEOVER_WAIT:.0f} s; try again, or, "
-                f"if no process is, delete {guard}.",
-                lock_file=guard,
-                holder=found,
-            )
-        _pause(_POLL)
+    # The guard is removed by whatever ends the takeover -- an interrupt that
+    # comes as soon as it is created included -- if it is still this one.
     try:
+        while not _create(guard, mine):
+            found = _read_settled(guard)
+            if found is _GONE:
+                continue
+            assert isinstance(found, dict)
+            if not found or _is_stale(found):
+                raise MapLockedError(
+                    f"{guard} was left by a process that stopped while it took "
+                    f"over the stale lock of {path}"
+                    + (f" ({_describe(found)})" if found else "")
+                    + f": if no process is writing {path}, delete {guard}.",
+                    lock_file=guard,
+                    holder=found,
+                )
+            if time.monotonic() > deadline:
+                raise MapLockedError(
+                    f"{path}: another process ({_describe(found)}) has been "
+                    f"taking over its stale lock for {_TAKEOVER_WAIT:.0f} s; try "
+                    f"again, or, if no process is, delete {guard}.",
+                    lock_file=guard,
+                    holder=found,
+                )
+            _pause(_POLL)
         current = _read(lock_file)
         if current == stale:
             os.unlink(lock_file)
@@ -607,8 +656,7 @@ def _take_over(lock_file: Path, path: Path, stale: dict) -> None:
             )
     finally:
         if os.getpid() == mine["pid"]:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(guard)
+            _unlink_if_ours(guard, mine)
 
 
 def _acquire(lock_file: Path, path: Path, mine: dict) -> None:
@@ -627,15 +675,25 @@ def _acquire(lock_file: Path, path: Path, mine: dict) -> None:
             continue
         assert isinstance(found, dict)
         if found.get("pid") == os.getpid():
-            for held in _HELD.values():
-                if held.holder.get("uuid") == found.get("uuid"):
+            for name, held in _HELD.items():
+                if held.holder.get("uuid") != found.get("uuid"):
+                    continue
+                if held.thread == threading.get_ident():
+                    # The same file, reached by another path (a bind mount).
                     raise MapLockedError(
-                        f"{path} is being written by another thread of this "
-                        f"process ({held.thread_name}): a map's lock is held by "
-                        "one thread at a time.",
+                        f"{path} is locked by this thread already, through "
+                        f"another path to the same file ({name}): give a map "
+                        "one path while its lock is held.",
                         lock_file=lock_file,
                         holder=found,
                     )
+                raise MapLockedError(
+                    f"{path} is being written by another thread of this "
+                    f"process ({held.thread_name}): a map's lock is held by "
+                    "one thread at a time.",
+                    lock_file=lock_file,
+                    holder=found,
+                )
         if not found or not _is_stale(found):
             raise MapLockedError(
                 _refusal(path, lock_file, found), lock_file=lock_file, holder=found
@@ -664,7 +722,9 @@ def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None
     last write, and calls the writers meanwhile.  Another thread of the process
     is refused, as another process is.  The staged map of an edit session
     (:func:`staged_edit`) is held by its session: the session's thread takes
-    its "lock" at no cost, and any other thread is refused.
+    its "lock" at no cost, any other thread is refused, and so is any other
+    process -- a forked child included --, by the staged map's own lock file,
+    which names the session's process.
 
     A lock whose holder is a process of this host that is gone (killed with
     ``SIGKILL``, or ``SIGTERM``: metacooler installs no signal handler) is taken
@@ -689,10 +749,21 @@ def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None
     session = _session_of(map_file(uri))
     if session is not None:
         _check_session_thread(session, map_file(uri))
+        session.writes += 1
         yield session.lock_file
         return
-    path = _resolved(map_file(uri))
-    lock_file = path.with_name(path.name + LOCK_SUFFIX)
+    with _locked(_resolved(map_file(uri)), command=command) as lock_file:
+        yield lock_file
+
+
+@contextlib.contextmanager
+def _locked(
+    path: Path, *, command: str | None, output: bool = False
+) -> Generator[Path, None, None]:
+    """Hold the lock of the file *path* (absolute: the file a write replaces),
+    ``<path>.lock`` beside it: :func:`lock`'s, and the lock of an output
+    (*output*: what a failure to create it says names the output)."""
+    lock_file = _lock_file_of(path)
     key = str(lock_file)
     fresh = False
     with _REGISTRY:
@@ -711,14 +782,14 @@ def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None
             mine = _record(command)
             try:
                 _acquire(lock_file, path, mine)
-            except MapLockedError:
-                raise
-            except OSError as error:
+            except BaseException as error:
+                # The lock is removed if this call made it: an interrupt that
+                # came as soon as it was created.
+                _unlink_if_ours(lock_file, mine)
+                if isinstance(error, MapLockedError) or not isinstance(error, OSError):
+                    raise
                 raise MapLockError(
-                    f"{lock_file} cannot be created ({error.strerror or error}): "
-                    f"an in-place write of {path} locks it there, so the "
-                    "directory of the map must exist and be writable. Write a "
-                    "copy of the map instead.",
+                    _uncreatable(path, lock_file, error, output=output),
                     lock_file=lock_file,
                 ) from error
             current = threading.current_thread()
@@ -740,12 +811,25 @@ def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None
             # its file; nor does a nested block.
             if held.depth == 0 and os.getpid() == held.pid:
                 _HELD.pop(key, None)
-                found = _read(lock_file)
                 # This process's lock only: not one that another process took
                 # after it was deleted by hand.
-                if isinstance(found, dict) and found.get("uuid") == held.holder["uuid"]:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(lock_file)
+                _unlink_if_ours(lock_file, held.holder)
+
+
+def _uncreatable(path: Path, lock_file: Path, error: OSError, *, output: bool) -> str:
+    """Why the lock of *path* cannot be created: its directory."""
+    reason = error.strerror or str(error)
+    if output:
+        return (
+            f"{path} cannot be written ({reason}: {lock_file}): an output is "
+            f"locked and staged in its own directory, {path.parent}, which must "
+            "be writable."
+        )
+    return (
+        f"{lock_file} cannot be created ({reason}): an in-place write of {path} "
+        "locks it there, so the directory of the map must exist and be "
+        "writable. Write a copy of the map instead."
+    )
 
 
 P = ParamSpec("P")
@@ -779,7 +863,8 @@ class _Session:
     #: Where a writer writes a whole new map before it takes the staged one's
     #: place (a re-grouping).
     workdir: Path
-    #: The lock file that keeps the session's map ours.
+    #: The staged map's own lock file, which names the session's process: any
+    #: other process -- a forked child too -- is refused the staged map.
     lock_file: Path
     pid: int
     thread: int
@@ -787,6 +872,9 @@ class _Session:
     #: The map file a session edits in place or copies out (resolved), or
     #: ``None``.
     source: Path | None = None
+    #: The file the staged map replaces when the session ends: *source* in
+    #: place; an output by its own name (a link there is replaced).
+    target: Path | None = None
     #: Whether the staged map replaces *source* (``False``: an output).
     in_place: bool = False
     #: The group of the map the session was opened on (``""``: the file).
@@ -795,6 +883,15 @@ class _Session:
     #: the session ends.
     touched: set[str] = dataclasses.field(default_factory=set)
     rewrites: int = 0
+    #: The writes (and locks) of the staged map so far: a session in place
+    #: without any, whose staged map is as it was copied, leaves its map be.
+    writes: int = 0
+    #: The error of a write that failed once it had the staged map: the
+    #: session then installs nothing, even if its caller caught the error.
+    failed: BaseException | None = None
+    #: The map the session edits, or copies out, as it was given (file, group):
+    #: what a writer records instead of the staged map (:func:`recorded_uri`).
+    named: tuple[str, str] | None = None
 
 
 #: The edit sessions of this process, by staged file (resolved).
@@ -807,17 +904,38 @@ def _session_of(path: str | Path) -> _Session | None:
     return session if session is not None and session.pid == os.getpid() else None
 
 
-def _session_on(source: Path) -> _Session | None:
-    """This thread's session of the map file *source* (resolved)."""
+def _session_on(path: str | Path) -> _Session | None:
+    """This thread's session that edits, copies out or replaces the map file
+    *path*: its source, or the file it replaces when it ends (an output by
+    its own name, or through a link to it)."""
     me = threading.get_ident()
+    resolved, named = _resolved(path), _named(path)
     for session in list(_SESSIONS.values()):
-        if (
-            session.source == source
-            and session.thread == me
-            and session.pid == os.getpid()
-        ):
+        if session.thread != me or session.pid != os.getpid():
+            continue
+        if session.source == resolved or session.target in (resolved, named):
             return session
     return None
+
+
+def recorded_uri(uri: str | Path) -> str:
+    """The map a writer names when it records *uri* -- in a history entry, or
+    any provenance: *uri* itself; for the staged map of an edit session, the
+    map the session edits (an entry's URI included), or, for an output
+    session, the map it copies out -- never the staged path, which is gone
+    once the session ends."""
+    from metacooler.uri import parse_uri
+
+    file_text, group = parse_uri(str(uri))
+    session = _session_of(file_text)
+    if session is None or session.named is None:
+        return str(uri)
+    named_file, named_group = session.named
+    inner = group.strip("/")
+    if not session.in_place and named_group:
+        # The staged map is that entry, copied out as a standalone map.
+        inner = "/".join(part for part in (named_group, inner) if part)
+    return f"{named_file}::{inner}" if inner else named_file
 
 
 def in_session(uri: str | Path) -> bool:
@@ -852,6 +970,15 @@ def _registered(session: _Session) -> Generator[_Session, None, None]:
                 del _SESSIONS[key]
 
 
+def _hold_staged(session: _Session, command: str | None) -> None:
+    """Create the staged map's own lock file, in the session's new directory:
+    it names this process and the file the session writes, so that another
+    process given the staged map -- a forked child too -- is refused it."""
+    record = _record(command)
+    record["staged_for"] = str(session.target)
+    _create(session.lock_file, record)
+
+
 @contextlib.contextmanager
 def _writing_directly(path: str | Path) -> Generator[Path, None, None]:
     """Let this thread's writers write *path* directly -- unstaged, unlocked,
@@ -862,13 +989,38 @@ def _writing_directly(path: str | Path) -> Generator[Path, None, None]:
     session = _Session(
         staged=staged,
         workdir=staged.parent,
-        lock_file=staged.with_name(staged.name + LOCK_SUFFIX),
+        lock_file=_lock_file_of(staged),
         pid=os.getpid(),
         thread=threading.get_ident(),
         thread_name=threading.current_thread().name,
     )
     with _registered(session):
         yield Path(path)
+
+
+@contextlib.contextmanager
+def _failing(session: _Session) -> Generator[None, None, None]:
+    """Fail *session* if the block -- a write of its staged map -- raises: what
+    it wrote so far stays in the staged map, which the session then refuses
+    to write (:func:`_refuse_a_failed_session`), even if the error is caught."""
+    try:
+        yield
+    except BaseException as error:
+        if session.failed is None and os.getpid() == session.pid:
+            session.failed = error
+        raise
+
+
+@contextlib.contextmanager
+def _session_write(path: str | Path) -> Generator[None, None, None]:
+    """Fail the session of this thread whose staged map *path* is if the block,
+    a write of it, raises (see :func:`_failing`)."""
+    session = _session_of(path)  # its thread's: lock() refuses another
+    if session is None:
+        yield
+        return
+    with _failing(session):
+        yield
 
 
 @contextlib.contextmanager
@@ -883,15 +1035,20 @@ def _in_session(
 ) -> Generator[Path, None, None]:
     """What :func:`staged_inplace` yields to a writer of a session's staged map:
     the map itself, or, to a writer of a whole new map (*copy* false), a path
-    beside it whose file then takes its place."""
+    beside it whose file then takes its place.  A writer that fails once it
+    has the staged map itself fails the session (:func:`_failing`)."""
     _check_session_thread(session, path)
     check_unchanged(planned)
+    if copy:  # a whole new map has whatever bins its writer gives it
+        _check_planned_bins(planned, session.staged, group)
+    session.writes += 1
     if validate_groups is None:
         session.touched.add(group.strip("/"))
     else:
         session.touched.update(name.strip("/") for name in validate_groups)
     if copy:
-        yield session.staged
+        with _failing(session):
+            yield session.staged
         return
     session.rewrites += 1
     fresh = session.workdir / f".rewrite.{session.rewrites}.{session.staged.name}"
@@ -907,16 +1064,31 @@ def _in_session(
 
 
 def _refuse_the_map_of_a_session(path: str | Path) -> None:
-    """Refuse a write of a map that this thread edits in a session: the
-    session replaces it when it ends, and would lose that write."""
-    session = _session_on(_resolved(path))
-    if session is not None and session.in_place:
-        staged = _session_uri(session.staged, session.group)
+    """Refuse a write of a map that an edit session of this thread edits,
+    copies out or replaces: a write of the map itself, rather than of the
+    session's staged map, would be lost when the session replaces it, or
+    missing from what the session writes."""
+    session = _session_on(path)
+    if session is None:
+        return
+    staged = _session_uri(session.staged, session.group)
+    if session.in_place:
         raise ValueError(
             f"{path} is being edited in an edit session of this thread: write its "
             f"staged map, {staged}, which replaces the map when the session "
             "ends."
         )
+    if session.source == _resolved(path):
+        raise ValueError(
+            f"{path} is being copied to {session.target} in an edit session of "
+            f"this thread: write its staged map, {staged}, which is written to "
+            f"{session.target} when the session ends (a write of {path} itself "
+            "would not be in it)."
+        )
+    raise ValueError(
+        f"{path} is replaced by the output of an edit session of this thread "
+        f"when the session ends: write its staged map, {staged}, instead."
+    )
 
 
 def _session_uri(staged: Path, group: str) -> str:
@@ -943,6 +1115,39 @@ def _validate_session(session: _Session) -> None:
         validate(f"{staged}::{name}", full=True)
 
 
+def _refuse_a_failed_session(session: _Session) -> None:
+    """Refuse to write what a session staged once one of its writes failed.
+
+    Raises:
+        RuntimeError: From the write's error, if one failed.
+    """
+    error = session.failed
+    if error is None:
+        return
+    raise RuntimeError(
+        f"A write of the edit session of {session.target} failed "
+        f"({type(error).__name__}: {error}), and its error was caught: the "
+        "staged map may hold part of that write, so it is not written, and "
+        f"{session.target} is left as it was. Run the session again."
+    ) from error
+
+
+def _check_copied(path: Path, before: tuple[int, int, int, int] | None) -> None:
+    """Refuse a copy of *path* that was written or replaced while it was
+    copied -- by a program that takes no metacooler lock, or, for an output
+    session, which does not lock the map it copies, by any writer: the copy
+    may be torn.
+
+    Raises:
+        MapChangedError: If *path* is not as it was when its copy began.
+    """
+    if file_state(path) != before:
+        raise MapChangedError(
+            f"{path} was written or replaced while it was copied: the copy may "
+            "mix two versions of it, so nothing is written. Try again."
+        )
+
+
 @contextlib.contextmanager
 def staged_edit(
     uri: str | Path,
@@ -954,31 +1159,46 @@ def staged_edit(
 ) -> Generator[str, None, None]:
     """Edit a map with several writers through one staged copy, written once.
 
-    Under the lock of the map's file (taken unless this thread holds it), the
-    maps in *planned* are checked unchanged, and one private copy is made: of
-    the whole file, to replace it (*output* ``None``); or, with *output*, of
-    the map alone -- an entry of a ``.mmetacool`` becomes a standalone
-    ``.metacool`` -- destined for that path.  The block gets the staged map's
-    path (a URI into it for an entry edited in place).  Every metacooler writer
-    given that path by this thread -- ``annotate(inplace=True)``,
-    ``reassign(inplace=True)``, ``store_weights``, ``write_clusters``,
-    ``drop_clusters``, ``contact_qc(store=True)``, the ``normalize_*``
-    functions, the entry functions -- writes into it directly: no copy, no
-    validation, no lock of its own.  When the block ends, the staged map is
-    validated in full, given the map's owner, group, mode and extended
-    attributes (an output gets a new file's mode), synced and renamed over the
-    map's file (a symbolic link to it keeps pointing at it) or onto *output*
-    (a link there is replaced, not followed).  On any failure, ``KeyboardInterrupt``
-    and ``SystemExit`` included, the staged copy is removed and the map (or
-    *output*) is left as it was.  As for any staged write, a map written
-    meanwhile by a program that takes no metacooler lock is refused rather
-    than lost (:class:`MapChangedError`).
+    In place (*output* ``None``), under the lock of the map's file (taken
+    unless this thread holds it), the maps in *planned* are checked
+    unchanged, and the whole file is copied, to replace it.  With *output*,
+    under the lock of *output* (taken unless this thread holds it) -- never
+    the map's: the map is only read --, the map alone is copied (an entry of
+    a ``.mmetacool`` becomes a standalone ``.metacool``), destined for that
+    path; a copy torn by a write of the map is refused.  The copy lies in a
+    private directory beside the file it replaces, and has a lock file of its
+    own, which names this process: the staged map is this thread's alone.
+    The block gets the staged map's path (a URI into it for an entry edited
+    in place).  Every metacooler writer given that path by this thread --
+    ``annotate(inplace=True)``, ``reassign(inplace=True)``, ``store_weights``,
+    ``write_clusters``, ``drop_clusters``, ``contact_qc(store=True)``, the
+    ``normalize_*`` functions, the entry functions -- writes into it
+    directly: no copy, no validation, no lock of its own.
+
+    When the block ends, the staged map is validated in full, given the
+    map's owner, group, mode and extended attributes (an output gets a new
+    file's mode), synced and renamed over the map's file (a symbolic link to
+    it keeps pointing at it) or onto *output* (a link there is replaced, not
+    followed).  A session in place that wrote nothing -- no writer, no lock
+    of the staged map, and the staged map as copied -- leaves the map as it
+    is.  On any failure, ``KeyboardInterrupt`` and ``SystemExit`` included,
+    the staged copy is removed and the map (or *output*) is left as it was;
+    and once a writer has failed with the staged map in hand, the session
+    writes nothing even if its error was caught (``RuntimeError``), since the
+    staged map may hold part of that write.  As for any staged write, a map
+    written meanwhile by a program that takes no metacooler lock is refused
+    rather than lost (:class:`MapChangedError`).
 
     A session in place joins one this thread already has open on the same map
     (the inner ``with`` gets the same staged map, and the outer one writes it);
     any other nesting on one map is refused.  While a session is open, a write
-    of the map itself (rather than of its staged copy) from this thread is
-    refused; another thread is refused the staged map.
+    of its map -- the one it edits, copies out or replaces -- rather than of
+    its staged map is refused from this thread; another thread, or process,
+    is refused the staged map.  A map read for the edit that is not the map
+    written (``store_weights``' ``source``: the map as it was before the
+    session, say) must still have its bins -- the same contig name, start and
+    end, bin by bin --, or the write is refused: a re-grouping in the session
+    reorders them.
 
     Args:
         uri: The map: a ``.metacool`` path, an ``.mmetacool`` entry URI, or a
@@ -986,7 +1206,7 @@ def staged_edit(
         output: Where the edited map goes instead of over *uri*: a new file
             (refused if it exists, unless *force*), never *uri*'s own file.
         force: Replace *output* if it exists.
-        command: The command the map's lock names, if this call takes it.
+        command: The command the lock names, if this call takes it.
         planned: The map(s) the edits were planned on: refused if the file
             changed since they were opened.
 
@@ -995,12 +1215,19 @@ def staged_edit(
         ``.mmetacool``.
 
     Raises:
-        MapLockedError: If another process or thread holds the map's lock.
+        MapLockedError: If another process or thread holds the lock of the map
+            (in place) or of *output*.
+        MapLockError: If that lock cannot be created (its directory is not
+            writable).
         MapChangedError: If a map of *planned* changed since it was opened,
             the map was written meanwhile by another program, or the map
             changed while it was copied to *output*.
         FileExistsError: If *output* exists and *force* is not set.
+        FileNotFoundError: If the map, or the directory of *output*, does not
+            exist.
         PermissionError: In place, if the map is read-only.
+        RuntimeError: If a write of the session failed and its error was
+            caught: nothing is written.
         ValueError: If *output* is *uri*'s file, or for a nesting refused.
     """
     from metacooler.uri import parse_uri
@@ -1011,7 +1238,7 @@ def staged_edit(
     # the same map in place -- is joined in place; any other nesting refused.
     joined = _session_of(file_text)
     if joined is None:
-        on_map = _session_on(_resolved(file_text))
+        on_map = _session_on(file_text)
         if on_map is not None and (output is not None or not on_map.in_place):
             raise ValueError(
                 f"{uri} is being copied out, or edited, in an edit session of "
@@ -1027,8 +1254,11 @@ def staged_edit(
                 "nested session only joins it in place (output=None)."
             )
         check_unchanged(planned)
+        _check_planned_bins(planned, joined.staged, key)
         joined.touched.add(key)
-        yield _session_uri(joined.staged, key)
+        joined.writes += 1
+        with _failing(joined):
+            yield _session_uri(joined.staged, key)
         return
     source = _resolved(file_text)
     if output is not None:
@@ -1039,40 +1269,51 @@ def staged_edit(
             force=force,
             command=command,
             planned=planned,
+            named=(str(file_text), key),
         ) as staged:
             yield staged
         return
     with lock(source, command=command):
-        held = _holding(source.with_name(source.name + LOCK_SUFFIX))
+        held = _holding(_lock_file_of(source))
         assert held is not None  # taken just above
         check_unchanged(planned)
-        refuse_read_only(source)
         if not source.exists():
             raise FileNotFoundError(errno.ENOENT, f"No map to edit: {source}")
+        refuse_read_only(source)
+        _check_planned_bins(planned, source, key)
         workdir = _new_workdir(source, held)
         staged = workdir / source.name
         session = _Session(
             staged=staged,
             workdir=workdir,
-            lock_file=source.with_name(source.name + LOCK_SUFFIX),
+            lock_file=_lock_file_of(staged),
             pid=os.getpid(),
             thread=threading.get_ident(),
             thread_name=threading.current_thread().name,
             source=source,
+            target=source,
             in_place=True,
             group=key,
+            named=(str(file_text), key),
         )
         try:
+            _hold_staged(session, command)
             before = file_state(source)
             copy_fresh(source, staged)
+            _check_copied(source, before)
+            copied = file_state(staged)
             with _registered(session):
                 yield _session_uri(staged, key)
             if os.getpid() != held.pid:
                 return
-            _validate_session(session)
-            _install(
-                staged, source, before=before, like=source, what="the edit session"
-            )
+            _refuse_a_failed_session(session)
+            if session.writes or file_state(staged) != copied:
+                _validate_session(session)
+                _install(
+                    staged, source, before=before, like=source, what="the edit session"
+                )
+            else:
+                logger.debug("Nothing written in the edit session of %s.", source)
         except BaseException:
             if os.getpid() == held.pid:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -1089,10 +1330,15 @@ def _output_session(
     force: bool,
     command: str | None,
     planned: MetaCooler | Iterable[MetaCooler] | None,
+    named: tuple[str, str],
 ) -> Generator[str, None, None]:
     """:func:`staged_edit` with an output: the map copied, standalone, to a
-    staging directory beside *output*, then renamed onto it."""
-    out = Path(os.path.abspath(output))
+    staging directory beside *output*, then renamed onto it -- under the lock
+    of *output* by its own name (a link there is replaced, not followed), so
+    that whoever takes that lock next removes what a killed session left
+    there.  The map is only read: it is not locked, and its copy is checked
+    untorn, as *planned* is checked unchanged."""
+    out = _named(output)
     if out == source or (
         out.exists() and not out.is_symlink() and os.path.samefile(out, source)
     ):
@@ -1100,39 +1346,45 @@ def _output_session(
             f"output={output} is the file of the map edited: leave output out to "
             "edit the map in place."
         )
-    if (out.exists() or out.is_symlink()) and not force:
+    if os.path.lexists(out) and not force:
         raise FileExistsError(
             errno.EEXIST, f"{out} exists: pass force=True to replace it."
         )
-    with lock(source, command=command):
-        held = _holding(source.with_name(source.name + LOCK_SUFFIX))
+    if not out.parent.is_dir():
+        raise FileNotFoundError(
+            errno.ENOENT,
+            f"{output} cannot be written: its directory, {out.parent}, does not exist.",
+        )
+    with _locked(out, command=command, output=True):
+        held = _holding(_lock_file_of(out))
         assert held is not None  # taken just above
         check_unchanged(planned)
+        _check_planned_bins(planned, source, group)
         workdir = _new_workdir(out, held)
         staged = workdir / out.name
         session = _Session(
             staged=staged,
             workdir=workdir,
-            lock_file=source.with_name(source.name + LOCK_SUFFIX),
+            lock_file=_lock_file_of(staged),
             pid=os.getpid(),
             thread=threading.get_ident(),
             thread_name=threading.current_thread().name,
             source=source,
+            target=out,
+            named=named,
         )
         try:
+            _hold_staged(session, command)
             before = file_state(source)
             copy_fresh(source, staged, group=group or None)
-            if file_state(source) != before:
-                raise MapChangedError(
-                    f"{source} was written by another program while it was "
-                    "copied: the copy is not a map. Try again."
-                )
+            _check_copied(source, before)
             with _registered(session):
                 yield str(staged)
             if os.getpid() != held.pid:
                 return
+            _refuse_a_failed_session(session)
             _validate_session(session)
-            if not force and (out.exists() or out.is_symlink()):
+            if not force and os.path.lexists(out):
                 raise FileExistsError(
                     errno.EEXIST,
                     f"{out} was created meanwhile: pass force=True to replace it.",
@@ -1210,6 +1462,91 @@ def check_unchanged(planned: MetaCooler | Iterable[MetaCooler] | None) -> None:
     maps = [planned] if isinstance(planned, MetaCooler) else list(planned)
     for mc in maps:
         mc._check_unchanged()
+
+
+def _check_planned_bins(
+    planned: MetaCooler | Iterable[MetaCooler] | None, file: Path, group: str
+) -> None:
+    """Refuse a map of *planned* that is not the map written -- the group
+    *group* of the file *file* (resolved; ``""``: the whole file, whose maps
+    each stand for their own group) -- but another file or entry, unless it
+    has its bins: the same contig name, start and end at every bin, in order.
+    What was computed from it (``store_weights``' ``source``) is written bin
+    by bin, so a map whose bins were reordered since -- by a re-grouping in an
+    edit session -- would put it on other bins.  A map of the file written
+    itself is checked by its file's state (:func:`check_unchanged`).
+
+    Raises:
+        MapChangedError: If the bins differ.
+    """
+    from metacooler.api import MetaCooler
+
+    if planned is None:
+        return
+    maps = [planned] if isinstance(planned, MetaCooler) else list(planned)
+    key = group.strip("/")
+    written: dict[str, tuple | None] = {}
+    for mc in maps:
+        own = mc.root.strip("/")
+        if _resolved(mc.store) == file and (not key or own == key):
+            continue
+        with h5py.File(file, "r") as f:
+            # The whole file: the map's own entry in it, or its root (an
+            # entry copied out as a standalone map).
+            where = key or (own if own and own in f else "")
+            if where not in written:
+                node = f.get(where) if where else f
+                written[where] = (
+                    _bin_coordinates(node) if isinstance(node, h5py.Group) else None
+                )
+        with mc.open() as grp:
+            read = _bin_coordinates(grp)
+        coordinates = written[where]
+        if read is None or coordinates is None or not _same_bins(read, coordinates):
+            target = _session_uri(file, where)
+            raise MapChangedError(
+                f"{mc.uri} does not have the bins of the map written, {target} "
+                "(a re-grouping reorders them): what was computed from it would "
+                f"land on other bins. Compute it from {target} instead."
+            )
+
+
+def _bin_coordinates(
+    grp: h5py.Group,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """The contig names of a map, and the contig id, start and end of each of
+    its bins; ``None`` for a group that holds no map."""
+    bins, contigs = grp.get("bins"), grp.get("contigs")
+    if not isinstance(bins, h5py.Group) or not isinstance(contigs, h5py.Group):
+        return None
+    return (
+        contigs["name"][()],
+        bins["chrom"][()].astype(np.int64),
+        bins["start"][()],
+        bins["end"][()],
+    )
+
+
+def _same_bins(
+    a: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    b: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+) -> bool:
+    """Whether two maps' bins (:func:`_bin_coordinates`) are the same contig
+    name, start and end, bin by bin -- whatever their contigs' ids."""
+    names_a, chrom_a, start_a, end_a = a
+    names_b, chrom_b, start_b, end_b = b
+    if not (np.array_equal(start_a, start_b) and np.array_equal(end_a, end_b)):
+        return False
+    if np.array_equal(chrom_a, chrom_b) and np.array_equal(names_a, names_b):
+        return True
+    if not len(names_b) or chrom_a.min() < 0 or chrom_a.max() >= len(names_a):
+        return False
+    # Each contig of a as its id in b, by name (-1: none).
+    order = np.argsort(names_b, kind="stable")
+    ranked = names_b[order]
+    at = np.minimum(np.searchsorted(ranked, names_a), len(ranked) - 1)
+    as_b = np.where(ranked[at] == names_a, order[at], -1)
+    return bool(np.array_equal(as_b[chrom_a], chrom_b))
 
 
 def refuse_read_only(path: Path) -> None:
@@ -1334,27 +1671,37 @@ def _install(
     like: Path | None,
     what: str,
 ) -> None:
-    """Rename *staged* over *target*: given what *like* has besides its bytes
-    (a new file's mode without one), synced, once *target* is checked to be
-    as it was (*before*, where *like* is the map it replaces).
+    """Rename a fresh copy of *staged* over *target*: given what *like* has
+    besides its bytes (a new file's mode without one), synced, once *target*
+    is checked to be as it was (*before*, where *like* is the map it
+    replaces).
+
+    The staged map is written through a fresh file (:func:`copy_fresh`), in
+    its own directory, whatever wrote it: HDF5 never reclaims what an edit
+    replaces, so the space every writer left -- a column or a table
+    replaced, a byte copy of a map carrying its own -- would otherwise go
+    into the map, and the map grow with every edit.
 
     Raises:
         MapChangedError: If *target* was written or replaced meanwhile.
     """
+    fresh = staged.with_name(f".fresh.{staged.name}")
+    copy_fresh(staged, fresh)
+    os.unlink(staged)  # its space, back before the rename
     if like is not None and like.exists():
-        _owned_like(like, staged)
-        shutil.copymode(like, staged)
-        _copy_xattrs(like, staged)
+        _owned_like(like, fresh)
+        shutil.copymode(like, fresh)
+        _copy_xattrs(like, fresh)
     else:
-        os.chmod(staged, 0o666 & ~_umask())
-    _fsync(staged)
+        os.chmod(fresh, 0o666 & ~_umask())
+    _fsync(fresh)
     if like is not None and file_state(target) != before:
         raise MapChangedError(
             f"{target} was written by another program while {what} was staged "
             "(one that takes no metacooler lock): writing the staged map would "
             "lose that change, so it is not written. Run the edit again."
         )
-    os.replace(staged, target)
+    os.replace(fresh, target)
     _fsync(target.parent)
 
 
@@ -1369,14 +1716,18 @@ def staged_inplace(
     """Edit the file of a map through a staged copy, which then replaces it.
 
     Under the map's lock (taken unless this thread holds it), the maps in
-    *planned* -- those the edit was planned on -- are checked unchanged, and a
-    map without write permission is refused.  The staged map is then made in a
-    private directory beside the map (beside the target of a symbolic link),
-    ``.<map>.<uuid>.<n>.d/`` (mode ``0700``, named after the lock's uuid): by
-    default a fresh copy of the map's file (:func:`copy_fresh`), to edit in
-    place; with ``copy=False``, a path where nothing is yet, for a writer that
-    writes a whole new map (cooler's temporary files land in that directory
-    too).  Once the ``with`` block ends, the staged map is validated in full,
+    *planned* -- those the edit was planned on -- are checked unchanged (and,
+    for an edit of the map's copy, one that is not the map edited but another
+    file or entry, to have its bins), and a map without write permission is
+    refused.  The staged map is
+    then made in a private directory beside the map (beside the target of a
+    symbolic link), ``.<map>.<uuid>.<n>.d/`` (mode ``0700``, named after the
+    lock's uuid): by default a fresh copy of the map's file
+    (:func:`copy_fresh`), to edit in place, refused if a program that takes no
+    lock wrote the map while it was copied; with ``copy=False``, a path where
+    nothing is yet, for a writer that writes a whole new map (cooler's
+    temporary files land in that directory too).  Once the ``with`` block
+    ends, the staged map is validated in full,
     given the map's owner, group, mode and extended attributes (a new file's
     mode, from the umask, where there is no map yet), synced, checked to
     replace the map as it was when the copy began, and renamed over it.  On any
@@ -1385,7 +1736,8 @@ def staged_inplace(
     made it only, not by a forked child.
 
     The staged map of an edit session (:func:`staged_edit`) of this thread is
-    written directly: no copy, no validation (the session validates), no lock.
+    written directly: no copy, no validation (the session validates), no lock;
+    a block that raises fails the session (it then writes nothing).
 
     Args:
         uri: The map: a ``.metacool`` path, an ``.mmetacool`` path or one of
@@ -1403,11 +1755,12 @@ def staged_inplace(
 
     Raises:
         MapChangedError: If a map of *planned* changed since it was opened, or
-            the map was written meanwhile by a program that takes no lock.
+            does not have the bins of the map edited; or the map was written
+            meanwhile by a program that takes no lock.
         PermissionError: If the map has no write permission.
         MapLockedError: If another process or thread holds the lock.
-        ValueError: If this thread edits the map in an edit session (write its
-            staged map instead).
+        ValueError: If an edit session of this thread edits, copies out or
+            replaces the map (write its staged map instead).
     """
     from metacooler.schema import is_mmetacooler, validate, validate_mmetacooler
     from metacooler.uri import parse_uri
@@ -1432,6 +1785,8 @@ def staged_inplace(
         held = _holding(lock_path(path))
         assert held is not None  # taken just above
         check_unchanged(planned)
+        if copy:  # a whole new map has whatever bins its writer gives it
+            _check_planned_bins(planned, path, group)
         refuse_read_only(path)
         workdir = _new_workdir(path, held)
         staged = workdir / path.name
@@ -1439,6 +1794,7 @@ def staged_inplace(
             before = file_state(path)
             if copy:
                 copy_fresh(path, staged)
+                _check_copied(path, before)
             yield staged
             if os.getpid() != held.pid:
                 # A forked child that left the block: the edit is its parent's.
@@ -1464,26 +1820,40 @@ def staged_inplace(
 def edit_metadata(uri: str | Path, change: Callable[[dict], None]) -> None:
     """Change the ``metadata`` attribute of a map, in place.
 
-    Under the map's lock, through a staged copy (see :func:`staged_inplace`):
-    *change* gets the parsed metadata and edits it; an exception it raises
-    leaves the map as it was.
+    Under the map's lock: *change* gets the parsed metadata and edits it,
+    before anything is staged, so that an exception it raises leaves the map
+    -- or the staged map of an edit session -- as it was; the result is then
+    written through a staged copy (see :func:`staged_inplace`).
 
     Args:
         uri: A ``.metacool`` path or an ``.mmetacool`` entry URI.
         change: Edits the metadata dict in place.
+
+    Raises:
+        MapChangedError: If the map was written by another program between
+            the read and the copy.
     """
     from metacooler.uri import parse_uri
 
-    _, group = parse_uri(str(uri))
+    file_text, group = parse_uri(str(uri))
     key = group.strip("/")
-    with staged_inplace(uri) as staged, h5py.File(staged, "r+") as f:
-        grp = f[key] if key else f
-        raw = grp.attrs.get("metadata", "{}")
+    with lock(file_text):
+        state = file_state(file_text)
+        with h5py.File(file_text, "r") as f:
+            raw = (f[key] if key else f).attrs.get("metadata", "{}")
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         metadata = json.loads(raw) if isinstance(raw, str) else dict(raw)
         change(metadata)
-        grp.attrs["metadata"] = json.dumps(metadata)
+        with staged_inplace(uri) as staged:
+            if file_state(file_text) != state:
+                raise MapChangedError(
+                    f"{file_text} was written by another program while its "
+                    "metadata was edited (one that takes no metacooler lock): "
+                    "nothing is written. Try again."
+                )
+            with h5py.File(staged, "r+") as f:
+                (f[key] if key else f).attrs["metadata"] = json.dumps(metadata)
 
 
 # ---------------------------------------------------------------------------

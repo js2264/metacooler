@@ -459,13 +459,27 @@ def _store_column(
     params: dict,
     commands: Sequence[str],
 ) -> None:
-    """Write the weight column *name* of a map's group, and the commands."""
+    """Write the weight column *name* of a map's group, and the commands.
+
+    The new column is written whole, under a scratch name, before it takes
+    the place of a column of that name: a write that fails leaves the column
+    it would replace as it was, and no scratch column.
+    """
     bins = grp["bins"]
+    scratch = f".{name}.new"
+    if scratch in bins:
+        del bins[scratch]
+    try:
+        dataset = write_column(bins, scratch, values)
+        for key, value in weight_attributes(method, entries, params).items():
+            dataset.attrs[key] = _attr_value(value)
+    except BaseException:
+        if scratch in bins:
+            del bins[scratch]
+        raise
     if name in bins:
         del bins[name]
-    dataset = write_column(bins, name, values)
-    for key, value in weight_attributes(method, entries, params).items():
-        dataset.attrs[key] = _attr_value(value)
+    bins.move(scratch, name)
     if commands:
         raw = grp.attrs.get("metadata", "{}")
         if isinstance(raw, bytes):

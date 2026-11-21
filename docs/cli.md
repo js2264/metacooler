@@ -580,11 +580,12 @@ An edit of the map itself — `reassign --inplace`, `annotate --inplace`,
 `cp`, `mv` and `rm` and, from Python, `store_weights`, `write_clusters`,
 `drop_clusters` and the entry functions — never writes the map: under the map's
 lock, taken before it reads the map, it writes a **staged copy** in a private
-directory beside it, validates it in full, and renames it over the map. So the
-map is whole whatever stops the edit — an error, Ctrl-C, a failed validation —
-and it does not grow with what each edit replaces (HDF5 never reclaims that
-space). It costs a copy of the file per edit, in time and in disk space beside
-the map, and a full validation, and needs a writable directory. The map keeps
+directory beside it, validates it in full, and renames it over the map, written
+through a fresh file. So the map is whole whatever stops the edit — an error,
+Ctrl-C, a failed validation — and it does not grow with what each edit replaces
+(HDF5 never reclaims that space). It costs two copies of the file per edit (the
+staged copy, and the fresh file it is written through), in time and in disk
+space beside the map, and a full validation, and needs a writable directory. The map keeps
 its owner and group where the process may set them (a member of a shared
 map's group keeps its group, and a warning names what it cannot keep), its
 mode and its extended attributes, POSIX ACLs included; a map without write
@@ -634,21 +635,39 @@ with metacooler.staged_edit("sample.metacool") as staged:
   `store_weights`, `write_clusters`, `drop_clusters`, `contact_qc(store=True)`,
   the `normalize_*` functions, the entry functions — given the staged map by
   the session's thread writes it directly: no copy, no validation, no lock of
-  its own. Another thread is refused it, and a write of the map itself (not of
-  its staged copy) from the session's thread is refused while the session
-  runs.
+  its own. Another thread is refused it, and so is any other process, a
+  forked child included (the staged map has a lock file of its own, naming the
+  session's process). A write of the map itself (not of its staged copy) from
+  the session's thread is refused while the session runs.
 - On any failure, `KeyboardInterrupt` and `SystemExit` included, the staged
   copy is removed and the map is left as it was; so is a map that another
-  program wrote meanwhile (`MapChangedError`).
+  program wrote meanwhile (`MapChangedError`). A writer that fails once it has
+  the staged map fails the session: even if its error is caught, nothing is
+  written when the session ends (`RuntimeError`, from that error), since the
+  staged map may hold part of that write. A session that wrote nothing leaves
+  the map as it is; one that did writes the staged map through a fresh file,
+  so the map does not grow, whatever its writers replaced. A writer's history
+  (`reassign`'s `source`) names the session's map, never the staged path.
 - `staged_edit(uri, output=PATH)` copies the map to a new file instead, an
   entry of a `.mmetacool` as a standalone `.metacool` (refused if `PATH`
-  exists, unless `force=True`; a link at `PATH` is replaced, not followed).
+  exists, unless `force=True`; a link at `PATH` is replaced, not followed). It
+  holds the lock of `PATH` (`PATH.lock`), stages beside `PATH`, and takes no
+  lock of the map, which it only reads: a holder of the map's lock does not
+  block it, and the map's directory need not be writable. A write of the map
+  or of `PATH` from the session's thread is refused while it runs.
 - `planned=mc` refuses a session on a map that changed since `mc` was opened;
-  `command=` names the session in the map's lock. A session takes the map's
-  lock unless its thread holds it already (`metacooler.lock`), and a nested
-  session on the same map joins the open one.
+  `command=` names the session in the lock it takes. A session in place takes
+  the map's lock unless its thread holds it already (`metacooler.lock`), and a
+  nested session on the same map joins the open one.
+- A map read for an edit that is not the staged map — `store_weights(staged,
+  ..., source=mc)` with `mc` opened on the map before the session, or
+  `planned=mc` of a nested session — must still have the staged map's bins
+  (the same contig name, start and end, bin by bin): after a re-grouping in
+  the session it does not, and the write is refused (`MapChangedError`).
+  Compute from the staged map instead.
 - A `MetaCooler` of the staged map, opened before a write of the session,
-  stops reading after it (`MapChangedError`): open it again.
+  stops reading after it (`MapChangedError`), what it keeps (`contigs`,
+  `bins()`, ...) included: open it again.
 
 ### `reassign` { #reassign }
 

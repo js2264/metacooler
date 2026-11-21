@@ -442,12 +442,18 @@ def write_clusters(
             grp = f[key] if key else f
             if _SCRATCH in grp:
                 del grp[_SCRATCH]
-            scratch = grp.create_group(_SCRATCH)
-            _write_group(scratch, built)
-            # Checked before it replaces the map's group, with errors that
-            # name it.
-            _check_clusters_structure(scratch, len(contig_lengths))
-            _check_clusters(scratch, len(contig_lengths), contig_lengths)
+            try:
+                scratch = grp.create_group(_SCRATCH)
+                _write_group(scratch, built)
+                # Checked before it replaces the map's group, with errors that
+                # name it.
+                _check_clusters_structure(scratch, len(contig_lengths))
+                _check_clusters(scratch, len(contig_lengths), contig_lengths)
+            except BaseException:
+                # A failure leaves no scratch group in the map written.
+                if _SCRATCH in grp:
+                    del grp[_SCRATCH]
+                raise
             if CLUSTERS_GROUP in grp:
                 del grp[CLUSTERS_GROUP]
             grp.move(_SCRATCH, CLUSTERS_GROUP)

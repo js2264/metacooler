@@ -1298,21 +1298,23 @@ class TestPlanned:
     ):
         """annotate and reassign with an output copy the map by path after
         reading it: a map changed meanwhile is refused."""
-        import shutil as shutil_module
+        from metacooler.io import annotate as annotate_module
+        from metacooler.io import reassign as reassign_module
 
-        copy2 = shutil_module.copy2
+        copy_fresh = staging.copy_fresh
 
         def changed_first(source, target, *args, **kwargs):
             with h5py.File(source, "r+") as f:
                 f.attrs["changed"] = "x" * 10_000
-            return copy2(source, target, *args, **kwargs)
+            return copy_fresh(source, target, *args, **kwargs)
 
         table = tmp_path / "coverage.tsv"
         names = MetaCooler(tiny_metacooler).contigs["name"].astype(str)
         table.write_text(
             "contig_name\tcoverage\n" + "".join(f"{n}\t1\n" for n in names)
         )
-        monkeypatch.setattr(shutil_module, "copy2", changed_first)
+        module = annotate_module if copier == "annotate" else reassign_module
+        monkeypatch.setattr(module, "copy_fresh", changed_first)
         out = tmp_path / "out.metacool"
         with pytest.raises(MapChangedError):
             if copier == "annotate":
@@ -2061,7 +2063,8 @@ class TestOneFileOutputs:
             copies = self._copies(m)
             self._per_level(m)
             zoomify(tiny_metacooler, tmp_path / "reference.mmetacool", levels=3)
-            assert len(copies) == 2  # the old cost: a copy per level
+            # The old cost: per level, a copy and the fresh file it went through.
+            assert len(copies) == 4
         copies = self._copies(monkeypatch)
         out = tmp_path / "pyramid.mmetacool"
         zoomify(tiny_metacooler, out, levels=3)
@@ -2114,7 +2117,7 @@ class TestOneFileOutputs:
                 cli, [*args, str(tmp_path / "reference.mmetacool")]
             )
             assert result.exit_code == 0, result.output
-            assert len(copies) == 2
+            assert len(copies) == 4
         copies = self._copies(monkeypatch)
         out = tmp_path / "stacked.mmetacool"
         result = CliRunner().invoke(cli, [*args, str(out)])
@@ -2203,3 +2206,228 @@ class TestCorners:
             staging._copy_xattrs(tiny_metacooler, target)
         assert tried == ["user.a", "user.b"]
         assert "its extended attribute(s) user.b cannot be kept" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# What a MetaCooler keeps, checked; the windows of an interrupt
+# ---------------------------------------------------------------------------
+class TestKeptReads:
+    """What a MetaCooler read once and kept is refused once its file changes."""
+
+    ACCESSORS = {
+        "bins()": lambda mc: mc.bins(),
+        "contigs": lambda mc: mc.contigs,
+        "genomes": lambda mc: mc.genomes,
+        "chromnames": lambda mc: mc.chromnames,
+        "chromsizes": lambda mc: mc.chromsizes,
+        "binsize": lambda mc: mc.binsize,
+        "shape": lambda mc: mc.shape,
+        "contig_extent": lambda mc: mc.contig_extent("contig_A"),
+        "genome_extent": lambda mc: mc.genome_extent("MAG_2"),
+        "genome_contig_ids": lambda mc: mc.genome_contig_ids("MAG_1"),
+        "cluster_rounds": lambda mc: mc.cluster_rounds,
+        "clusters": lambda mc: mc.clusters,
+        "cluster_members": lambda mc: mc.cluster_members(),
+    }
+
+    @pytest.mark.parametrize("name", list(ACCESSORS))
+    def test_refused_once_the_map_is_replaced(self, tiny_metacooler: Path, name: str):
+        write_clusters(tiny_metacooler, *_rounds(tiny_metacooler))
+        read = self.ACCESSORS[name]
+        mc = MetaCooler(tiny_metacooler)
+        read(mc)
+        read(mc)  # kept
+        reassign(tiny_metacooler, {"contig_A": "MAG_2"}, inplace=True)
+        with pytest.raises(MapChangedError, match="Open it again"):
+            read(mc)
+        read(MetaCooler(tiny_metacooler))
+
+    def test_a_write_through_its_own_open_is_read_back(self, tiny_metacooler: Path):
+        mc = MetaCooler(tiny_metacooler)
+        assert "extra" not in mc.genomes.columns
+        with mc.open("r+") as grp:
+            grp["genomes"].create_dataset(
+                "extra", data=np.arange(len(grp["genomes"]["name"]))
+            )
+        assert "extra" in mc.genomes.columns
+        validate(tiny_metacooler, full=True)
+
+
+class TestInterrupts:
+    """An interrupt as a lock or a takeover guard is created leaves neither."""
+
+    def test_as_the_lock_is_created(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        real = staging._create
+
+        def interrupted(path: Path, record: dict) -> bool:
+            real(path, record)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(staging, "_create", interrupted)
+        with pytest.raises(KeyboardInterrupt), lock(tiny_metacooler):
+            pass
+        assert _left_beside(tiny_metacooler) == []
+
+    def test_as_the_takeover_guard_is_created(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _write_lock(tiny_metacooler, DEAD_PID)
+        guard = Path(f"{lock_path(tiny_metacooler)}{staging.TAKEOVER_SUFFIX}")
+        real = staging._create
+
+        def interrupted(path: Path, record: dict) -> bool:
+            created = real(path, record)
+            if path == guard:
+                raise KeyboardInterrupt
+            return created
+
+        monkeypatch.setattr(staging, "_create", interrupted)
+        with pytest.raises(KeyboardInterrupt), lock(tiny_metacooler):
+            pass
+        assert not guard.exists()
+        monkeypatch.setattr(staging, "_create", real)
+        _store(tiny_metacooler)  # the stale lock is taken over as before
+        assert _left_beside(tiny_metacooler) == []
+
+    def test_this_thread_through_another_path_is_named(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        """One lock file reached by two paths (a bind mount; a hard link here):
+        the thread that holds it is not 'another thread'."""
+        alias = tmp_path / "elsewhere" / tiny_metacooler.name
+        alias.parent.mkdir()
+        with lock(tiny_metacooler):
+            os.link(lock_path(tiny_metacooler), lock_path(alias))
+            try:
+                with (
+                    pytest.raises(
+                        MapLockedError, match="this thread already"
+                    ) as caught,
+                    lock(alias),
+                ):
+                    pass
+            finally:
+                os.unlink(lock_path(alias))
+        assert "another thread" not in str(caught.value)
+        assert str(lock_path(tiny_metacooler)) in str(caught.value)
+
+
+class TestThirdReviewCorners:
+    def test_a_staged_map_of_another_process_is_named(self, tiny_metacooler: Path):
+        """What another process is refused, when it is given a session's
+        staged map: the session, and the map it writes."""
+        _write_lock(tiny_metacooler, os.getppid(), staged_for="/maps/sample.metacool")
+        with pytest.raises(MapLockedError) as caught:
+            _store(tiny_metacooler)
+        message = str(caught.value)
+        assert "is the staged map of an edit session of another process" in message
+        assert "writes it to /maps/sample.metacool" in message
+
+    def test_an_own_stale_lock_beside_a_held_one(
+        self, tiny_metacooler: Path, tmp_path: Path, caplog
+    ):
+        other = tmp_path / "other.metacool"
+        shutil.copy(tiny_metacooler, other)
+        _write_lock(other, os.getpid(), run=OTHER_RUN)
+        with lock(tiny_metacooler), caplog.at_level("WARNING", logger="metacooler"):
+            _store(other)
+        assert "Took over" in caplog.text
+        assert _left_beside(other) == []
+
+    def test_a_session_of_another_thread_is_no_session_of_this_one(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        other = tmp_path / "other.metacool"
+        shutil.copy(tiny_metacooler, other)
+        opened, done = threading.Event(), threading.Event()
+
+        def session() -> None:
+            with staging.staged_edit(tiny_metacooler):
+                opened.set()
+                done.wait(60)
+
+        thread = threading.Thread(target=session)
+        thread.start()
+        try:
+            assert opened.wait(60)
+            _store(other)  # this thread has no session: written
+        finally:
+            done.set()
+            thread.join(60)
+        assert "w" in MetaCooler(other).bins()[:].columns
+
+    def test_bins_are_compared_by_contig_name(self):
+        """Two maps whose bins have the same coordinates: the same contig names,
+        whatever the contigs' ids, or not."""
+        names = np.array([b"x", b"y"])
+        chrom = np.array([0, 0, 1, 1])
+        start = np.array([0, 100, 0, 100])
+        end = np.array([100, 200, 100, 200])
+        same = (names, chrom, start, end)
+        assert staging._same_bins(same, same)
+        renumbered = (np.array([b"y", b"x"]), np.array([1, 1, 0, 0]), start, end)
+        assert staging._same_bins(same, renumbered)
+        swapped = (np.array([b"y", b"x"]), chrom, start, end)
+        assert not staging._same_bins(same, swapped)
+        other = (np.array([b"y", b"z"]), chrom, start, end)
+        assert not staging._same_bins(same, other)
+        none = (np.array([], dtype="S1"), chrom, start, end)
+        assert not staging._same_bins(same, none)
+        broken = (names, np.array([0, 0, 2, 2]), start, end)
+        assert not staging._same_bins(broken, renumbered)
+
+    def test_a_map_of_another_file_for_a_whole_collection(
+        self, tiny_mmetacool: Path, tiny_metacooler: Path
+    ):
+        """A map read for an edit of a whole collection, of another file: the
+        collection's root holds no map to compare it with."""
+        with (
+            pytest.raises(MapChangedError, match="bins of the map written"),
+            staged_inplace(tiny_mmetacool, planned=MetaCooler(tiny_metacooler)),
+        ):
+            pass
+
+    def test_a_metadata_edit_of_a_map_written_meanwhile(self, tiny_metacooler: Path):
+        before = MetaCooler(tiny_metacooler).metadata
+
+        def written_meanwhile(meta: dict) -> None:
+            _touch(tiny_metacooler)  # by a program that takes no lock
+            meta.update({"sample": "S1"})
+
+        with pytest.raises(MapChangedError, match="metadata was edited"):
+            edit_metadata(tiny_metacooler, written_meanwhile)
+        assert MetaCooler(tiny_metacooler).metadata == before
+
+    def test_the_kept_values_as_attributes(self, tiny_metacooler: Path):
+        from metacooler.api import _cached
+
+        assert isinstance(MetaCooler._contigs_table, _cached)
+        mc = MetaCooler(tiny_metacooler)
+        mc._contigs_table = pd.DataFrame({"name": ["set"]})
+        assert list(mc.contigs["name"]) == ["set"]
+        del mc._contigs_table
+        assert list(mc.contigs["name"])[0] != "set"
+
+    def test_a_weight_column_written_aside_first(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from metacooler.io import weights as weights_module
+
+        _store(tiny_metacooler, "w", 1.0)
+        n_bins = _n_bins(tiny_metacooler)
+        with h5py.File(tiny_metacooler, "r+") as f:  # left by an earlier run
+            f["bins"].create_dataset(".w.new", data=np.zeros(n_bins))
+
+        def refused(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(weights_module, "weight_attributes", refused)
+        with pytest.raises(OSError, match="No space"):
+            _store(tiny_metacooler, "w", 2.0)
+        monkeypatch.undo()
+        _store(tiny_metacooler, "w", 3.0)
+        with h5py.File(tiny_metacooler, "r") as f:
+            assert not [name for name in f["bins"] if name.startswith(".")]
+            assert (f["bins/w"][()] == 3.0).all()

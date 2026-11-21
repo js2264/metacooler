@@ -10,9 +10,10 @@
   `store_weights`, `write_clusters`, `drop_clusters` and the entry functions —
   takes the map's lock before it reads the map, writes a fresh copy in a
   private directory beside it, validates it in full, and renames it over the
-  map: the map is whole whatever stops the edit (an error, a failed
-  validation, `KeyboardInterrupt`, `SystemExit`) and does not grow with every
-  edit. The map keeps its owner and group where the process may set them (a
+  map, written through a fresh file: the map is whole whatever stops the edit
+  (an error, a failed validation, `KeyboardInterrupt`, `SystemExit`) and does
+  not grow with every edit (`reassign -o` and `annotate -o` no longer carry
+  over the space their source's earlier edits left, either). The map keeps its owner and group where the process may set them (a
   member of a shared map's group keeps its group; a warning names what cannot
   be kept), its mode and its extended attributes, POSIX ACLs included; an
   edit through a symbolic link edits its target, the link left pointing at it.
@@ -29,14 +30,23 @@
   its thread, so the writers called meanwhile take it on) and refuses with
   `metacooler.MapLockedError` (a `MapLockError`, an `OSError`);
   `store_weights(source=mc)` refuses weights computed from a map that changed
-  since. See [In-place writes](format.md#in-place-writes).
+  since, or, when `mc` is not the map written, whose bins are not its bins
+  (contig name, start and end, bin by bin). An in-place edit splits a hard
+  link to the map (the other names keep the map as it was). See
+  [In-place writes](format.md#in-place-writes).
 - **`metacooler.staged_edit`**: several edits of a map through one staged
   copy, validated and renamed once. Every writer given its staged map by the
   session's thread writes it directly — no copy, no validation, no lock of its
-  own — and a failure of any kind leaves the map as it was. With
+  own — and a failure of any kind leaves the map as it was, a writer's failure
+  whose error was caught included (`RuntimeError` when the session ends). The
+  staged map has a lock of its own, refusing it to any other thread or
+  process; a session that wrote nothing leaves the map as it is, and one that
+  did writes it through a fresh file, so the map does not grow. A writer in a
+  session records the session's map in its history (`reassign`'s `source`),
+  never the staged path. With
   `output=PATH`, the edited map goes to a new file instead, an entry of a
-  `.mmetacool` as a standalone `.metacool`. See
-  [Several edits at once](cli.md#staged-edit).
+  `.mmetacool` as a standalone `.metacool`, under the lock of `PATH` (the map,
+  only read, is not locked). See [Several edits at once](cli.md#staged-edit).
 - **A read across a replacement is refused.** `MetaCooler` checks, before and
   after every read — each chunk of pixels cooler reads, `info`, each table —
   that its file is still the one it opened, and raises
@@ -118,15 +128,17 @@
 
 - **Breaking: a `MetaCooler` held across an in-place edit stops reading.**
   It raises `MapChangedError` at its next read once the map is replaced or
-  written by another writer (or another `MetaCooler`): open the map again.
-  `MetaCooler.open("r+")` now takes the map's lock, and refuses a map changed
-  since it was opened; it still writes the file itself, unstaged.
+  written by another writer (or another `MetaCooler`) — a read of what it
+  kept included (`contigs`, `genomes`, `bins()`, `contig_extent`, ...): open
+  the map again. `MetaCooler.open("r+")` now takes the map's lock, and refuses
+  a map changed since it was opened; it still writes the file itself,
+  unstaged, and what the object kept is read again after it.
 - **Breaking: in-place edits cost a copy of the map.** Every in-place edit
-  (see Added) copies the map, so it needs a writable directory, room for a
-  second copy of the map beside it, and the time of the copy and of a full
-  validation: `annotate --inplace` on a large map took seconds and now takes
-  as long as a copy (several edits in a row cost one copy through
-  `metacooler.staged_edit`). A map without write permission is refused (it
+  (see Added) copies the map, and writes it through a fresh file when it is
+  done, so it needs a writable directory, room for two copies of the map
+  beside it, and the time of the copies and of a full validation: `annotate
+  --inplace` on a large map took seconds and now takes as long as two copies
+  (several edits in a row cost that once through `metacooler.staged_edit`). A map without write permission is refused (it
   was refused by the edit in place, and would otherwise have been replaced in
   a writable directory).
 - **`reassign --inplace` re-groups too**: a reassignment that has to move

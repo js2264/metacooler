@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -83,7 +82,13 @@ from metacooler.io.create import (
     _staged_output,
     _stream_remapped_pixels,
 )
-from metacooler.io.staging import locked_when_inplace, map_output, staged_inplace
+from metacooler.io.staging import (
+    copy_fresh,
+    locked_when_inplace,
+    map_output,
+    recorded_uri,
+    staged_inplace,
+)
 from metacooler.io.weights import (
     drop_stale_weights,
     restore_weight_attrs,
@@ -670,12 +675,13 @@ def _build_metadata(
 def _materialise_copy(mc: MetaCooler, target: Path) -> None:
     """Copy the source map to *target* as a standalone ``.metacool`` file.
 
-    A whole-file input is copied byte for byte, which is both the fastest way
-    to get an editable duplicate and the only one that keeps everything the
-    relabel path does not rewrite — balancing weights, extra pixel columns,
-    HDF5 chunking and filters — exactly as it was.  An mmetacool *entry* is
-    copied group by group into the root of a new file, so the output of
-    ``reassign`` is always a single map rather than a collection.
+    A fresh copy (:func:`metacooler.io.staging.copy_fresh`): every object as
+    stored -- balancing weights, extra pixel columns, HDF5 chunking and
+    filters, attributes with their dtypes -- but none of the space earlier
+    edits left in the source, which a byte copy carried into every map
+    relabelled from it, the map growing with each.  An mmetacool *entry* is
+    copied into the root of a new file, so the output of ``reassign`` is
+    always a single map rather than a collection.
 
     Args:
         mc: The open source file.
@@ -685,22 +691,7 @@ def _materialise_copy(mc: MetaCooler, target: Path) -> None:
     # The map read is the map copied: a file replaced or written since is
     # refused (MapChangedError), before and after the copy.
     mc._check_unchanged()
-    if not group:
-        shutil.copy2(mc.store, target)
-        mc._check_unchanged()
-        return
-    with h5py.File(mc.store, "r") as src, h5py.File(target, "w") as dst:
-        node = src[group]
-        for key in node:
-            link = node.get(key, getlink=True)
-            if isinstance(link, h5py.SoftLink):
-                # Copying through the link would hard-copy /contigs a second
-                # time under the name /chroms; the format wants a soft link.
-                dst[key] = h5py.SoftLink(link.path)
-            else:
-                src.copy(node[key], dst, name=key)
-        for key, value in node.attrs.items():
-            dst.attrs[key] = value
+    copy_fresh(mc.store, target, group=group or None)
     mc._check_unchanged()
 
 
@@ -1561,7 +1552,7 @@ def reassign(
     output_metadata, had_qc = _build_metadata(
         source_metadata,
         metadata,
-        source_uri=str(uri),
+        source_uri=recorded_uri(uri),
         table=(
             str(contig_genome_map) if isinstance(contig_genome_map, str | Path) else ""
         ),

@@ -38,7 +38,6 @@ import contextlib
 import dataclasses
 import json
 import logging
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -57,6 +56,7 @@ from metacooler.io._utils import (
 from metacooler.io.colspec import CONTIG_METADATA_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
 from metacooler.io.staging import (
     check_unchanged,
+    copy_fresh,
     lock,
     map_output,
     staged_inplace,
@@ -332,7 +332,8 @@ def annotate(
             _materialise_copy(planned[0], staged)
             moved = [dataclasses.replace(edits[0], group="/")]
         else:
-            shutil.copy2(file_path, staged)
+            # Fresh: none of the space earlier edits left in the map.
+            copy_fresh(file_path, staged)
             moved = edits
         # The file copied is the file planned on (MapChangedError otherwise).
         check_unchanged(planned)

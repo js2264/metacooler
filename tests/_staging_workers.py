@@ -55,3 +55,20 @@ def write_in_place(path: str, ready, release, done) -> None:
 
 def exists(path: str) -> bool:
     return Path(path).exists()
+
+
+def try_store(path: str) -> str:
+    """Store a weight column in the map *path*: ``"written"``, or what was
+    raised, as ``"<type>: <message>"``."""
+    logging.disable(logging.WARNING)
+    import numpy as np
+
+    from metacooler.api import MetaCooler
+    from metacooler.io.weights import store_weights
+
+    try:
+        n_bins = int(MetaCooler(path).info["nbins"])
+        store_weights(path, "w", np.ones(n_bins), method="test", depends_on="pixels")
+    except Exception as error:  # noqa: BLE001 - reported to the test
+        return f"{type(error).__name__}: {error}"
+    return "written"

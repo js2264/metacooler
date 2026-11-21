@@ -445,7 +445,7 @@ staged copy beside it:
 |------|------------|
 | `<map>.lock` | The map's lock, a JSON object naming its holder: `pid`, `host`, `machine_id` and `pid_ns` (where the process runs: a machine id and a PID namespace tell two machines, or containers, that share a host name), `boot_id` and `pid_start` (to know a process from a later one of the same pid), `start` (ISO 8601), `command` and `uuid` — each where the system tells it. Created exclusively (`O_EXCL`) and written whole, removed when the edit ends, by its holder only. Beside the map's real file: an edit through a symbolic link locks, and replaces, its target. An entry of a `.mmetacool` shares its collection's lock. |
 | `<map>.lock.takeover` | The guard a process holds while it takes over a stale lock, naming it as a lock does. |
-| `.<map>.<uuid>.<n>.d/` | A private directory (mode `0700`, keeping the set-group-id bit its directory gives it) holding the edited map: a fresh copy of the map (every object copied as stored), edited, validated in full, given the map's owner and group (where the process may: a warning names what it may not), mode and extended attributes (POSIX ACLs included), synced, then renamed over the map. cooler's temporary files (`tmp*.multi.cool`, when a re-grouping writes a new map) are written there too. `<uuid>` is the lock's, `<n>` numbers the edits made under it. The edit removes it when it ends, whatever ends it; a process killed outright cannot, and the next holder of the lock removes it. |
+| `.<map>.<uuid>.<n>.d/` | A private directory (mode `0700`, keeping the set-group-id bit its directory gives it) holding the edited map: a fresh copy of the map (every object copied as stored), edited, validated in full, written through a fresh file (`.fresh.<map>`: the edit leaves no space that no object holds), given the map's owner and group (where the process may: a warning names what it may not), mode and extended attributes (POSIX ACLs included), synced, then renamed over the map. cooler's temporary files (`tmp*.multi.cool`, when a re-grouping writes a new map) are written there too. `<uuid>` is the lock's, `<n>` numbers the edits made under it. The edit removes it when it ends, whatever ends it; a process killed outright cannot, and the next holder of the lock removes it. In an edit session, it also holds the staged map's own lock, `<map>.lock`, which names the session's process and, as `staged_for`, the file the session writes. |
 
 - **Holders.** A lock held by a live process, or by another thread of the
   same process, is refused, by name. A lock of this host is *stale* when its
@@ -471,36 +471,65 @@ staged copy beside it:
   it no longer holds the lock.
 - **Re-entrant.** The thread that holds a map's lock (`metacooler.lock(path)`,
   as metaTOR holds it for a whole run) calls the writers, which take the lock
-  unless their caller holds it. Another thread is refused. A forked child
-  holds none of its parent's locks, and neither releases them nor removes
-  what its parent staged.
+  unless their caller holds it. Another thread is refused, and so is the same
+  thread through another path to the same lock file (a bind mount: a map has
+  one path while its lock is held). A forked child holds none of its parent's
+  locks, and neither releases them nor removes what its parent staged.
+- **Interrupts.** A lock or a takeover guard is removed by whatever stops its
+  holder as soon as it is created, `KeyboardInterrupt` included, if it is
+  still its own. Only an interrupt in the instant between a lock's creation
+  and the start of the block it guards — a few bytecodes — leaves it held by
+  the live process until it ends; the lock is then stale, and taken over.
 - **What was read, and what was written meanwhile.** A writer refuses to copy
   a map that changed since it read it for the edit (`MapChangedError`);
-  `store_weights(source=...)` names the map weights were computed from. Just
-  before the rename, the map is checked once more: a program that writes it
-  without metacooler's lock (`cooler balance`, say) while its copy is edited
-  makes the edit fail (`MapChangedError`), and the map keeps that program's
-  write. Only a write in the instant between that check and the rename goes
-  unseen.
+  `store_weights(source=...)` names the map weights were computed from, which,
+  when it is not the map written (another file or entry, or the map as it was
+  before an edit session began), must have the bins of the map written: the
+  same contig name, start and end, bin by bin. A copy that a program writing
+  the map without metacooler's lock (`cooler balance`, say) tore is refused as
+  soon as it is made, and the map is checked once more just before the
+  rename: such a write while the copy is edited makes the edit fail
+  (`MapChangedError`), and the map keeps that program's write. Only a write in
+  the instant between that check and the rename goes unseen.
 - **Symbolic links.** An in-place edit through a symbolic link edits its
   target — lock, staging directory and replacement are beside the target —
   and the link keeps pointing at the edited map. An output path (`-o`,
   `output=`) that is a link is replaced, never written through.
+- **Hard links.** An in-place edit replaces the map with a new file, so a hard
+  link to it is split: the name edited holds the edited map, every other name
+  the map as it was. Each name has a lock of its own; give a map one name.
 - **Edit sessions.** `metacooler.staged_edit(map)` opens one staged copy for
   several edits: every writer given its path, from the same thread, writes
   into it directly — no copy, no validation and no lock of its own — and the
-  session validates it once and renames it once (see
-  [Several edits at once](cli.md#staged-edit)). With `output=PATH` the edited
-  map goes to `PATH` instead, an entry of a `.mmetacool` as a standalone
-  `.metacool`.
+  session validates it once and writes it through a fresh file once (see
+  [Several edits at once](cli.md#staged-edit)), so the map does not grow
+  whatever its writers replaced; a session that wrote nothing leaves the map
+  as it is. A writer that records a map (`reassign`'s history, `binnify`'s)
+  names the session's map — the map edited, an entry's URI included, or the
+  map copied out — never the staged path. The staged map's own lock refuses it to any other
+  process, a forked child included; another thread is refused it too, and a
+  write of the map itself from the session's thread. A writer that fails once
+  it has the staged map fails the session: even if its error is caught, the
+  session writes nothing when it ends (`RuntimeError`), since the staged map
+  may hold part of that write. With `output=PATH` the edited map goes to
+  `PATH` instead, an entry of a `.mmetacool` as a standalone `.metacool`: the
+  session then holds `PATH`'s lock (`PATH.lock`, beside the path itself: a
+  link there is replaced) and stages beside `PATH` — so that whoever takes
+  that lock next removes what a killed session left there —, and takes no
+  lock of the map, which it only reads: its copy is checked untorn. A write of
+  the map copied out, or of `PATH`, from the session's thread is refused.
 - **Reads.** `MetaCooler` records the file it opened (device, inode, size,
   modification time) and checks it before and after every read — each chunk
   cooler reads, cooler's own opens (`balance_cooler`'s chunks), `info`, each
   table — refusing (`MapChangedError`) a file that was replaced or written
   meanwhile: metacooler reads the pixels a chunk at a time, so a read across a
   replacement would mix the bins of one map with the pixels of the other.
-  What a map writes through its own `open("r+")` (under the lock, unstaged) is
-  not a change. Open the map again to read the new one. `merge` and
+  What it reads once and keeps — its tables (`genomes`, `contigs`,
+  `clusters`, ...), `bins()`, the offset indexes behind `contig_extent` and
+  `genome_extent`, what cooler keeps (`chromnames`) — is checked on every read
+  of it as well. What a map writes through its own `open("r+")` (under the
+  lock, unstaged) is not a change: what it kept is read again. Open the map
+  again to read the new one. `merge` and
   `collect`, which read their inputs by path, check them unchanged once they
   are read, and write nothing otherwise.
 - **The cost.** An edit copies the file, so it needs a writable directory,
