@@ -413,6 +413,23 @@ metacooler extract --force --output contigs.cool --split --contigs contig_1_000,
 metacooler attrs assembly_1_DpnII.mmetacool
 
 # ================================================================================
+## fasta
+# ================================================================================
+
+## One FASTA file per MAG, each contig's record as it is in the assembly.
+metacooler fasta --force --fasta ../assembly_1.fa -o MAGs_fasta assembly_1_rep1_1kb.metacool
+## One file, one stitched record per MAG, then the unbinned contigs as they are.
+metacooler fasta --force --fasta ../assembly_1.fa -o MAGs_stitched.fa --single-file --stitch --unbinned assembly_1_rep1_1kb.metacool
+## The same from the compressed assembly (copied, plain, into a temporary directory).
+gzip -c ../assembly_1.fa > assembly_1.fa.gz
+metacooler fasta --force --fasta assembly_1.fa.gz -o MAGs_fasta_gz assembly_1_rep1_1kb.metacool
+cat MAGs_fasta/*.fa > fasta_plain.fa
+cat MAGs_fasta_gz/*.fa > fasta_gz.fa
+assert_identical "fasta from a plain or a gzip assembly" fasta_plain.fa fasta_gz.fa
+## --spacer separates stitched contigs only (expected error).
+metacooler fasta --force --fasta ../assembly_1.fa -o MAGs_fasta --spacer 10 assembly_1_rep1_1kb.metacool || echo "  (expected: --spacer needs --stitch)"
+
+# ================================================================================
 ## network
 # ================================================================================
 

@@ -7,6 +7,7 @@ Single home for the idioms that were previously copy-pasted across
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def parse_comma_list(ctx, param, value):
     return parsed
 
 
-def parse_filter_list(ctx, param, value):
+def parse_filter_list(ctx, param, value, *, tables=None):
     """Validate every ``--filter`` expression, passing the raw strings through.
 
     Deliberately *not* comma-split like :func:`parse_comma_list`: a filter
@@ -106,6 +107,9 @@ def parse_filter_list(ctx, param, value):
         ctx: Click context (unused, part of the callback signature).
         param: The Click ``Parameter`` being converted.
         value: Tuple of raw strings from a ``multiple=True`` option.
+        tables: The tables the command reads (see
+            :func:`metacooler.filters.parse_filter`); ``None``, the default,
+            for ``genomes`` and ``contigs``.
 
     Returns:
         The expressions as a list, unchanged.  ``[]`` when the option was not
@@ -114,73 +118,52 @@ def parse_filter_list(ctx, param, value):
     Raises:
         click.BadParameter: If any expression does not parse.
     """
-    from metacooler.filters import FilterError, parse_filter
+    from metacooler.filters import TABLES, FilterError, parse_filter
 
     exprs = [v for v in (value or ())]
     for expr in exprs:
         try:
-            parse_filter(expr)
+            parse_filter(expr, tables=TABLES if tables is None else tables)
         except FilterError as exc:
             raise click.BadParameter(str(exc)) from exc
     return exprs
 
 
-def parse_cluster_filter_list(ctx, param, value):
-    """:func:`parse_filter_list`, for a command that also reads the clusters of
-    a round (``fasta --round``): ``clusters.<column>`` parses too."""
-    from metacooler.filters import TABLES_WITH_CLUSTERS, FilterError, parse_filter
+def filter_option(f=None, *, tables: tuple[str, ...] | None = None):
+    """Attach the standard repeatable ``--filter`` option to a command.
 
-    exprs = [v for v in (value or ())]
-    for expr in exprs:
-        try:
-            parse_filter(expr, tables=TABLES_WITH_CLUSTERS)
-        except FilterError as exc:
-            raise click.BadParameter(str(exc)) from exc
-    return exprs
+    ``@filter_option`` reads ``genomes`` and ``contigs``;
+    ``@filter_option(tables=(...))`` the tables given, the clusters of a round
+    among them (``fasta --round``: ``metacooler.filters.TABLES_WITH_CLUSTERS``,
+    spelled out here, since that module imports pandas and ``--help`` must not).
+    """
+    where = "[yellow]genomes[/yellow] or [yellow]contigs[/yellow]"
+    if tables is not None and "clusters" in tables:
+        where = (
+            "[yellow]genomes[/yellow] or [yellow]contigs[/yellow], or with "
+            "[cyan]--round[/cyan] [yellow]clusters[/yellow] (the round's table, "
+            "as [cyan]dump -t clusters[/cyan] prints it)"
+        )
 
+    def decorate(f):
+        return click.option(
+            "--filter",
+            "filters",
+            type=str,
+            multiple=True,
+            callback=functools.partial(parse_filter_list, tables=tables),
+            metavar="EXPR",
+            help=(
+                "Keep only rows matching [cyan]<table>.<column> <op> "
+                f"<value>[/cyan], where [cyan]<table>[/cyan] is {where} — e.g. "
+                "[cyan]--filter 'genomes.length > 1Mb'[/cyan]. Operators: "
+                "[cyan]> >= < <= == != =~ !~[/cyan] ([cyan]=~[/cyan] is a regex "
+                "match). Numbers accept [cyan]bp/kb/Mb/Gb[/cyan] suffixes. Repeat "
+                "the option to require several conditions at once."
+            ),
+        )(f)
 
-def cluster_filter_option(f):
-    """``--filter``, with the clusters of a round as a third table."""
-    return click.option(
-        "--filter",
-        "filters",
-        type=str,
-        multiple=True,
-        callback=parse_cluster_filter_list,
-        metavar="EXPR",
-        help=(
-            "Keep only rows matching [cyan]<table>.<column> <op> <value>[/cyan], "
-            "where [cyan]<table>[/cyan] is [yellow]genomes[/yellow] or "
-            "[yellow]contigs[/yellow], or with [cyan]--round[/cyan] "
-            "[yellow]clusters[/yellow] (the round's table, as "
-            "[cyan]dump -t clusters[/cyan] prints it) — e.g. "
-            "[cyan]--filter 'genomes.Completeness >= 90'[/cyan]. Operators: "
-            "[cyan]> >= < <= == != =~ !~[/cyan]. Numbers accept "
-            "[cyan]bp/kb/Mb/Gb[/cyan] suffixes. Repeat the option to require "
-            "several conditions at once."
-        ),
-    )(f)
-
-
-def filter_option(f):
-    """Attach the standard repeatable ``--filter`` option to a command."""
-    return click.option(
-        "--filter",
-        "filters",
-        type=str,
-        multiple=True,
-        callback=parse_filter_list,
-        metavar="EXPR",
-        help=(
-            "Keep only rows matching [cyan]<table>.<column> <op> <value>[/cyan], "
-            "where [cyan]<table>[/cyan] is [yellow]genomes[/yellow] or "
-            "[yellow]contigs[/yellow] — e.g. "
-            "[cyan]--filter 'genomes.length > 1Mb'[/cyan]. Operators: "
-            "[cyan]> >= < <= == != =~ !~[/cyan] ([cyan]=~[/cyan] is a regex "
-            "match). Numbers accept [cyan]bp/kb/Mb/Gb[/cyan] suffixes. Repeat "
-            "the option to require several conditions at once."
-        ),
-    )(f)
+    return decorate if f is None else decorate(f)
 
 
 def check_output(

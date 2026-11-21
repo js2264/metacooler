@@ -8,26 +8,32 @@ the records of its contigs:
 - **as they are**, by default: each contig's record copied byte for byte, its
   header line and its line breaks included, exactly as ``pyfastx`` gives it
   (``raw``), so a tool that wrote its FASTA files record by record gets the
-  same bytes from here;
+  same bytes from here. A genome's or a round's contigs come in map order (the
+  rows of ``/contigs``), a caller's group's in the order given;
 - **stitched** (``stitch=True``): one record per genome or cluster, named
-  after it, its contigs' sequences joined by ``spacer`` N and wrapped at
-  :data:`LINE_WIDTH` columns.
+  after it, its contigs' bases joined by ``spacer`` N and wrapped at
+  :data:`LINE_WIDTH` columns. A genome's or a round's contigs come longest
+  first, ties in map order -- a cluster may span genomes, whose order in the
+  map follows the current assignment -- and a caller's group's in the order
+  given.
 
 One file per genome or cluster (``<name>.fa`` in a directory), or every record
 in one file (``single_file=True``), where a contig record's header line is
 prefixed with its genome or cluster (``<genome>|<header>``). The contigs in no
 genome, or in no cluster of the round, go to ``__unbinned__`` with
-``unbinned=True``: as they are, even when stitching.
+``unbinned=True``: as they are, in map order, even when stitching.
 
-The records of a genome or a cluster come in map order (the rows of
-``/contigs``: longest first under the default ``genome-then-length`` layout),
-those of a caller's group in the order given.
+A record is named, and measured, as the map's creator reads it: its name is
+the header up to the first whitespace, past any space after the ``>``
+(``> c1 desc`` is ``c1``, as for ``create`` and metaTOR), and a contig is the
+map's when the map's length counts either its sequence's bytes but line
+breaks (as pyfaidx does for ``create --fasta``) or its bases alone.
 
 The assembly is read once, to find its records, and each record is then copied
-from it: a plain file is mapped in memory, a gzip-compressed one (gzip or
-bgzip) is decompressed into a private temporary directory first. Nothing is
-written next to it. Every contig written must be in it, under its name (its
-header up to the first whitespace), with the map's length.
+from it: a plain file is mapped in memory; a gzip-compressed one (gzip or
+bgzip), or one that is no regular file (a pipe, ``<(zcat ...)``), is first
+copied, plain, into a private temporary directory. Nothing is written next to
+it.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ import mmap
 import os
 import re
 import shutil
+import stat
 import tempfile
 import zlib
 from collections import Counter
@@ -46,7 +53,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NoReturn
 
 import numpy as np
 import pandas as pd
@@ -57,6 +64,7 @@ from metacooler.io._utils import (
     contigs_filter_frame,
     genomes_filter_frame,
 )
+from metacooler.io.staging import _umask
 from metacooler.qc import UNBINNED_GENOME, unbinned_genome_id
 
 if TYPE_CHECKING:
@@ -75,15 +83,16 @@ SINGLE_FILE_SEPARATOR = "|"
 FASTA_SUFFIX = ".fa"
 
 _GZIP_MAGIC = b"\x1f\x8b"
-# What a sequence line may hold besides its bases: its line break.
+# What a sequence line may hold besides its bases.
 _WHITESPACE = b" \t\r\n\v\f"
-# A record starts with a line that starts with ">"; its name runs to the
-# first whitespace, as pyfastx and pyfaidx read it. The first record is the
-# file's first text; every other follows a line break, which a search for the
-# literal "\n>" finds several times faster than a multi-line "^>".
+# A record starts with a line that starts with ">"; its name runs to the first
+# whitespace, past any space or tab after the ">", as metacooler's readers and
+# metaTOR read it. The first record is the file's first text; every other
+# follows a line break, which a search for the literal "\n>" finds several
+# times faster than a multi-line "^>".
 _FIRST_TEXT = re.compile(rb"\S")
-_FIRST_HEADER = re.compile(rb">(\S*)")
-_HEADER = re.compile(rb"\n>(\S*)")
+_FIRST_HEADER = re.compile(rb">[ \t]*(\S*)")
+_HEADER = re.compile(rb"\n>[ \t]*(\S*)")
 # How many names an error shows, before counting the rest.
 _SHOWN = 5
 _COPY_BUFFER = 1 << 24
@@ -92,12 +101,14 @@ _COPY_BUFFER = 1 << 24
 @dataclass(frozen=True)
 class _Group:
     """What one genome, cluster or group writes: its contigs (rows of
-    ``/contigs``), in the order written."""
+    ``/contigs``), in map order or in the caller's (``given``)."""
 
     name: str
     contig_ids: np.ndarray
     #: The contigs in no genome or cluster: never stitched.
     unbinned: bool = False
+    #: The order is the caller's: kept when stitching too.
+    given: bool = False
 
 
 @dataclass(frozen=True)
@@ -115,15 +126,16 @@ def write_fasta(
     fasta: str | Path,
     out: str | Path,
     *,
-    genomes: Sequence[str] | None = None,
-    filters: Sequence[str] | None = None,
+    genomes: str | Sequence[str] | None = None,
+    filters: str | Sequence[str] | None = None,
     round: str | None = None,
     groups: Mapping[str, Sequence[str]] | None = None,
     unbinned: bool = False,
     stitch: bool = False,
-    spacer: int = DEFAULT_SPACER,
+    spacer: int | None = None,
     single_file: bool = False,
     force: bool = False,
+    temp_dir: str | Path | None = None,
 ) -> dict[str, Path]:
     """Write the contigs of each genome, or of each cluster of a round, as FASTA.
 
@@ -131,18 +143,22 @@ def write_fasta(
     ``<out>/<genome>.fa``, holding its contigs' records exactly as they are in
     *fasta* (header and line breaks included), in map order.
 
+    Each call reads the assembly once (and copies a gzip-compressed one
+    first): give every group of a run to one call.
+
     Args:
         uri: A ``.metacool`` path, or an entry of an ``.mmetacool``
             (``file.mmetacool::entries/<name>``).
         fasta: The assembly the map was made from: FASTA, plain or compressed
-            with gzip (or bgzip). Every contig written must be in it, under
-            its name, with the map's length. Nothing is written next to it.
+            with gzip (or bgzip); a pipe is read too. Every contig written must
+            be in it, once, with the map's length. Nothing is written next to
+            it.
         out: The directory to write ``<name>.fa`` into, created if missing
             (files of other names in it are left alone); with *single_file*,
-            the FASTA file to write.
-        genomes: The genomes to write, by name; with *round*, the clusters of
-            that round. Default: every one (but ``__unbinned__``).
-        filters: ``--filter`` expressions (see :mod:`metacooler.filters`),
+            the FASTA file to write (its directory created if missing).
+        genomes: The genome(s) to write, by name; with *round*, the clusters
+            of that round. Default: every one (but ``__unbinned__``).
+        filters: ``--filter`` expression(s) (see :mod:`metacooler.filters`),
             narrowing the selection: ``genomes.<column>`` selects genomes,
             ``contigs.<column>`` the contigs written, and with *round*,
             ``clusters.<column>`` selects clusters, over the round's table as
@@ -155,16 +171,22 @@ def write_fasta(
             *genomes*, *filters* or *round*.
         unbinned: Also write the contigs in no genome (in no cluster of
             *round*, in no group of *groups*) as ``__unbinned__``: as they
-            are, never stitched.
+            are, in map order, never stitched. Names or genome (cluster)
+            filters that keep no genome (cluster) are refused all the same.
         stitch: Write each genome or cluster as one record named after it:
-            its contigs' sequences, in order, joined by *spacer* N, wrapped at
+            its contigs' bases, longest first (ties in map order; a group's
+            in the order given), joined by *spacer* N, wrapped at
             :data:`LINE_WIDTH` columns.
-        spacer: Number of N between two stitched contigs.
+        spacer: Number of N between two stitched contigs, with *stitch* only;
+            :data:`DEFAULT_SPACER` by default.
         single_file: Write every record to the one file *out*: a contig
             record's header line becomes ``<genome>|<header line>``; a
             stitched record stays named after its genome.
         force: Overwrite output files that exist. An output that is the map
             or the assembly is refused all the same.
+        temp_dir: Where to copy a gzip-compressed or piped assembly, plain
+            (created if missing). Default: the system temporary directory
+            (``TMPDIR``).
 
     Returns:
         Each genome, cluster or group written (``__unbinned__`` included),
@@ -174,16 +196,24 @@ def write_fasta(
         KeyError: If a genome, a round, a cluster or a group's contig is not
             one of the map.
         ValueError: If the arguments do not go together, a name cannot be
-            that of a file or a record, the assembly is not FASTA, lacks a
-            contig, names one twice or gives one another length than the map
-            (a :class:`metacooler.filters.FilterError` for a filter that does
-            not apply, or selects nothing).
+            that of a file or a record (or two names that of one file, case
+            aside), the assembly is not FASTA, lacks a contig, names one twice
+            or gives one another length than the map, or a compressed one
+            cannot be decompressed (a :class:`metacooler.filters.FilterError`
+            for a filter that does not apply, or selects nothing).
         FileExistsError: If an output exists and *force* is False.
+        IsADirectoryError: If an output file is a directory.
         NotADirectoryError: If *out* is a file, without *single_file*.
+        OSError: If the plain copy of the assembly cannot be written (the
+            message names it: see *temp_dir*).
     """
     from metacooler.api import MetaCooler
     from metacooler.filters import TABLES_WITH_CLUSTERS, parse_filters
 
+    if spacer is None:
+        spacer = DEFAULT_SPACER
+    elif not stitch:
+        raise ValueError("spacer separates stitched contigs: give stitch=True too.")
     if isinstance(spacer, bool) or not isinstance(spacer, (int, np.integer)):
         raise ValueError(f"spacer is a number of N: got {spacer!r}.")
     if spacer < 0:
@@ -193,6 +223,10 @@ def write_fasta(
             "groups names the contigs to write: it cannot be combined with "
             "genomes, filters or round."
         )
+    if isinstance(genomes, str):
+        genomes = [genomes]
+    if isinstance(filters, str):
+        filters = [filters]
     parsed = parse_filters(filters, tables=TABLES_WITH_CLUSTERS)
     fasta, out = Path(fasta), Path(out)
     mc = MetaCooler(uri)
@@ -211,36 +245,41 @@ def write_fasta(
     names = contigs["name"].to_numpy(dtype=object)
     lengths = contigs["length"].to_numpy(dtype=np.int64)
     wanted = np.unique(np.concatenate([group.contig_ids for group in selection]))
-    with _assembly(fasta) as data:
+    temp = None if temp_dir is None else Path(temp_dir)
+    with _assembly(fasta, temp) as data:
         records = _find_records(data, {str(names[i]) for i in wanted}, fasta)
         _check_lengths(data, records, names[wanted], lengths[wanted], fasta, mc.uri)
-        if not single_file:
-            out.mkdir(parents=True, exist_ok=True)
-        writer = _Writer(data, records, names, stitch=stitch, spacer=int(spacer))
+        writer = _Writer(data, records, names, lengths, stitch=stitch, spacer=spacer)
         if single_file:
-            _write_staged(out, lambda handle: writer.write_all(handle, selection))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            plan = [(out, lambda handle: writer.write_all(handle, selection))]
         else:
-            for group in selection:
-                _write_staged(
-                    destinations[group.name],
-                    lambda handle, group=group: writer.write(handle, group),
-                )
-    files = len(set(destinations.values()))
+            out.mkdir(parents=True, exist_ok=True)
+            plan = [
+                (destinations[group.name], _bind(writer, group)) for group in selection
+            ]
+        _write_files(plan)
+    written = [group for group in selection if not group.unbinned]
+    kind = "genome(s)" if round is None else "cluster(s)"
+    if groups is not None:
+        kind = "group(s)"
     logger.info(
-        "Wrote %d FASTA file(s) to %s: %d %s, %d record(s), %s bp of %d contig(s).",
-        files,
+        "Wrote %d FASTA file(s) to %s: %d %s%s, %d record(s), %s bp of %d contig(s).",
+        len(set(destinations.values())),
         out,
-        len(selection),
-        "group(s)"
-        if groups is not None
-        else "cluster(s)"
-        if round is not None
-        else "genome(s)",
+        len(written),
+        kind,
+        f" and {UNBINNED_GENOME}" if len(written) < len(selection) else "",
         writer.records,
         f"{writer.bases:,}",
         writer.contigs,
     )
     return destinations
+
+
+def _bind(writer: _Writer, group: _Group) -> Callable[[BinaryIO], None]:
+    """What writes *group*'s file."""
+    return lambda handle: writer.write(handle, group)
 
 
 # ----------------------------------------------------------------------
@@ -294,6 +333,30 @@ def _unbinned_group(rows: np.ndarray, taken: Sequence[str]) -> list[_Group]:
     return [_Group(UNBINNED_GENOME, rows, unbinned=True)]
 
 
+def _nothing_selected(
+    parsed: Sequence[Filter],
+    frames: Mapping[str, pd.DataFrame],
+    named: Sequence[str] | None,
+    what: str,
+    otherwise: str,
+    hint: str = "",
+) -> NoReturn:
+    """Refuse a selection that keeps nothing: which filter emptied it, or
+    *otherwise* without a filter."""
+    from metacooler.filters import FilterError, explain_empty
+
+    if not parsed:
+        raise ValueError(otherwise)
+    context = [hint] if hint else []
+    if named:
+        context.insert(
+            0,
+            f"The {len(named)} {what} named by --genomes were then intersected "
+            "with the above, leaving none.",
+        )
+    raise FilterError(explain_empty(frames, parsed, context="\n".join(context)))
+
+
 def _genome_groups(
     mc: MetaCooler,
     contigs: pd.DataFrame,
@@ -303,7 +366,7 @@ def _genome_groups(
 ) -> list[_Group]:
     """Every genome (but ``__unbinned__``), or those named, narrowed by the
     filters; a genome whose every contig a filter drops writes nothing."""
-    from metacooler.filters import FilterError, explain_empty, filter_mask
+    from metacooler.filters import filter_mask
 
     _refuse_tables(
         parsed,
@@ -326,6 +389,8 @@ def _genome_groups(
         _check_known(asked, genome_names, f"genomes of {mc.uri}")
         keep_genome &= np.isin(genome_names, asked)
     unbinned_id = unbinned_genome_id(genome_names)
+    # The filters kept __unbinned__, which is no genome: --unbinned writes it.
+    kept_unbinned = unbinned_id is not None and bool(keep_genome[unbinned_id])
     if unbinned_id is not None:
         keep_genome[unbinned_id] = False
     keep_contig = filter_mask(by_contig, parsed, table="contigs")
@@ -338,35 +403,37 @@ def _genome_groups(
         _Group(str(genome_names[gid]), rows[at])
         for gid, at in zip(ids, positions, strict=True)
     ]
+    # Every genome holds a contig: only a contig filter empties one.
     emptied = int(keep_genome.sum()) - len(selection)
     if emptied:
         logger.info(
             "%d genome(s) have no contig left after --filter: no file for them.",
             emptied,
         )
+    restricted = bool(genomes) or any(f.table == "genomes" for f in parsed)
+    frames = {"genomes": by_genome, "contigs": by_contig}
+    if not selection and (not unbinned or (restricted and not kept_unbinned)):
+        _nothing_selected(
+            parsed,
+            frames,
+            genomes,
+            "genome(s)",
+            f"{mc.uri} has no genome to write: every contig is in "
+            f"{UNBINNED_GENOME}. Write them with --unbinned (unbinned=True).",
+            hint=(
+                f"{UNBINNED_GENOME} is no genome: write its contigs with --unbinned."
+                if kept_unbinned and not unbinned
+                else ""
+            ),
+        )
     if unbinned:
         # A map without __unbinned__ has every contig in a genome.
         in_none = genome_ids == (-1 if unbinned_id is None else unbinned_id)
         selection += _unbinned_group(np.flatnonzero(keep_contig & in_none), [])
-    if not selection:
-        if parsed:
-            context = (
-                f"The {len(genomes)} genome(s) named by --genomes were then "
-                "intersected with the above, leaving none."
-                if genomes
-                else ""
+        if not selection:
+            _nothing_selected(
+                parsed, frames, genomes, "genome(s)", f"{mc.uri} has no contig."
             )
-            raise FilterError(
-                explain_empty(
-                    {"genomes": by_genome, "contigs": by_contig},
-                    parsed,
-                    context=context,
-                )
-            )
-        raise ValueError(
-            f"{mc.uri} has no genome to write: every contig is in "
-            f"{UNBINNED_GENOME}. Write them with --unbinned (unbinned=True)."
-        )
     return selection
 
 
@@ -380,7 +447,7 @@ def _round_groups(
 ) -> list[_Group]:
     """The clusters of *round* (those named, those the filters keep), each
     with its contigs in map order."""
-    from metacooler.filters import FilterError, explain_empty, filter_mask
+    from metacooler.filters import filter_mask
 
     _refuse_tables(
         parsed,
@@ -405,15 +472,24 @@ def _round_groups(
     # map order: as the memberships are stored.
     members = mc.cluster_members(round)
     rows = pd.Index(contigs["name"]).get_indexer(members["contig"])
-    kept = set(cluster_names[keep_cluster].tolist())
-    selection = []
     names, positions = _runs(members["cluster"].to_numpy(dtype=object))
+    kept = cluster_names[keep_cluster].tolist()
+    wanted, held = set(kept), set(names.tolist())
+    selection = []
     for name, at in zip(names, positions, strict=True):
-        if name in kept:
+        if name in wanted:
             part = rows[at][keep_contig[rows[at]]]
             if part.size:
                 selection.append(_Group(str(name), part))
-    emptied = len(kept) - len(selection)
+    memberless = [name for name in kept if name not in held]
+    if memberless:
+        logger.info(
+            "%d cluster(s) of round %r hold no contig: no file for them (%s).",
+            len(memberless),
+            round,
+            _shown(memberless),
+        )
+    emptied = len(kept) - len(memberless) - len(selection)
     if emptied:
         logger.info(
             "%d cluster(s) of round %r have no contig left after --filter: no file "
@@ -421,17 +497,30 @@ def _round_groups(
             emptied,
             round,
         )
+    restricted = bool(clusters) or any(f.table == "clusters" for f in parsed)
+    frames = {"clusters": by_cluster, "contigs": by_contig}
+    if not selection and (restricted or not unbinned):
+        _nothing_selected(
+            parsed,
+            frames,
+            clusters,
+            "cluster(s)",
+            f"Round {round!r} of {mc.uri} has no contig to write"
+            + (f" in {_shown(kept)}." if clusters else "."),
+        )
     if unbinned:
         in_round = np.zeros(len(contigs), dtype=bool)
         in_round[rows] = True
         rest = np.flatnonzero(keep_contig & ~in_round)
         selection += _unbinned_group(rest, cluster_names.tolist())
-    if not selection:
-        if parsed:
-            raise FilterError(
-                explain_empty({"clusters": by_cluster, "contigs": by_contig}, parsed)
+        if not selection:
+            _nothing_selected(
+                parsed,
+                frames,
+                clusters,
+                "cluster(s)",
+                f"Round {round!r} of {mc.uri} has no contig to write.",
             )
-        raise ValueError(f"Round {round!r} of {mc.uri} has no contig to write.")
     return selection
 
 
@@ -471,7 +560,7 @@ def _given_groups(
             raise ValueError(
                 f"Group {name!r} names a contig more than once: {_shown(twice)}."
             )
-        selection.append(_Group(name, rows.astype(np.int64)))
+        selection.append(_Group(name, rows.astype(np.int64), given=True))
     if unbinned:
         grouped = np.zeros(len(contigs), dtype=bool)
         for group in selection:
@@ -493,6 +582,16 @@ def _check_names(selection: Sequence[_Group], *, files: bool, headers: bool) -> 
                 f"Cannot name a file after {_shown([repr(n) for n in bad])}: write "
                 "every record to one file instead (--single-file)."
             )
+        folded: dict[str, list[str]] = {}
+        for name in names:
+            folded.setdefault(name.casefold(), []).append(name)
+        same = [" and ".join(map(repr, n)) for n in folded.values() if len(n) > 1]
+        if same:
+            raise ValueError(
+                f"{_shown(same)} would write one file where case is ignored "
+                "(macOS, Windows): write every record to one file instead "
+                "(--single-file)."
+            )
     if headers:
         bad = [n for n in names if any(c.isspace() for c in n)]
         if bad:
@@ -512,7 +611,7 @@ def _destinations(
     force: bool,
     inputs: Sequence[str | Path],
 ) -> dict[str, Path]:
-    """The file of each group, checked before anything is read or written.
+    """The file of each group, checked before the assembly is read.
 
     An output that is one of *inputs* (the map, the assembly) is refused even
     with *force*: a file is replaced only once its new version is written.
@@ -546,25 +645,56 @@ def _destinations(
 # The assembly
 # ----------------------------------------------------------------------
 @contextlib.contextmanager
-def _assembly(path: Path) -> Generator[bytes | mmap.mmap, None, None]:
-    """The bytes of the assembly, mapped in memory; a gzip-compressed one is
-    decompressed into a private temporary directory first."""
-    with open(path, "rb") as handle:
-        compressed = handle.read(len(_GZIP_MAGIC)) == _GZIP_MAGIC
-    if not compressed:
-        with _mapped(path) as data:
-            yield data
-        return
-    with tempfile.TemporaryDirectory(prefix="metacooler-fasta-") as scratch:
-        plain = Path(scratch) / "assembly.fa"
-        logger.info("Decompressing %s into a temporary file.", path)
-        try:
-            with gzip.open(path, "rb") as source, open(plain, "wb") as target:
-                shutil.copyfileobj(source, target, _COPY_BUFFER)
-        except (OSError, EOFError, zlib.error) as exc:
-            raise ValueError(f"Cannot decompress {path}: {exc}") from exc
+def _assembly(
+    path: Path, temp_dir: Path | None
+) -> Generator[bytes | mmap.mmap, None, None]:
+    """The bytes of the assembly, mapped in memory: a plain file as it is; a
+    gzip-compressed one, or a pipe, copied plain into a private temporary
+    directory first (in *temp_dir*, by default the system's)."""
+    if stat.S_ISREG(os.stat(path).st_mode):
+        with open(path, "rb") as handle:
+            compressed = handle.read(len(_GZIP_MAGIC)) == _GZIP_MAGIC
+        if not compressed:
+            with _mapped(path) as data:
+                yield data
+            return
+    if temp_dir is not None:
+        temp_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="metacooler-fasta-", dir=temp_dir) as tmp:
+        plain = Path(tmp) / "assembly.fa"
+        _copy_plain(path, plain)
         with _mapped(plain) as data:
             yield data
+
+
+def _copy_plain(source: Path, target: Path) -> None:
+    """Copy *source*, decompressed if it is gzip, into *target*: read once, as
+    a pipe can be.
+
+    Raises:
+        ValueError: If *source* is compressed but cannot be decompressed.
+        OSError: If *target* cannot be written, named in the message.
+    """
+    with open(source, "rb") as handle:
+        compressed = handle.peek(len(_GZIP_MAGIC))[: len(_GZIP_MAGIC)] == _GZIP_MAGIC
+        logger.info(
+            "%s %s into %s.",
+            "Decompressing" if compressed else "Copying",
+            source,
+            target.parent,
+        )
+        reader = gzip.GzipFile(fileobj=handle) if compressed else handle
+        try:
+            with open(target, "wb") as copy:
+                shutil.copyfileobj(reader, copy, _COPY_BUFFER)
+        except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+            raise ValueError(f"Cannot decompress {source}: {exc}") from exc
+        except OSError as exc:
+            raise OSError(
+                exc.errno,
+                f"Cannot copy {source} into {target}, its plain copy (the "
+                f"temporary directory is --temp-dir's): {exc.strerror or exc}",
+            ) from exc
 
 
 @contextlib.contextmanager
@@ -635,7 +765,7 @@ def _record(data: bytes | mmap.mmap, start: int, after_name: int, end: int) -> _
 
 
 def _bases(data: bytes | mmap.mmap, record: _Record) -> bytes:
-    """A record's sequence, its line breaks removed."""
+    """A record's bases: its sequence, every whitespace removed."""
     return data[record.sequence : record.end].translate(None, _WHITESPACE)
 
 
@@ -647,10 +777,20 @@ def _check_lengths(
     fasta: Path,
     uri: str,
 ) -> None:
-    """Refuse an assembly that gives a contig another length than the map."""
+    """Refuse an assembly that gives a contig another length than the map.
+
+    A map's length counts a contig's sequence as the tool that made it read
+    the assembly: every byte but line breaks (pyfaidx, which ``create
+    --fasta`` reads it with, counts a trailing space as a base), or its bases
+    alone. Either is the map's contig.
+    """
     wrong = []
     for name, length in zip(names.tolist(), lengths.tolist(), strict=True):
-        found = len(_bases(data, records[name]))
+        record = records[name]
+        sequence = data[record.sequence : record.end]
+        if len(sequence) - sequence.count(b"\n") - sequence.count(b"\r") == length:
+            continue
+        found = len(sequence.translate(None, _WHITESPACE))
         if found != length:
             wrong.append(f"{name} ({found} bp in the FASTA, {length} in the map)")
     if wrong:
@@ -692,6 +832,7 @@ class _Writer:
         data: bytes | mmap.mmap,
         records: Mapping[str, _Record],
         names: np.ndarray,
+        lengths: np.ndarray,
         *,
         stitch: bool,
         spacer: int,
@@ -699,6 +840,7 @@ class _Writer:
         self.data = data
         self._records = records
         self.names = names
+        self.lengths = lengths
         self.stitch = stitch
         self.spacer = b"N" * spacer
         #: What was written: contigs, records and bases (spacers aside).
@@ -715,12 +857,15 @@ class _Writer:
     def write(self, handle: BinaryIO, group: _Group, prefix: str | None = None) -> None:
         """One group's records: one stitched record, or its contigs' records
         as they are (their header line prefixed with *prefix*)."""
-        names = self.names[group.contig_ids].tolist()
-        self.contigs += len(names)
+        ids = group.contig_ids
+        self.contigs += len(ids)
         if self.stitch and not group.unbinned:
+            if not group.given:
+                # Longest first; a stable sort keeps map order among equals.
+                ids = ids[np.argsort(-self.lengths[ids], kind="stable")]
             handle.write(f">{group.name}\n".encode())
             wrapped = _Wrapped(handle)
-            for i, name in enumerate(names):
+            for i, name in enumerate(self.names[ids].tolist()):
                 bases = _bases(self.data, self._records[name])
                 if i and self.spacer:
                     wrapped.write(self.spacer)
@@ -730,25 +875,39 @@ class _Writer:
             self.records += 1
             return
         head = b">" if prefix is None else f">{prefix}{SINGLE_FILE_SEPARATOR}".encode()
-        for name in names:
+        for name in self.names[ids].tolist():
             record = self._records[name]
             body = self.data[record.start : record.end]
             if not body.endswith(b"\n"):
                 body += b"\n"  # the last record of an assembly that ends without
             handle.write(head + body[1:])
-            self.bases += len(_bases(self.data, record))
-        self.records += len(names)
+        self.bases += int(self.lengths[ids].sum())
+        self.records += len(ids)
 
 
-def _write_staged(path: Path, write: Callable[[BinaryIO], None]) -> None:
-    """Write a file through a sibling, renamed over it once complete: a
-    failure leaves no half-written file, and an existing one as it was."""
-    staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+def _write_files(plan: Sequence[tuple[Path, Callable[[BinaryIO], None]]]) -> None:
+    """Write every file of *plan* beside its destination, then, once all of
+    them are written, rename each over its destination.
+
+    A failure while writing leaves no new file and every existing one as it
+    was; only a failure between two renames can leave a set half updated. The
+    files get the mode of any new file (``mkstemp`` makes them private).
+    """
+    mode = 0o666 & ~_umask()
+    staged: list[tuple[Path, Path]] = []
     try:
-        with open(staged, "wb") as handle:
-            write(handle)
-        os.replace(staged, path)
+        for destination, write in plan:
+            fd, name = tempfile.mkstemp(
+                dir=destination.parent, prefix=".fasta-", suffix=".tmp"
+            )
+            staged.append((Path(name), destination))
+            with os.fdopen(fd, "wb") as handle:
+                write(handle)
+            os.chmod(name, mode)
+        for path, destination in staged:
+            os.replace(path, destination)
     except BaseException:
-        with contextlib.suppress(OSError):
-            staged.unlink()
+        for path, _ in staged:
+            with contextlib.suppress(OSError):
+                path.unlink()
         raise
