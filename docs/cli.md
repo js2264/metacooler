@@ -305,7 +305,7 @@ write:
 |-------|---------|-------|
 | `contigs` | `contig_name,genome_name` | metacooler's own layout (the default). |
 | `contig_genome` | `1,2,noheader` | Two columns, contig then genome, no header. |
-| `metator` | `Name,Final_cluster` | MetaTOR's `contig_data_final.txt`, as `metator dump` writes it. A table without `Final_cluster` but with `Final_bin`, as MetaTOR 1.x wrote it, is read through `Final_bin` (and logged); a spec spelled out, `Name,Final_cluster`, is read as written. |
+| `metator` | `Name,Final_cluster` | metaTOR 2.0's `contig_data_final.txt` (`Name`, `Final_cluster`). A table without `Final_cluster` but with `Final_bin`, as MetaTOR 1.x wrote it, is read through `Final_bin` (and logged); a spec spelled out, `Name,Final_cluster`, is read as written. |
 | `dastool` | `1,2,noheader` | DAS Tool's `*_DASTool_contigs2bin.tsv`, and the tables its `Fasta_to_Contigs2Bin.sh` builds from FASTA bins (MetaBAT2, MaxBin2, …). |
 | `binette` | `1,2,noheader` | Binette's `final_contig_to_bin.tsv`. |
 | `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |

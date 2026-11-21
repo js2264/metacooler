@@ -12,7 +12,7 @@ of a contig-to-genome assignment table, the contig of a per-contig metadata
 table, the genome of a genomes table.  Every other column is metadata.
 
 Positions and names may be mixed.  A name needs a header line to be looked up
-in, so ``Name,Final_bin,noheader`` is refused.  ``NA`` in the genome's place
+in, so ``Name,Final_cluster,noheader`` is refused.  ``NA`` in the genome's place
 says that the table has *no* genome column: no contig is assigned to a genome,
 so ``create`` builds a map with every contig in ``__unbinned__`` (nothing is
 binned yet) and ``reassign`` unbins the contigs the table lists.  It has to be
@@ -46,8 +46,8 @@ NO_GENOME = "NA"
 #: an alias that names the wrong columns would misread a table without error.
 #:
 #: - ``metator``: MetaTOR's ``contig_data_final.txt``, whose final clusters are
-#:   ``Final_cluster`` from MetaTOR 2.0 (``metator dump`` writes it) and
-#:   ``Final_bin`` before: the alias falls back to it (:data:`ALIAS_FALLBACKS`).
+#:   ``Final_cluster`` from MetaTOR 2.0 and ``Final_bin`` before: the alias
+#:   falls back to it (:data:`ALIAS_FALLBACKS`).
 #: - ``dastool``: DAS Tool's ``*_DASTool_contigs2bin.tsv``, and the tables its
 #:   ``Fasta_to_Contigs2Bin.sh`` builds from FASTA bins (MetaBAT2, MaxBin2, ...).
 #: - ``binette``: Binette's ``final_contig_to_bin.tsv`` (same headerless layout).

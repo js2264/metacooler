@@ -77,8 +77,8 @@
 ### Changed
 
 - **The `metator` alias of `--contigs-format` reads `Name,Final_cluster`**,
-  MetaTOR 2.0's column for a contig's final cluster in `contig_data_final.txt`
-  (as `metator dump` writes it), so that a dumped table feeds `create` and
+  the columns of metaTOR 2.0's `contig_data_final.txt` that hold a contig's
+  name and its final cluster, so that the table feeds `create` and
   `reassign`. A table with `Final_bin`, MetaTOR 1.x's name, and no
   `Final_cluster` is read through `Final_bin`, which the log says; an error
   for a table with neither names both. Only the alias falls back: a spec

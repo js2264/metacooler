@@ -13,6 +13,7 @@ from pathlib import Path
 import rich_click as click
 
 from metacooler.io.colspec import (
+    ALIAS_FALLBACKS,
     ASSIGNMENT_KEYS,
     CONTIG_METADATA_FORMAT_DEFAULT,
     CONTIGS_FORMAT_ALIASES,
@@ -39,7 +40,12 @@ CONTIGS_FORMAT_HELP = (
     f"[dim]\\[default: {CONTIGS_FORMAT_DEFAULT}][/dim]\n\n"
     "Aliases for the tables of common binners: "
     + ", ".join(
-        f"[yellow]{name}[/yellow] ({spec})"
+        f"[yellow]{name}[/yellow] ({spec}"
+        + "".join(
+            f"; {fallback} if the table has no {column}"
+            for column, fallback in ALIAS_FALLBACKS.get(name, {}).items()
+        )
+        + ")"
         for name, spec in CONTIGS_FORMAT_ALIASES.items()
     )
     + "."
