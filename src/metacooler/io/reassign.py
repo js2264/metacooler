@@ -20,12 +20,16 @@ Two things make that less trivial than "overwrite ``/contigs/genome_id``":
 Restoring the layout means permuting the contigs, hence the bins, hence every
 pixel's bin ids — an O(nnz) rewrite.  So :func:`reassign` runs one of two paths:
 
-- **relabel** (O(n_contigs)): the physical order is left alone and only the
-  labels, the derived ``/genomes`` table, ``genome_offset`` and the
-  ``contig-ordering`` attribute are rewritten.  Cheap enough to run in place.
+- **relabel** (O(n_contigs) edits, on a copy of the file): the physical order
+  is left alone and only the labels, the derived ``/genomes`` table,
+  ``genome_offset`` and the ``contig-ordering`` attribute are rewritten.
 - **regroup** (O(nnz)): the contigs are re-ordered by the file's own ordering
   strategy, the bins are permuted with them, and the pixel table is remapped and
   re-sorted, exactly as ``create cool`` does.
+
+Both run in place too, through a staged copy that replaces the map (see
+:mod:`metacooler.io.staging`); a re-grouping in place is refused for an entry
+of a collection, and for a map holding what it does not carry.
 
 ``layout="auto"`` picks between them by what the source file guaranteed: a
 genome-grouped file is regrouped so it stays one, and a file that never grouped

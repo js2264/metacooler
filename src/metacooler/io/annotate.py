@@ -17,7 +17,9 @@ What it guarantees:
 - **Only metadata moves.**  Rows are matched by name onto the stored order and
   never added, removed or reordered; derived columns (``name``, ``length``,
   ``genome_id``, ``n_contigs``, ``n_bins``, ``qc_*``) are never written; bins,
-  pixels and indexes are not read.  The cost is O(n_contigs).
+  pixels and indexes are not read.  The edit is O(n_contigs); writing it costs
+  a copy of the file (the output, or in place the staged copy that replaces
+  the map).
 - **Nothing half-written.**  Every table is checked -- names, column clashes,
   ASCII in ``/contigs`` -- before anything is written; a table is rebuilt in a
   scratch group and swapped into place; the map is validated afterwards.  In
