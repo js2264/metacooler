@@ -56,7 +56,7 @@ def _kill_while_writing(src: str, out: str) -> None:
     def killed(*args, **kwargs):
         os.kill(os.getpid(), signal.SIGKILL)
 
-    binnify_module._binnify = killed
+    setattr(binnify_module, "_binnify", killed)  # noqa: B010 - a test double
     binnify_module.binnify(src, out, 200, force=True)
 
 
@@ -64,7 +64,9 @@ def _kill_while_writing(src: str, out: str) -> None:
 # A writer of an output takes no lock
 # ---------------------------------------------------------------------------
 class TestNoLockOfItsOwn:
-    def test_a_writer_creates_no_lock(self, tiny_metacooler: Path, tmp_path: Path):
+    def test_a_writer_creates_no_lock(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         import metacooler.ops.binnify as binnify_module
 
         out = tmp_path / "out.metacool"
@@ -75,12 +77,22 @@ class TestNoLockOfItsOwn:
             seen.append(_output_lock(out).exists())
             return real(*args, **kwargs)
 
-        binnify_module._binnify = watched
-        try:
-            metacooler.binnify(tiny_metacooler, out, 200)
-        finally:
-            binnify_module._binnify = real
+        monkeypatch.setattr(binnify_module, "_binnify", watched)
+        metacooler.binnify(tiny_metacooler, out, 200)
         assert seen == [False]
+        validate(out, full=True)
+
+    def test_a_lock_this_thread_holds_is_its_own(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        """A run that holds its output's lock (metaTOR's --output-map) writes
+        it with every writer; the lock is still its own after."""
+        out = tmp_path / "out.metacool"
+        with lock(out, follow_symlinks=False) as held:
+            metacooler.binnify(tiny_metacooler, out, 200)
+            metacooler.flatten(tiny_metacooler, tmp_path / "flat.cool")
+            assert held.exists()
+        assert not held.exists()
         validate(out, full=True)
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
@@ -213,6 +225,15 @@ class TestOtherLockFiles:
         metacooler.binnify(tiny_metacooler, out, 200)
         validate(out, full=True)
         assert staging._read(_output_lock(out)) == dead
+
+    def test_what_cannot_be_listed_is_not_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def unreadable(path):
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+        monkeypatch.setattr(staging.os, "listdir", unreadable)
+        assert staging._staging_of(tmp_path / "out.metacool", {"uuid": DEAD_RUN}) == ""
 
     def test_a_lock_of_another_host_names_what_to_delete(
         self, tiny_metacooler: Path, tmp_path: Path
@@ -347,6 +368,20 @@ class TestOutputLinks:
         assert link.is_symlink() and link.resolve() == target
         assert target.read_bytes() == tiny_metacooler.read_bytes()
 
+    def test_a_link_to_a_directory_is_a_directory(self, tmp_path: Path):
+        from metacooler.io._utils import check_output_path
+
+        directory = tmp_path / "results"
+        directory.mkdir()
+        link = tmp_path / "out.metacool"
+        link.symlink_to(directory)
+        for force in (False, True):
+            with pytest.raises(IsADirectoryError, match="is a directory"):
+                check_output_path(link, force)
+        with pytest.raises(IsADirectoryError, match="is a directory"):
+            staging.remove_an_output_link(link, force=True)
+        assert link.is_symlink() and directory.is_dir()
+
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
     def test_a_special_file_is_never_removed(self, tmp_path: Path):
         """``-o /dev/stdout --force`` removed the system's /dev/stdout (a link
@@ -463,6 +498,13 @@ class TestNewCollections:
             create_mmetacool(out, {"second": tiny_metacooler})
         assert list_entries(out) == ["first"]
 
+    def test_cp_into_a_new_collection(self, tiny_metacooler: Path, tmp_path: Path):
+        src = tmp_path / "src.mmetacool"
+        create_mmetacool(src, {"s1": tiny_metacooler})
+        dst = tmp_path / "new.mmetacool"
+        _cli("cp", f"{src}::entries/s1", f"{dst}::entries/x", "-q")
+        assert list_entries(dst) == ["x"]
+
     def test_force_onto_a_writable_file_in_a_read_only_directory(
         self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -540,6 +582,19 @@ class TestNits:
         target.unlink()
         staging._move_no_replace(staged, target)
         assert target.read_text() == "new" and not staged.exists()
+
+    def test_another_error_of_the_link_is_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def broken(*args, **kwargs):
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(staging.os, "link", broken)
+        staged = tmp_path / "staged"
+        staged.write_text("new")
+        with pytest.raises(OSError, match="Input/output error"):
+            staging._move_no_replace(staged, tmp_path / "target")
+        assert staged.exists() and not (tmp_path / "target").exists()
 
     def test_where_there_are_no_hard_links(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

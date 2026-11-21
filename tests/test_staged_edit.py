@@ -1817,6 +1817,18 @@ class TestWhatAWeightDependsOn:
         columns = MetaCooler(f"{tiny_mmetacool}::entries/entry2").bins()[:].columns
         assert "c" in columns
 
+    def test_a_read_of_another_staged_entry(self, tiny_mmetacool: Path):
+        """A weight of one entry computed from another entry of the staged
+        collection must have that entry's bins (identical here)."""
+        with staged_edit(tiny_mmetacool) as staged:
+            source = MetaCooler(f"{staged}::entries/entry1")
+            n = source.shape[0]
+            _store_from(
+                f"{staged}::entries/entry2", "w", np.ones(n), ["pixels"], source
+            )
+        bins = MetaCooler(f"{tiny_mmetacool}::entries/entry2").bins()[:]
+        assert "w" in bins.columns
+
     def test_an_open_for_writing_changes_anything(self, tiny_metacooler: Path):
         before = MetaCooler(tiny_metacooler)
         with staged_edit(tiny_metacooler) as staged:

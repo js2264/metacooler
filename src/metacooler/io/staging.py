@@ -1459,10 +1459,7 @@ def writing_output(
             yield Path(path)
         _note_write(session, None)
         return
-    if renamed:
-        if not force and os.path.islink(named):
-            remove_an_output_link(named, force=False)  # refused
-    else:
+    if not renamed:  # a rename replaces a link (see check_output_path)
         remove_an_output_link(named, force=force)
     yield Path(path)
 
