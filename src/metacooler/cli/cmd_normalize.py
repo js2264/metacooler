@@ -430,9 +430,10 @@ def normalize_list_cmd(metacool_path: str, verbose: bool, quiet: bool) -> None:
 
 
 # British spelling: the same group under a second, hidden name.  The two share
-# one ``commands`` dict, so every subcommand above answers to both.
+# one ``commands`` dict, so every subcommand above answers to both. Of the
+# group's own class, so that its help page is laid out as every other.
 cli.add_command(
-    click.RichGroup(
+    type(normalize)(
         name="normalise",
         commands=normalize.commands,
         help=normalize.help,
