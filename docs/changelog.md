@@ -76,6 +76,11 @@
 
 ### Changed
 
+- **`metacooler.network(...)` returns the edges** when it is given no `out`, as
+  a DataFrame (`node1`, `node2`, `value`), where it printed them to stdout:
+  a tool that reads a map's contig network (MetaTOR does) sums no pixel
+  itself. `out` takes a path as before, or an open text stream, written to and
+  left open; the `network` command passes stdout, so its output is unchanged.
 - **Breaking: the QC block splits short and long contacts at 1001 bp**, where
   it split them at 10 kb (`DEFAULT_DISTANCE_THRESHOLD`, the default of
   `create pairs` and `create cool --qc-threshold`, `collect --qc-threshold`,

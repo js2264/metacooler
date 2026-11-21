@@ -373,14 +373,14 @@ class TestH5Unicode:
 
 
 # ---------------------------------------------------------------------------
-# M2 — network(level="bin", out=None) must not close stdout
+# M2 — network(level="bin", out=sys.stdout) must not close stdout
 # ---------------------------------------------------------------------------
 class TestM2NetworkStdout:
     def test_bin_level_stdout_stays_open(self, tmp_path, capsys):
         from metacooler.io.network import network
 
         out = _build(tmp_path, [("cA", 500, "MAG_1"), ("cB", 400, "MAG_2")])
-        network(out, level="bin", out=None)
+        network(out, level="bin", out=sys.stdout)
         assert not sys.stdout.closed
         # stdout is still usable afterwards
         print("still works")

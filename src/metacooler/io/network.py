@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import sys
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from typing import Literal
 
 logger = logging.getLogger("metacooler")
+
+#: The columns of an edge list, at every level.
+_EDGE_COLUMNS = ("node1", "node2", "value")
 
 #: Number of per-chunk groupby frames buffered before they are folded into the
 #: running aggregate.  Keeps peak memory at O(FOLD_EVERY x chunk edges) instead
@@ -192,20 +195,29 @@ def network(
     uri: str | Path,
     level: Literal["bin", "contig", "genome"] = "contig",
     weight: str = "count",
-    out: str | Path | None = None,
+    out: str | Path | TextIO | None = None,
     header: bool = False,
     chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
     balance: str | None = None,
     drop_spurious: bool = False,
-) -> None:
-    """Export a network edge list from a metacool file.
+) -> pd.DataFrame | None:
+    """Export a network edge list from a metacool file, or return it.
+
+    The edges are ``node1``, ``node2``, ``value``: contig or genome names at
+    ``contig`` and ``genome`` level, one row per pair of nodes with
+    ``node1 <= node2`` in the map's order (a node's contacts with itself
+    included, once), and bin ids at ``bin`` level, one row per pixel.
 
     Args:
         uri: Path to the source ``.metacool`` file.
         level: Aggregation level — ``bin``, ``contig``, or ``genome``.
         weight: Column name in the pixels table to use as edge weight.
-        out: Output file path. If None, writes to stdout.
+        out: Where to write the edges as TSV: a file path, or an open text
+            stream (the ``network`` command passes stdout), which is written
+            to and left open.  If ``None``, nothing is written: the edges are
+            returned.  At ``bin`` level that holds every pixel in memory,
+            where a path or a stream gets them chunk by chunk.
         header: If ``True``, write a ``node1\\tnode2\\tvalue`` header line.
         chunksize: Number of pixels to process per chunk.
         force: Overwrite *out* if it already exists.
@@ -226,6 +238,9 @@ def network(
             or at ``level="bin"``.
         KeyError: If *balance* names no weight column.
         FileExistsError: If *out* exists and *force* is False.
+
+    Returns:
+        The edges, when *out* is ``None``; otherwise ``None``.
     """
     from metacooler.api import MetaCooler
 
@@ -242,27 +257,46 @@ def network(
     if level not in ("bin", "contig", "genome"):
         raise ValueError(f"level must be 'bin', 'contig', or 'genome', got {level!r}")
 
-    if out is not None:
-        check_output_path(out, force, inputs=[uri])
+    # A file to write, or a stream the caller opened (and closes).
+    path: str | Path | None = None
+    stream: TextIO | None = None
+    if isinstance(out, (str, os.PathLike)):
+        path = Path(out)
+        check_output_path(path, force, inputs=[uri])
+    elif out is not None:
+        stream = out
 
     weights = read_weights(mc, balance) if balance is not None else None
     cutoff = _spurious_rule(mc, balance, level) if drop_spurious else None
     n_pix = len(mc._clr.pixels())
 
     if level == "bin":
-        # Raw pixel edge list — stream chunks directly to output file.
-        # Wrap stdout in nullcontext so the ``with`` block does not close it
-        # (closing sys.stdout would break any later output in the process).
-        cm = open(out, "w") if out else contextlib.nullcontext(sys.stdout)  # noqa: SIM115
+        # Raw pixel edge list, chunk by chunk.
+        def chunk_edges(lo: int) -> pd.DataFrame:
+            chunk = cast(pd.DataFrame, mc._clr.pixels()[lo : lo + chunksize])
+            b1, b2, values = _weighted(chunk, weight, weights)
+            return pd.DataFrame({"node1": b1, "node2": b2, "value": values})
+
+        frames = (chunk_edges(lo) for lo in range(0, n_pix, chunksize))
+        if out is None:
+            parts = list(frames)
+            edges = (
+                pd.concat(parts, ignore_index=True)
+                if parts
+                else pd.DataFrame(columns=list(_EDGE_COLUMNS))
+            )
+            logger.info("Generated %d edges at %s level", len(edges), level)
+            return edges
+        # Streamed to the file.  A stream the caller gave is left open:
+        # closing sys.stdout would break any later output in the process.
+        cm = open(path, "w") if path is not None else contextlib.nullcontext(stream)  # noqa: SIM115
         with cm as fout:
+            assert fout is not None
             if header:
                 fout.write("node1\tnode2\tvalue\n")
-            for lo in range(0, n_pix, chunksize):
-                chunk = cast(pd.DataFrame, mc._clr.pixels()[lo : lo + chunksize])
-                b1, b2, values = _weighted(chunk, weight, weights)
-                df = pd.DataFrame({"node1": b1, "node2": b2, "value": values})
+            for df in frames:
                 fout.write(df.to_csv(sep="\t", index=False, header=False))
-        return
+        return None
 
     # Contig and genome levels: map every bin to its node, then reduce.
     bin_to_contig = chrom_codes(mc.bins())
@@ -284,7 +318,7 @@ def network(
         if agg is not None and level == "genome":
             agg = _regroup(agg, contig_to_genome)
     if agg is None:
-        edges = pd.DataFrame(columns=["node1", "node2", "value"])
+        edges = pd.DataFrame(columns=list(_EDGE_COLUMNS))
     else:
         edges = pd.DataFrame(
             {
@@ -296,8 +330,10 @@ def network(
 
     logger.info("Generated %d edges at %s level", len(edges), level)
 
+    if out is None:
+        return edges
     # Write TSV (header optional for compatibility with igraph, networkx, etc.)
-    if out:
-        edges.to_csv(out, sep="\t", index=False, header=header)
-    else:
-        edges.to_csv(sys.stdout, sep="\t", index=False, header=header)
+    edges.to_csv(
+        path if path is not None else stream, sep="\t", index=False, header=header
+    )
+    return None
