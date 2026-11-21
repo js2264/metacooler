@@ -343,6 +343,9 @@ class TestLock:
         if why == "own pid":
             _write_lock(tiny_metacooler, os.getpid(), run="foreign")
         elif why == "earlier boot":
+            if staging._boot_id() is None:
+                # macOS: no boot id to compare (test_an_unknown_boot_breaks_no_lock).
+                pytest.skip("no boot id here")
             _write_lock(tiny_metacooler, os.getppid(), boot_id="an-earlier-boot")
         else:
             start = staging._pid_start(os.getppid())
@@ -361,6 +364,15 @@ class TestLock:
         )
         with pytest.raises(MapLockedError), lock(tiny_metacooler):
             pass
+
+    def test_an_unknown_boot_breaks_no_lock(self, tiny_metacooler: Path, monkeypatch):
+        """Where this host's boot cannot be told (no /proc: macOS), the lock of
+        a running pid is not broken on its boot's account: it is refused."""
+        monkeypatch.setattr(staging, "_boot_id", lambda: None)
+        holder = _write_lock(tiny_metacooler, os.getppid(), boot_id="an-earlier-boot")
+        with pytest.raises(MapLockedError), lock(tiny_metacooler):
+            pass
+        assert json.loads(lock_path(tiny_metacooler).read_text()) == holder
 
     def test_only_its_holder_removes_it(self, tiny_metacooler: Path):
         """A lock another process took during this one (this one's deleted by
