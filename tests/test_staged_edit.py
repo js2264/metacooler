@@ -1778,3 +1778,15 @@ def test_names_are_found_with_one_check(
     ids = mc._contig_ids_of(names)
     assert len(checks) == 1
     assert list(ids[:4]) == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("writer", list(OUTPUT_WRITERS))
+def test_an_output_in_a_missing_directory_is_named(
+    writer: str, tiny_metacooler: Path, tmp_path: Path, request: pytest.FixtureRequest
+):
+    name, write = OUTPUT_WRITERS[writer]
+    out = tmp_path / "out" / "missing" / name
+    out.parent.parent.mkdir()
+    with pytest.raises((FileNotFoundError, _CliFailed), match="does not exist"):
+        write(tiny_metacooler, out, request)
+    assert not out.parent.exists()

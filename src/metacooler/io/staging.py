@@ -1287,9 +1287,18 @@ def writing_output(
     Raises:
         ValueError: For the map, or the output, of an edit session of this
             thread.
+        FileNotFoundError: If the directory of *path* does not exist.
         MapLockedError: If another process or thread holds the lock.
+        MapLockError: If the lock cannot be created (the directory of *path*
+            is not writable).
     """
     refuse_a_session_output(path)
+    directory = _named(map_file(path)).parent
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            errno.ENOENT,
+            f"{path} cannot be written: its directory, {directory}, does not exist.",
+        )
     session = _session_of(path)
     with lock(path, command=command, follow_symlinks=False) as lock_file:
         if session is None:
