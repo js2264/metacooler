@@ -57,7 +57,7 @@ from metacooler.io.staging import (
     staged_inplace,
 )
 from metacooler.io.weights import store_weights
-from metacooler.schema import validate, validate_mmetacooler
+from metacooler.schema import MetaCoolerFormatError, validate, validate_mmetacooler
 
 
 def _counted(
@@ -1220,6 +1220,16 @@ class TestWhatIsWritten:
         with staged_edit(tiny_metacooler) as staged:
             _annotate(staged, tmp_path)  # the values it holds already
         assert tiny_metacooler.stat().st_ino == inode
+
+    def test_a_staged_map_deleted_writes_nothing(self, tiny_metacooler: Path):
+        before = tiny_metacooler.read_bytes()
+        with (
+            pytest.raises((OSError, MetaCoolerFormatError)),
+            staged_edit(tiny_metacooler) as staged,
+        ):
+            os.unlink(staged)
+        assert tiny_metacooler.read_bytes() == before
+        assert _left_beside(tiny_metacooler) == []
 
     @pytest.mark.parametrize("where", ["in place", "to an output", "an entry out"])
     def test_metators_session(
