@@ -1555,3 +1555,226 @@ def test_an_output_another_process_writes_is_refused(
     finally:
         release.set()
         process.join(60)
+
+
+class TestAMapCopiedOut:
+    """An output session does not lock the map it copies: what planned was
+    read from must be what is copied, and what was read from the map as it
+    was copied holds, whatever is written to the map since."""
+
+    def test_a_map_written_before_its_copy_is_refused(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        out = tmp_path / "out.metacool"
+        planned = MetaCooler(tiny_metacooler)
+        real = staging._hold_staged
+
+        def hold_while_another_program_writes(session, command):
+            # Once planned is checked, before the map is copied.
+            with h5py.File(tiny_metacooler, "r+") as f:
+                f.attrs["by"] = "another program"
+            real(session, command)
+
+        monkeypatch.setattr(staging, "_hold_staged", hold_while_another_program_writes)
+        with (
+            pytest.raises(MapChangedError),
+            staged_edit(tiny_metacooler, output=out, planned=planned),
+        ):
+            pass
+        assert not out.exists()
+        assert _left_beside(out) == []
+
+    def test_a_map_written_after_its_copy(self, tiny_metacooler: Path, tmp_path: Path):
+        out = tmp_path / "out.metacool"
+        source = MetaCooler(tiny_metacooler)
+        weights = _bin_keys(tiny_metacooler)
+        with staged_edit(tiny_metacooler, output=out, planned=source) as staged:
+            with h5py.File(tiny_metacooler, "r+") as f:  # not locked: anyone may
+                f.attrs["by"] = "another program"
+            with staged_edit(staged, planned=source) as again:
+                assert again == staged
+            _put_weights(staged, weights, source)
+        np.testing.assert_array_equal(MetaCooler(out).bins()[:]["w"], weights)
+        with h5py.File(out, "r") as f:
+            assert "by" not in f.attrs
+
+    def test_a_map_read_after_a_regrouping_has_its_old_bins(
+        self, tiny_metacooler: Path
+    ):
+        """In place, the map is not written before the session ends: read
+        after a re-grouping of the staged map, it still has the bins the
+        session started from."""
+        with staged_edit(tiny_metacooler) as staged:
+            reassign(staged, {"contig_A": "MAG_2"}, inplace=True)  # re-groups
+            after = MetaCooler(tiny_metacooler)
+            with pytest.raises(MapChangedError, match="bins of the map written"):
+                _put_weights(staged, _bin_keys(tiny_metacooler), after)
+        validate(tiny_metacooler, full=True)
+
+
+def _per_genome(mc: MetaCooler) -> np.ndarray:
+    """1 / the number of bins of each bin's genome: a weight that depends on
+    the assignment."""
+    genome_of = dict(zip(mc.contigs["name"], mc.contigs["genome_id"], strict=True))
+    genome = mc.bins()[:]["chrom"].astype(str).map(genome_of).to_numpy()
+    return 1.0 / np.bincount(genome)[genome]
+
+
+def _by_contig(mc: MetaCooler, column: str) -> np.ndarray:
+    """The value of a ``/contigs`` column at each bin."""
+    value = dict(zip(mc.contigs["name"], mc.contigs[column], strict=True))
+    return mc.bins()[:]["chrom"].astype(str).map(value).to_numpy(dtype=float)
+
+
+def _store_from(
+    path: str | Path, name: str, weights, depends_on: list[str], source: MetaCooler
+) -> None:
+    store_weights(
+        path, name, weights, method="test", depends_on=depends_on, source=source
+    )
+
+
+class TestWhatAWeightDependsOn:
+    """In a session, a weight computed from a map that holds the map as it was
+    before a write that changed what the weight depends on is refused; one
+    whose dependencies no write changed, or read from the staged map, is
+    written."""
+
+    def test_a_relabelling(self, tiny_metacooler: Path):
+        with lock(tiny_metacooler):  # metaTOR holds it for its run
+            before = MetaCooler(tiny_metacooler)
+            weights = _per_genome(before)
+            with staged_edit(tiny_metacooler) as staged:
+                reassign(staged, {"contig_D": "MAG_2"}, inplace=True, layout="keep")
+                with pytest.raises(MapChangedError, match="changed genome_id"):
+                    _store_from(staged, "pg", weights, ["genome_id"], before)
+                # Read after the relabelling, the map as it was is no newer.
+                after = MetaCooler(tiny_metacooler)
+                with pytest.raises(MapChangedError, match="changed genome_id"):
+                    _store_from(staged, "pg", _per_genome(after), ["genome_id"], after)
+                _store_from(staged, "px", weights, ["pixels"], before)
+                current = MetaCooler(staged)
+                _store_from(staged, "pg", _per_genome(current), ["genome_id"], current)
+        written = MetaCooler(tiny_metacooler)
+        bins = written.bins()[:]
+        np.testing.assert_array_equal(bins["pg"], _per_genome(written))
+        assert "px" in bins.columns
+
+    def test_an_annotation(self, tiny_metacooler: Path, tmp_path: Path):
+        _annotate(tiny_metacooler, tmp_path, 2.5)
+        before = MetaCooler(tiny_metacooler)
+        weights = 1.0 / _by_contig(before, "coverage")
+        with staged_edit(tiny_metacooler) as staged:
+            _annotate(staged, tmp_path, 3.5)  # replaces the column
+            with pytest.raises(MapChangedError, match="changed contigs/coverage"):
+                _store_from(
+                    staged, "c", weights, ["pixels", "contigs/coverage"], before
+                )
+            write_clusters(staged, *_rounds(staged))  # changes no dependency
+            _store_from(staged, "p", weights, ["pixels"], before)
+        assert "p" in MetaCooler(tiny_metacooler).bins()[:].columns
+
+    def test_another_file(self, tiny_metacooler: Path, tmp_path: Path):
+        """A map of another file is current for what no write changed after
+        it was opened."""
+        copy = tmp_path / "copy.metacool"
+        shutil.copy(tiny_metacooler, copy)
+        early = MetaCooler(copy)
+        with staged_edit(tiny_metacooler) as staged:
+            reassign(staged, {"contig_D": "MAG_2"}, inplace=True, layout="keep")
+            with pytest.raises(MapChangedError, match="changed genome_id"):
+                _store_from(staged, "g", _per_genome(early), ["genome_id"], early)
+            late = MetaCooler(copy)  # a copy made since, say
+            _store_from(staged, "g", _per_genome(late), ["genome_id"], late)
+
+    def test_metators_pattern(self, tiny_metacooler: Path, tmp_path: Path):
+        """metaTOR's step: the map reassigned into the staged map, annotated,
+        then weighted from the staged map as it then is."""
+        with staged_edit(
+            tiny_metacooler, planned=MetaCooler(tiny_metacooler)
+        ) as staged:
+            reassign(tiny_metacooler, _assignment(tmp_path), output=staged, force=True)
+            _annotate(staged, tmp_path, 3.5)
+            mc = MetaCooler(staged)
+            store_weights(
+                staged,
+                "hit",
+                1.0 / _by_contig(mc, "coverage"),
+                method="test",
+                depends_on=["pixels", "contigs/coverage", "genome_id"],
+                source=mc,
+            )
+            write_clusters(staged, *_rounds(staged))
+        written = MetaCooler(tiny_metacooler)
+        np.testing.assert_allclose(
+            written.bins()[:]["hit"], 1.0 / _by_contig(written, "coverage")
+        )
+        assert [r["name"] for r in written.cluster_rounds] == ["r1"]
+
+    def test_a_raw_write_changes_anything(self, tiny_metacooler: Path):
+        before = MetaCooler(tiny_metacooler)
+        with staged_edit(tiny_metacooler) as staged:
+            with h5py.File(staged, "r+") as f:
+                f.attrs["note"] = "raw"
+            with pytest.raises(MapChangedError, match="changed pixels"):
+                _put_weights(staged, _bin_keys(tiny_metacooler), before)
+
+
+class TestInstalls:
+    def test_an_output_created_while_it_is_installed(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Without force, an output another program creates at any time before
+        the rename is kept: checked right before it."""
+        out = tmp_path / "out.metacool"
+        real = staging._fsync
+
+        def fsync_while_another_program_writes(path: Path) -> None:
+            real(path)
+            if not path.is_dir() and not out.exists():
+                out.write_text("another program's result\n")
+
+        monkeypatch.setattr(staging, "_fsync", fsync_while_another_program_writes)
+        with (
+            pytest.raises(FileExistsError, match="created meanwhile"),
+            staged_edit(tiny_metacooler, output=out),
+        ):
+            pass
+        assert out.read_text() == "another program's result\n"
+        assert _left_beside(out) == []
+
+    def test_a_write_in_the_tick_of_the_copy(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Where file times are coarse -- here, ten seconds, and no size or
+        change time -- a write in the same tick as the copy is still seen: the
+        staged map's modification time was set back when it was copied."""
+
+        def coarse(path: Path):
+            try:
+                info = os.stat(path)
+            except FileNotFoundError:
+                return None
+            return info.st_ino, info.st_mtime_ns // 10_000_000_000
+
+        monkeypatch.setattr(staging, "_written_state", coarse)
+        with staged_edit(tiny_metacooler) as staged, h5py.File(staged, "r+") as f:
+            f.attrs["note"] = "written"
+        with h5py.File(tiny_metacooler, "r") as f:
+            assert f.attrs["note"] == "written"
+
+
+def test_names_are_found_with_one_check(
+    tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Contig names resolved through the cooler check the map once, not once
+    per name."""
+    import metacooler.api as api_module
+
+    mc = MetaCooler(tiny_metacooler)
+    names = [str(name) for name in mc.contigs["name"]] * 50
+    assert mc._clr is not None  # built
+    checks = _counted(monkeypatch, [api_module], "file_state")
+    ids = mc._contig_ids_of(names)
+    assert len(checks) == 1
+    assert list(ids[:4]) == [0, 1, 2, 3]
