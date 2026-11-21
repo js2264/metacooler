@@ -76,18 +76,26 @@
 
 ### Changed
 
-- **Breaking: the QC block splits short and long contacts at 1001 bp**, where
-  it split them at 10 kb (`DEFAULT_DISTANCE_THRESHOLD`, the default of
-  `create pairs` and `create cool --qc-threshold`, `collect --qc-threshold`,
-  `qc --threshold`, and `reassign`'s for a source block that records none). A
-  contact is long-range when its ends are at least the threshold apart, so
-  `intra_contig_long` now counts the contacts more than 1 kb apart within a
-  contig: the pairs MetaTOR's `mge` step counts, which a map tallied from
-  pairs (as hicstuff writes them) now gives it. At 10 kb, every contig shorter
-  than 10 kb had no long-range contact at all. Every QC report's short/long
-  split moves accordingly. A map written before keeps the threshold its block
-  records (`metadata.qc.distance_threshold`), which `reassign` and `merge`
-  keep; `--qc-threshold 10kb` / `--threshold 10kb` give the former split.
+- **Breaking: a QC block tallied from pairs splits short and long contacts at
+  1001 bp**, where it split them at 10 kb: the default of
+  `create pairs --qc-threshold`, and of `metacooler.from_pairs`
+  (`qc_distance_threshold`, `PAIRS_DISTANCE_THRESHOLD`), which hicstuff calls
+  without one. A contact is long-range when its reads are at least the
+  threshold apart, so `intra_contig_long` now counts the pairs more than 1 kb
+  apart within a contig: those MetaTOR's `mge` step counts, which a map
+  tallied from pairs (as hicstuff writes them) now gives it. At 10 kb, every
+  contig shorter than 10 kb had no long-range contact at all.
+  `--qc-threshold 10kb` gives the former split. A block measured between bin
+  midpoints keeps the 10 kb default (`DEFAULT_DISTANCE_THRESHOLD`):
+  `create cool`, `collect`, `qc`, and `reassign` when it recomputes a block
+  that records no threshold. Two neighbouring bins are a bin size apart, so at
+  1001 bp such a split would leave little but the diagonal short-range on any
+  map binned at 1001 bp or more. A map written before keeps the threshold its
+  block records (`metadata.qc.distance_threshold`), and `reassign` keeps it
+  too. `merge` keeps it only when every input records the same one; otherwise
+  it drops the QC block and the `qc_*` columns, with a warning. Merging a map
+  made by `create pairs` before 0.4.0 with one made since therefore drops
+  them, unless the newer one was made with `--qc-threshold 10kb`.
 - **Every dump is keyed by name**, so the dumps join on their key columns.
   `dump -t contigs` prints `contig`, `genome` (the name of the genome the contig
   is in) and `length`, then the other columns; it no longer prints `name`, nor
@@ -117,6 +125,13 @@
 
 ### Fixed
 
+- **`qc`'s warning about a bin size at or above its threshold advised
+  lowering `--threshold`**, which only made it worse. Distances are measured
+  between bin midpoints, two neighbouring bins a bin size apart, so a useful
+  split needs a threshold above the bin size, or a map made from pairs
+  (`create pairs` measures the split on read positions). The warning says so
+  now, and `create cool` and `collect` give it too when they store a block
+  tallied at such a threshold.
 - **`contigs.genome` means one thing.** `dump -t contigs` printed the name of
   each contig's genome in its `genome` column, but a user column called
   `genome` (a taxonomy, say), which `/contigs` stored as given, took its place

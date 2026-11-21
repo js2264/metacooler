@@ -62,8 +62,10 @@ _TABLE_ROWS = (
     default=str(DEFAULT_DISTANCE_THRESHOLD),
     show_default=True,
     help=(
-        "Distance splitting short- from long-range intra-contig signal. "
-        "Accepts [cyan]bp/kb/Mb/Gb[/cyan] suffixes (e.g. [cyan]10kb[/cyan])."
+        "Distance splitting short- from long-range intra-contig contacts, "
+        "measured between bin midpoints: long-range from this distance on. At "
+        "or below the bin size, little but the diagonal is short-range. Accepts "
+        "[cyan]bp/kb/Mb/Gb[/cyan] suffixes (e.g. [cyan]10kb[/cyan])."
     ),
 )
 @click.option(

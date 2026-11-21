@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -1147,16 +1148,26 @@ class TestAUserQcColumn:
 
 
 # ----------------------------------------------------------------------
-# The default threshold: more than 1 kb apart, as MetaTOR's mge counts
+# The default thresholds: 1001 bp on read positions, as MetaTOR's mge counts,
+# and 10 kb between bin midpoints
 # ----------------------------------------------------------------------
-def test_default_threshold_is_more_than_1kb_apart(tmp_path: Path):
-    """At the default threshold, ``intra_contig_long`` holds exactly the pairs
-    of a contig whose ends are more than 1000 bp apart -- MetaTOR's ``mge``
-    test, ``abs(pos1 - pos2) > 1000`` -- in the block and per contig, so a map
-    tallied from pairs serves it as the pairs did."""
-    assert qc_engine.DEFAULT_DISTANCE_THRESHOLD == 1001
+_SPLIT_WITHIN_BIN = "at least the short/long distance threshold"
+
+
+def test_the_pairs_default_is_more_than_1kb_apart(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """At the default threshold of a tally on read positions,
+    ``intra_contig_long`` holds exactly the pairs of a contig whose ends are
+    more than 1000 bp apart -- MetaTOR's ``mge`` test, ``abs(pos1 - pos2) >
+    1000`` -- in the block and per contig, so a map tallied from pairs serves it
+    as the pairs did.  Read positions resolve any distance, so bins wider than
+    the threshold change nothing and draw no warning."""
+    assert qc_engine.PAIRS_DISTANCE_THRESHOLD == 1001
     bins = tmp_path / "bins.bed"
-    bins.write_text("c1\t0\t5000\nc2\t0\t3000\n")
+    bins.write_text(
+        "c1\t0\t2000\nc1\t2000\t4000\nc1\t4000\t5000\nc2\t0\t2000\nc2\t2000\t3000\n"
+    )
     rows = [("c1", 100, "c1", 100 + d) for d in (999, 1000, 1001, 1002, 2500)]
     rows += [("c2", 1500, "c2", 1500 - d) for d in (1000, 1001)]
     rows += [("c1", 10, "c2", 10)]  # between contigs: neither split
@@ -1168,10 +1179,14 @@ def test_default_threshold_is_more_than_1kb_apart(tmp_path: Path):
         )
     )
     out = tmp_path / "split.metacool"
-    from_pairs(uri=out, bins=bins, pairs=pairs)
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        from_pairs(uri=out, bins=bins, pairs=pairs)
+    assert _SPLIT_WITHIN_BIN not in caplog.text
 
     mc = MetaCooler(out)
+    assert mc.binsize == 2000
     block = mc.metadata[QC_METADATA_KEY]
+    assert block["source"] == "pairs"
     assert block["distance_threshold"] == 1001
     intra = [(c1, abs(p2 - p1)) for c1, p1, c2, p2 in rows if c1 == c2]
     assert block["intra_contig_long"] == sum(d > 1000 for _, d in intra) == 4
@@ -1185,16 +1200,18 @@ def test_default_threshold_is_more_than_1kb_apart(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("argv", "option"),
+    ("argv", "option", "default"),
     [
-        (["create", "pairs"], "qc_threshold"),
-        (["create", "cool"], "qc_threshold"),
-        (["collect"], "qc_threshold"),
-        (["qc"], "threshold"),
+        (["create", "pairs"], "qc_threshold", 1001),
+        (["create", "cool"], "qc_threshold", 10_000),
+        (["collect"], "qc_threshold", 10_000),
+        (["qc"], "threshold", 10_000),
     ],
 )
-def test_every_threshold_option_defaults_to_1001(argv, option):
-    """Every command that tallies a block splits at 1001 bp by default."""
+def test_each_threshold_option_defaults_to_what_it_measures(argv, option, default):
+    """``create pairs`` measures on read positions, at 1001 bp by default; the
+    commands that measure between bin midpoints keep 10 kb.  Every help says
+    the threshold is inclusive."""
     import click
 
     from metacooler.cli.main import cli
@@ -1204,17 +1221,183 @@ def test_every_threshold_option_defaults_to_1001(argv, option):
         assert isinstance(command, click.Group)
         command = command.commands[name]
     (param,) = [p for p in command.params if p.name == option]
-    assert param.default == "1001"
+    assert param.default == str(default)
+    assert isinstance(param, click.Option)
+    assert "long-range from this distance on" in (param.help or "")
+
+
+def test_each_writer_defaults_to_what_it_measures(
+    tmp_path: Path,
+    tiny_metacooler: Path,
+    tiny_cool: Path,
+    tiny_contigs_table: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    """``from_pairs`` (``tiny_metacooler``) tallies at 1001 bp; ``from_cool``,
+    ``collect`` and ``qc``, which measure between bin midpoints, at 10 kb --
+    above these 100 bp bins, so none of them warns."""
+    from _cools import ECOLI, make_cool
+
+    from metacooler.io.collect import collect
+
+    assert qc_engine.DEFAULT_DISTANCE_THRESHOLD == 10_000
+    pairs_block = MetaCooler(tiny_metacooler).metadata[QC_METADATA_KEY]
+    assert (pairs_block["source"], pairs_block["distance_threshold"]) == ("pairs", 1001)
+
+    imported = tmp_path / "imported.metacool"
+    collected = tmp_path / "collected.metacool"
+    with caplog.at_level(logging.WARNING, logger="metacooler"):
+        from_cool(
+            cool_uri=tiny_cool, output=imported, contig_genome_map=tiny_contigs_table
+        )
+        collect([make_cool(tmp_path / "E_coli.cool", ECOLI, seed=1)], collected)
+        measured = qc(tiny_metacooler).summary
+    assert _SPLIT_WITHIN_BIN not in caplog.text
+    for block in (
+        MetaCooler(imported).metadata[QC_METADATA_KEY],
+        MetaCooler(collected).metadata[QC_METADATA_KEY],
+        measured,
+    ):
+        assert (block["source"], block["distance_threshold"]) == ("pixels", 10_000)
 
 
 def test_cli_qc_default_threshold(tiny_metacooler):
+    """``qc`` measures between bin midpoints, at 10 kb, whatever split the
+    stored block was tallied at."""
     from click.testing import CliRunner
 
     from metacooler.cli.main import cli
 
     result = CliRunner().invoke(cli, ["qc", str(tiny_metacooler), "-q"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["distance_threshold"] == 1001
+    assert json.loads(result.output)["distance_threshold"] == 10_000
+
+
+class TestSplitWithinBin:
+    """A pixel tally whose threshold is no wider than a bin splits little but the
+    diagonal off; the commands that store or report one say so, and what helps."""
+
+    @pytest.mark.parametrize(
+        ("source", "binsize", "threshold", "warns"),
+        [
+            ("pixels", 100, 100, True),  # at the bin size: inclusive
+            ("pixels", 100, 50, True),
+            ("pixels", 100, 101, False),
+            ("pixels", None, 50, False),  # variable bins: not checked
+            ("pairs", 100, 50, False),  # read positions resolve any distance
+        ],
+    )
+    def test_when_it_warns(
+        self, caplog: pytest.LogCaptureFixture, source, binsize, threshold, warns
+    ):
+        tally = ContactQC(1, threshold, source=source)
+        with caplog.at_level(logging.WARNING, logger="metacooler"):
+            assert tally.warn_if_split_within_bin(binsize, "Some advice.") is warns
+        assert len(caplog.records) == int(warns)
+        if warns:
+            message = caplog.records[0].getMessage()
+            assert f"Bin size ({binsize} bp)" in message
+            assert f"threshold ({threshold} bp," in message
+            assert message.endswith("Some advice.")
+
+    @staticmethod
+    def _warning(caplog: pytest.LogCaptureFixture) -> str:
+        (message,) = [
+            r.getMessage()
+            for r in caplog.records
+            if _SPLIT_WITHIN_BIN in r.getMessage()
+        ]
+        return message
+
+    def test_qc_advises_a_threshold_above_the_bin_size(
+        self, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
+    ):
+        with caplog.at_level(logging.WARNING, logger="metacooler"):
+            qc(tiny_metacooler, distance_threshold=100)
+        message = self._warning(caplog)
+        assert "--threshold above the bin size" in message
+        assert "lower" not in message
+        assert "'create pairs' measures the split on read positions" in message
+        assert "metadata get -k qc" in message
+
+    def test_qc_above_the_bin_size_is_quiet(
+        self, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
+    ):
+        with caplog.at_level(logging.WARNING, logger="metacooler"):
+            qc(tiny_metacooler, distance_threshold=101)
+        assert _SPLIT_WITHIN_BIN not in caplog.text
+
+    @pytest.mark.parametrize(("threshold", "warns"), [(100, True), (101, False)])
+    def test_create_cool_warns_and_stores_the_block(
+        self,
+        tmp_path: Path,
+        tiny_cool: Path,
+        tiny_contigs_table: Path,
+        caplog: pytest.LogCaptureFixture,
+        threshold: int,
+        warns: bool,
+    ):
+        out = tmp_path / "imported.metacool"
+        with caplog.at_level(logging.WARNING, logger="metacooler"):
+            from_cool(
+                cool_uri=tiny_cool,
+                output=out,
+                contig_genome_map=tiny_contigs_table,
+                qc_distance_threshold=threshold,
+            )
+        assert (_SPLIT_WITHIN_BIN in caplog.text) is warns
+        if warns:
+            message = self._warning(caplog)
+            assert "--qc-threshold above the bin size" in message
+            assert "'create pairs' measures the split on read positions" in message
+        block = MetaCooler(out).metadata[QC_METADATA_KEY]
+        assert (block["distance_threshold"], block["binsize"]) == (threshold, 100)
+
+    def test_create_cool_without_qc_is_quiet(
+        self,
+        tmp_path: Path,
+        tiny_cool: Path,
+        tiny_contigs_table: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        with caplog.at_level(logging.WARNING, logger="metacooler"):
+            from_cool(
+                cool_uri=tiny_cool,
+                output=tmp_path / "imported.metacool",
+                contig_genome_map=tiny_contigs_table,
+                qc=False,
+                qc_distance_threshold=100,
+            )
+        assert _SPLIT_WITHIN_BIN not in caplog.text
+
+    @pytest.mark.parametrize(("threshold", "warns"), [(100, True), (101, False)])
+    def test_collect_warns(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        threshold: int,
+        warns: bool,
+    ):
+        from _cools import BSUB, ECOLI, make_cool
+
+        from metacooler.io.collect import collect
+
+        out = tmp_path / "collected.metacool"
+        with caplog.at_level(logging.WARNING, logger="metacooler"):
+            collect(
+                [
+                    make_cool(tmp_path / "E_coli.cool", ECOLI, seed=1),
+                    make_cool(tmp_path / "B_subtilis.cool", BSUB, seed=2),
+                ],
+                out,
+                qc_distance_threshold=threshold,
+            )
+        assert (_SPLIT_WITHIN_BIN in caplog.text) is warns
+        if warns:
+            assert "--qc-threshold above the bin size" in self._warning(caplog)
+        assert MetaCooler(out).metadata[QC_METADATA_KEY]["distance_threshold"] == (
+            threshold
+        )
 
 
 # ----------------------------------------------------------------------
