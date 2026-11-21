@@ -26,12 +26,14 @@
   that is gone (`kill -9`, or a scheduler's `SIGTERM`: metacooler sets no
   signal handler) is taken over by one process exactly, under a guard; a lock
   of another host, machine or PID namespace is never broken. Whoever takes a
-  lock removes what killed writers staged beside the map, naming it. Every
+  lock removes what killed writers staged beside the map, naming it. A
   writer of a new map — `create`, `collect`, `reassign -o`, `annotate -o`,
   `binnify`, `zoomify`, `aggregate`, `extract`, `merge`, `flatten`, `stack`,
-  `cp` into a new collection — holds the lock of its output path,
-  `<output>.lock`, while it writes it: a second writer of the same output is
-  refused. Python:
+  `cp` into a new collection — takes no lock, so one killed outright leaves
+  nothing in the way of the next: it refuses an output whose lock,
+  `<output>.lock`, a live process holds (an edit session writing there, a
+  run holding it), before it writes and again before it renames its output
+  into place. Python:
   `metacooler.lock(path)` holds a map's lock for a whole run (re-entrant for
   its thread, so the writers called meanwhile take it on; with
   `follow_symlinks=False`, the lock of a path itself, a link there not
@@ -53,10 +55,12 @@
   the session's map or its output is refused. A session whose staged map is as
   it was copied leaves the map as it is. A writer in a session records the
   session's map in its history (`reassign`'s `source`), never the staged path,
-  and each write is logged with what it changed of what a weight may depend
-  on, so that `store_weights(source=mc)` refuses a weight computed from a map
-  holding what a write of the session changed — the assignment after a
-  relabelling, a column after `annotate`, anything after a re-grouping. With
+  and each write is logged with the entry it wrote and what it changed of what
+  a weight may depend on, so that `store_weights(source=mc)` refuses a weight
+  computed from a map holding what a write of that entry changed — the
+  assignment after a relabelling, a column after `annotate`, anything after a
+  re-grouping — and accepts several weights computed from one read of the
+  staged map, when no write between changed what each depends on. With
   `output=PATH`, the edited map goes to a new file instead, an entry of a
   `.mmetacool` as a standalone `.metacool`, under the lock of `PATH` (the map,
   only read, is not locked: what was read from it as copied stays current).
@@ -140,6 +144,36 @@
 
 ### Changed
 
+- **Breaking, for a metacooler user: what the locks and the staged writes
+  change** (see Added and [In-place writes](format.md#in-place-writes)):
+  - an in-place edit needs a writable directory and room for a copy of the
+    map, and refuses a map without write permission (below);
+  - a `MetaCooler` held across an in-place edit stops reading (below);
+  - a writer — in place or of an output — refuses a map or an output whose
+    lock a live metacooler process, another thread, or a process this host
+    cannot check holds, by name (`MapLockedError`); a lock left by a process
+    of another host, machine or PID namespace (a container) is never broken:
+    delete it once that process is gone. A writer of an output creates no
+    lock, so only edit sessions, in-place edits and `metacooler.lock` leave
+    one when killed outright;
+  - an output that is a symbolic link is replaced, never written through:
+    with `--force` (or `force=True`, and from `flatten`, `aggregate`,
+    `extract`, `merge` and `to_cooler`, which replace their output anyway)
+    the link is removed and a new file written in its place, its target left
+    as it was; without, a link — even a dangling one — is an existing
+    output (`FileExistsError`). A workflow that wrote through a `latest.cool`
+    link now replaces the link;
+  - from an edit session's thread, an output written over the map the
+    session edits or copies out, or over its output, is refused
+    (`ValueError`);
+  - `create_mmetacool(force=False)` and `cp` into a new collection create
+    it exclusively: one created meanwhile is refused (`create_mmetacool`)
+    or copied into (`cp`), never truncated;
+  - a lock that cannot be created raises a `MapLockError` that is also a
+    `PermissionError` (an unwritable directory) or a `FileNotFoundError` (a
+    missing one); an output in a missing directory raises
+    `FileNotFoundError` naming it; the command line prints an `OSError`'s
+    message without its `[Errno N]`.
 - **Breaking: a `MetaCooler` held across an in-place edit stops reading.**
   It raises `MapChangedError` at its next read once the map is replaced or
   written by another writer (or another `MetaCooler`) — a read of what it

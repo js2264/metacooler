@@ -604,13 +604,23 @@ or stopped by a scheduler's `SIGTERM` at its time limit: metacooler sets no
 signal handler — is taken over by the next writer on the same host, with a
 warning. A lock of another host (or of another machine or PID namespace
 under the same host name: a container) is never broken: the error names the
-lock file, and the staging directories, to delete once that process is gone.
-Whoever takes the lock next removes what a killed writer staged, naming it. A
-command that writes a new map — `create`, `collect`, `reassign -o`, `annotate
--o`, `binnify`, `zoomify`, `aggregate`, `extract`, `merge`, `flatten`, `stack`,
-`cp` into a new collection — holds the lock of its output path the same way,
-`<output>.lock`, while it writes it: a second writer of that output is refused
-by name. A command that reads a map while it is replaced, or a `MetaCooler`
+lock file, and what its holder staged there, to delete once that process is
+gone. Whoever takes the lock next removes what a killed writer staged, naming
+it.
+
+A command that writes a new map — `create`, `collect`, `reassign -o`,
+`annotate -o`, `binnify`, `zoomify`, `aggregate`, `extract`, `merge`,
+`flatten`, `stack`, `cp` into a new collection — takes no lock: one killed
+outright leaves nothing that stops it running again, from any host. It
+refuses an output whose lock, `<output>.lock`, a live process (or another
+thread, or a process this host cannot check) holds — an edit session that
+writes there, or a pipeline that holds it for its run (metaTOR does) —, and
+checks that again right before it renames its output into place. Two
+commands writing one output at once are not kept apart: give them two
+paths. An output that is a symbolic link is replaced, never written
+through: `--force` removes the link (its target is left as it is), and
+without `--force` a link, even a dangling one, is an existing output. A
+command that reads a map while it is replaced, or a `MetaCooler`
 opened before, stops with an error rather than mixing two versions of the map:
 open it again. See [In-place writes](format.md#in-place-writes).
 
@@ -686,11 +696,14 @@ with metacooler.staged_edit("sample.metacool") as staged:
   changed: after a relabelling, `depends_on=["genome_id"]` is refused; after
   `annotate` replaced `coverage`, `depends_on=["contigs/coverage"]` is — `mc`
   opened on the map holds the map as the session found it, whenever it was
-  opened. `store_weights`, `write_clusters`, `drop_clusters` and `metadata`
-  change nothing a weight depends on; a re-grouping, a new map written over
-  the staged map or a raw `h5py` write, anything. Compute from the staged map
-  instead, opened after the last write that changed what the weight depends
-  on:
+  opened, and whatever was written to it since. `store_weights`,
+  `write_clusters`, `drop_clusters` and `metadata` change nothing a weight
+  depends on; a re-grouping, a new map written over the staged map or a raw
+  `h5py` write, anything. In a session on a collection, only the writes of
+  the weight's own entry count. Compute from the staged map instead, read
+  after the last write that changed what the weight depends on — several
+  weights may come from one read, as long as no write between changes what
+  each depends on:
 
   ```python
   with metacooler.staged_edit("sample.metacool") as staged:
