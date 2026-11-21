@@ -30,12 +30,13 @@ def contend(path: str, rounds: int, barrier, results) -> None:
         barrier.wait(60)
 
 
-def hold(path: str, ready, release) -> None:
-    """Hold the lock of *path* until *release* is set."""
+def hold(path: str, ready, release, follow_symlinks: bool = True) -> None:
+    """Hold the lock of *path* until *release* is set (with *follow_symlinks*
+    false, the lock of the path itself: an output's)."""
     logging.disable(logging.WARNING)
     from metacooler.io.staging import lock
 
-    with lock(path, command="test holder"):
+    with lock(path, command="test holder", follow_symlinks=follow_symlinks):
         ready.set()
         release.wait(60)
 
@@ -69,6 +70,19 @@ def try_store(path: str) -> str:
     try:
         n_bins = int(MetaCooler(path).info["nbins"])
         store_weights(path, "w", np.ones(n_bins), method="test", depends_on="pixels")
+    except Exception as error:  # noqa: BLE001 - reported to the test
+        return f"{type(error).__name__}: {error}"
+    return "written"
+
+
+def try_reassign(source: str, table: str, output: str) -> str:
+    """Reassign the map *source* by *table* into *output*, replacing it:
+    ``"written"``, or what was raised, as ``"<type>: <message>"``."""
+    logging.disable(logging.WARNING)
+    from metacooler.io.reassign import reassign
+
+    try:
+        reassign(source, table, output=output, force=True)
     except Exception as error:  # noqa: BLE001 - reported to the test
         return f"{type(error).__name__}: {error}"
     return "written"

@@ -1051,15 +1051,15 @@ def _sync_untracked(session: _Session) -> None:
 
 
 def _changed_since(
-    session: _Session, since: float, targets: Iterable[str]
+    session: _Session, since: float | None, targets: Iterable[str]
 ) -> list[str]:
     """Which of *targets* a write of the session that ended after *since*
-    changed (``"bins"``: the bins themselves, which only a write of anything
-    changes)."""
+    (``None``: since the session copied its map) changed (``"bins"``: the
+    bins themselves, which only a write of anything changes)."""
     _sync_untracked(session)
     changed: list[str] = []
     for when, touched in session.log:
-        if when <= since:
+        if since is not None and when <= since:
             continue
         for target in targets:
             if target not in changed and (_ANYTHING in touched or target in touched):
@@ -1074,10 +1074,14 @@ def check_source_depends(
     write of the session changed what the weight depends on.
 
     A *source* opened on the staged map itself is held by its own state (a
-    write of the staged map since it was opened refuses it); one of another
-    file -- the map as it was before the session, say -- is current for each
-    ``depends_on`` target that no write of the session changed after it was
-    opened.  Outside a session, nothing is checked here.
+    write of the staged map since it was opened refuses it).  One opened on
+    the map the session copied, as it copied it, holds what the session
+    started from, whenever it was opened (an in-place session's map is not
+    written before the session ends): it is current for each ``depends_on``
+    target that no write of the session changed.  One of another file is
+    current for each target that no write of the session changed after it
+    was opened (a write before it may be in it).  Outside a session, nothing
+    is checked here.
 
     Raises:
         MapChangedError: Naming the targets changed.
@@ -1092,12 +1096,13 @@ def check_source_depends(
         return
     # Its bins first, as a re-grouping changes them: their own message.
     _check_planned_bins(source, session.staged, group, session=session)
-    changed = _changed_since(session, source._opened, depends_on)
+    since = None if _current_as_copied(session, source) else source._opened
+    changed = _changed_since(session, since, depends_on)
     if changed:
         raise MapChangedError(
-            f"{source.uri} was read before a write of this edit session changed "
-            f"{', '.join(changed)}, which the weight depends on: compute it from "
-            f"the staged map, {uri}, instead."
+            f"{source.uri} holds the map as it was before a write of this edit "
+            f"session changed {', '.join(changed)}, which the weight depends on: "
+            f"compute it from the staged map, {uri}, instead."
         )
 
 
@@ -1499,6 +1504,9 @@ def staged_edit(
     with lock(source, command=command):
         held = _holding(_lock_file_of(source))
         assert held is not None  # taken just above
+        # The map's state first, so that what planned was read from is what
+        # is copied (a program that takes no lock may write it meanwhile).
+        before = file_state(source)
         check_unchanged(planned)
         if not source.exists():
             raise FileNotFoundError(errno.ENOENT, f"No map to edit: {source}")
@@ -1521,7 +1529,6 @@ def staged_edit(
         )
         try:
             _hold_staged(session, command)
-            before = file_state(source)
             copy_fresh(source, staged)
             _check_copied(source, before)
             session.source_state = before
@@ -1626,6 +1633,8 @@ def _output_session(
                 what="the edit session",
                 refuse_existing=not force,
             )
+            if onto is not None:  # a session's staged map, replaced
+                _note_write(onto, None)
         except BaseException:
             if os.getpid() == held.pid:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -1748,8 +1757,9 @@ def _check_planned_bins(
     edit session -- would put it on other bins.  A map of the file written
     itself is checked by its file's state (:func:`check_unchanged`); in an
     edit session (*session*), one opened on the map the session copied, as it
-    copied it, has the staged map's bins unless a write of the session that
-    may have changed them came since (it is not read again).
+    copied it, has the staged map's bins unless a write of the session may
+    have changed them (it is not read again: an output session's map may have
+    been written since).
 
     Raises:
         MapChangedError: If the bins differ.
@@ -1773,7 +1783,7 @@ def _check_planned_bins(
                 session is not None
                 and _current_as_copied(session, mc)
                 and _copied_as(session, own, where)
-                and not _changed_since(session, mc._opened, ("bins",))
+                and not _changed_since(session, None, ("bins",))
             ):
                 continue
             if where not in written:
@@ -2077,6 +2087,8 @@ def staged_inplace(
     with lock(path):
         held = _holding(lock_path(path))
         assert held is not None  # taken just above
+        # The map's state first: what planned was read from is what is copied.
+        before = file_state(path)
         check_unchanged(planned)
         if copy:  # a whole new map has whatever bins its writer gives it
             _check_planned_bins(planned, path, group)
@@ -2084,7 +2096,6 @@ def staged_inplace(
         workdir = _new_workdir(path, held)
         staged = workdir / path.name
         try:
-            before = file_state(path)
             if copy:
                 copy_fresh(path, staged)
                 _check_copied(path, before)

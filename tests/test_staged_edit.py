@@ -19,6 +19,8 @@ import cooler
 import h5py
 import numpy as np
 import pytest
+from _cli_output import flat
+from _cools import BSUB, ECOLI, make_cool
 from test_staging import (
     DEAD_RUN,
     SPAWN,
@@ -1270,3 +1272,286 @@ class TestWhatIsWritten:
         assert [r["name"] for r in written.cluster_rounds] == ["r1"]
         if output is not None:  # the map was only read
             assert mc.store.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# The fourth review: the staged map's lock held, outputs locked, what a map
+# read for a weight holds
+# ---------------------------------------------------------------------------
+def _other_map(tiny_metacooler: Path, tmp_path: Path, name: str = "other") -> Path:
+    """A copy of the map, in a directory of its own."""
+    other = tmp_path / name / tiny_metacooler.name
+    other.parent.mkdir()
+    shutil.copy(tiny_metacooler, other)
+    return other
+
+
+class TestTheStagedMapsLockIsHeld:
+    """The staged map's lock is held by its session's thread, as any lock of
+    this process: never taken for one a process that is gone left."""
+
+    def test_an_output_session_onto_it_re_enters_it(
+        self, tiny_metacooler: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        from _staging_workers import try_store
+
+        other = _other_map(tiny_metacooler, tmp_path)
+        with staged_edit(tiny_metacooler) as staged:
+            with (
+                caplog.at_level("WARNING", logger="metacooler"),
+                staged_edit(other, output=staged, force=True) as inner,
+            ):
+                edit_metadata(inner, lambda meta: meta.update({"by": "inner"}))
+            assert "Took over" not in caplog.text
+            assert lock_path(staged).exists()
+            with SPAWN.Pool(1) as pool:
+                said = pool.apply(try_store, (staged,))
+            assert said.startswith("MapLockedError"), said
+        written = MetaCooler(tiny_metacooler)
+        assert written.metadata["by"] == "inner"
+        assert "w" not in written.bins()[:].columns
+        assert _left_beside(tiny_metacooler) == []
+
+    def test_another_thread_is_refused_it(self, tiny_metacooler: Path, tmp_path: Path):
+        other = _other_map(tiny_metacooler, tmp_path)
+
+        def onto(staged: str) -> None:
+            with staged_edit(other, output=staged, force=True) as inner:
+                edit_metadata(inner, lambda meta: meta.update({"by": "other thread"}))
+
+        with staged_edit(tiny_metacooler) as staged:
+            inode = Path(staged).stat().st_ino
+            with pytest.raises(MapLockedError, match="another thread"):
+                _in_thread(lambda: onto(staged))
+            assert Path(staged).stat().st_ino == inode
+            assert lock_path(staged).exists()
+            _store(staged)
+        written = MetaCooler(tiny_metacooler)
+        assert "by" not in written.metadata
+        assert "w" in written.bins()[:].columns
+
+
+class TestTheOutputsOfASession:
+    """An output written where an edit session of this thread would replace
+    it, or over the map it copies, is refused; its staged map is written as
+    any output, by its thread alone."""
+
+    def test_the_output_of_an_output_session(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        out = tmp_path / "out.metacool"
+        other = _other_map(tiny_metacooler, tmp_path)
+        table = _assignment(tmp_path)
+        depth = tmp_path / "depth.tsv"
+        depth.write_text("contig_name\tdepth\ncontig_A\t3.5\n")
+        mc = MetaCooler(tiny_metacooler)
+        with staged_edit(tiny_metacooler, output=out, force=True, planned=mc) as staged:
+            with pytest.raises(ValueError, match="is the output of an edit session"):
+                reassign(tiny_metacooler, table, output=out, force=True)
+            with pytest.raises(ValueError, match="is the output of an edit session"):
+                metacooler.annotate(
+                    tiny_metacooler, out, contigs_table=depth, force=True
+                )
+            with pytest.raises(ValueError, match="is being copied to"):
+                reassign(other, table, output=tiny_metacooler, force=True)
+            assert not out.exists()
+            # metaTOR's step: the map reassigned into the staged map.
+            reassign(tiny_metacooler, table, output=staged, force=True)
+            _store(staged)
+        written = MetaCooler(out)
+        assert written.metadata["reassign"][-1]["source"] == str(tiny_metacooler)
+        assert "w" in written.bins()[:].columns
+        assert "reassign" not in MetaCooler(tiny_metacooler).metadata
+        assert _left_beside(out) == []
+
+    def test_a_map_edited_in_place(self, tiny_metacooler: Path, tmp_path: Path):
+        other = _other_map(tiny_metacooler, tmp_path)
+        table = _assignment(tmp_path)
+        with staged_edit(tiny_metacooler) as staged:
+            _store(staged, "outer")
+            with (
+                pytest.raises(ValueError, match="being edited in an edit session"),
+                staged_edit(other, output=tiny_metacooler, force=True),
+            ):
+                pass
+            with pytest.raises(ValueError, match="being edited in an edit session"):
+                reassign(other, table, output=tiny_metacooler, force=True)
+        assert "outer" in MetaCooler(tiny_metacooler).bins()[:].columns
+        assert _left_beside(tiny_metacooler) == []
+
+    def test_its_staged_map_from_another_thread(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        table = _assignment(tmp_path)
+        with staged_edit(tiny_metacooler) as staged:
+            _annotate(staged, tmp_path)
+            with pytest.raises(MapLockedError, match="another thread"):
+                _in_thread(
+                    lambda: reassign(tiny_metacooler, table, output=staged, force=True)
+                )
+        written = MetaCooler(tiny_metacooler)
+        assert "coverage" in written.contigs.columns
+        assert "reassign" not in written.metadata
+
+    def test_its_staged_map_from_another_process(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        from _staging_workers import try_reassign
+
+        table = _assignment(tmp_path)
+        with staged_edit(tiny_metacooler) as staged, SPAWN.Pool(1) as pool:
+            _annotate(staged, tmp_path)
+            said = pool.apply(try_reassign, (str(tiny_metacooler), str(table), staged))
+        assert said.startswith("MapLockedError"), said
+        written = MetaCooler(tiny_metacooler)
+        assert "coverage" in written.contigs.columns
+        assert "reassign" not in written.metadata
+
+
+class _CliFailed(Exception):
+    """A metacooler command that failed: its output, flattened."""
+
+
+def _cli(*args: str | Path) -> None:
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    result = CliRunner().invoke(cli, [str(arg) for arg in args])
+    if result.exit_code:
+        raise _CliFailed(flat(result.output))
+
+
+def _from_pairs(out: Path, request: pytest.FixtureRequest) -> None:
+    from metacooler.io.create import from_pairs
+
+    from_pairs(
+        uri=out,
+        bins=request.getfixturevalue("tiny_bins_bed"),
+        pairs=request.getfixturevalue("tiny_pairs"),
+        contig_genome_map=request.getfixturevalue("tiny_contigs_table"),
+        contig_table_format="contigs",
+        fasta=request.getfixturevalue("tiny_fasta"),
+        chunksize=1000,
+    )
+
+
+def _collect(out: Path) -> None:
+    from metacooler.io.collect import collect
+
+    cools = out.parent.parent / "cools"
+    cools.mkdir()
+    collect(
+        [
+            make_cool(cools / "E_coli.cool", ECOLI, seed=1),
+            make_cool(cools / "B_subtilis.cool", BSUB, seed=2),
+        ],
+        out,
+    )
+
+
+def _merge(src: Path, out: Path) -> None:
+    from metacooler.io.merge import merge
+
+    replicate = out.parent.parent / "replicate.metacool"
+    shutil.copy(src, replicate)
+    merge([src, replicate], out)
+
+
+def _an_output_session(src: Path, out: Path) -> None:
+    with staged_edit(src, output=out):
+        pass
+
+
+def _depth(out: Path) -> Path:
+    table = out.parent.parent / "depth.tsv"
+    table.write_text("contig_name\tdepth\ncontig_A\t3.5\n")
+    return table
+
+
+#: Every writer of a new map at a path: the output's name, and a call writing
+#: it from the map *src*.
+OUTPUT_WRITERS = {
+    "create pairs": ("out.metacool", lambda src, out, rq: _from_pairs(out, rq)),
+    "create cool": (
+        "out.metacool",
+        lambda src, out, rq: metacooler.from_cool(rq.getfixturevalue("tiny_cool"), out),
+    ),
+    "collect": ("out.metacool", lambda src, out, rq: _collect(out)),
+    "reassign, relabelled": (
+        "out.metacool",
+        lambda src, out, rq: reassign(
+            src, {"contig_D": "MAG_2"}, output=out, layout="keep"
+        ),
+    ),
+    "reassign, re-grouped": (
+        "out.metacool",
+        lambda src, out, rq: reassign(src, {"contig_A": "MAG_2"}, output=out),
+    ),
+    "annotate": (
+        "out.metacool",
+        lambda src, out, rq: metacooler.annotate(src, out, contigs_table=_depth(out)),
+    ),
+    "binnify": ("out.metacool", lambda src, out, rq: metacooler.binnify(src, out, 200)),
+    "zoomify": (
+        "out.mmetacool",
+        lambda src, out, rq: metacooler.zoomify(src, out, levels=2),
+    ),
+    "aggregate": (
+        "out.cool",
+        lambda src, out, rq: metacooler.aggregate(src, out, level="genome"),
+    ),
+    "extract": (
+        "out.cool",
+        lambda src, out, rq: metacooler.extract(src, genomes=["MAG_1"], output=out),
+    ),
+    "flatten": ("out.cool", lambda src, out, rq: metacooler.flatten(src, out)),
+    "merge": ("out.metacool", lambda src, out, rq: _merge(src, out)),
+    "a new collection": (
+        "out.mmetacool",
+        lambda src, out, rq: mmetacool_module.create_mmetacool(out, {"a": src}),
+    ),
+    "stack": (
+        "out.mmetacool",
+        lambda src, out, rq: _cli("stack", src, src, "--names", "a,b", "-o", out),
+    ),
+    "cp, a new collection": (
+        "out.mmetacool",
+        lambda src, out, rq: _cli(
+            "cp",
+            f"{rq.getfixturevalue('tiny_mmetacool')}::entries/entry1",
+            f"{out}::entries/entry1",
+        ),
+    ),
+    "an output session": (
+        "out.metacool",
+        lambda src, out, rq: _an_output_session(src, out),
+    ),
+}
+
+
+@pytest.mark.parametrize("writer", list(OUTPUT_WRITERS))
+def test_an_output_another_process_writes_is_refused(
+    writer: str, tiny_metacooler: Path, tmp_path: Path, request: pytest.FixtureRequest
+):
+    """Every writer of a new map holds the lock of its output -- the path
+    itself -- while it writes it: a writer of the same path in another process
+    refuses it, and nothing is written there."""
+    from _staging_workers import hold
+
+    name, write = OUTPUT_WRITERS[writer]
+    out = tmp_path / "out" / name
+    out.parent.mkdir()
+    ready, release = SPAWN.Event(), SPAWN.Event()
+    process = SPAWN.Process(
+        target=hold, args=(str(out), ready, release), kwargs={"follow_symlinks": False}
+    )
+    process.start()
+    try:
+        assert ready.wait(60), "the holder did not take the lock"
+        with pytest.raises((MapLockedError, _CliFailed), match="test holder"):
+            write(tiny_metacooler, out, request)
+        assert sorted(p.name for p in out.parent.iterdir()) == [f"{name}.lock"]
+    finally:
+        release.set()
+        process.join(60)
