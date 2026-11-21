@@ -95,6 +95,11 @@ class TestInit:
             "check",
             "CheckResult",
             "parse_uri",
+            # in-place writes
+            "lock",
+            "MapLockError",
+            "MapLockedError",
+            "MapChangedError",
             # mmetacool collections
             "create_mmetacool",
             "add_entry",

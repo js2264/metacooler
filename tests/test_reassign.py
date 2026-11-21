@@ -19,6 +19,7 @@ from pathlib import Path
 import cooler
 import h5py
 import numpy as np
+import pandas as pd
 import pytest
 from _cli_output import flat
 from _cools import BSUB, ECOLI, make_cool
@@ -510,23 +511,36 @@ def test_inplace_rewrites_the_source(tmp_path: Path, tiny_metacooler: Path):
     assert_array_equal(_dense(result), _dense(MetaCooler(tiny_metacooler)))
 
 
-def test_inplace_refuses_a_reassignment_that_needs_re_ordering(
-    tmp_path: Path, tiny_metacooler: Path
-):
+def test_inplace_re_orders_through_a_staged_map(tmp_path: Path, tiny_metacooler: Path):
+    """A reassignment that needs re-ordering rewrites the whole map: in place,
+    a new map is written beside it, and replaces it once it validates (it was
+    refused in place)."""
     target = tmp_path / "inplace.metacool"
     shutil.copy2(tiny_metacooler, target)
+    copy = tmp_path / "copy.metacool"
+    table = _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"})
 
-    with pytest.raises(ValueError, match="inplace cannot be used here"):
+    reassign(target, table, copy)
+    reassign(target, table, inplace=True)
+
+    in_place, written = MetaCooler(target), MetaCooler(copy)
+    pd.testing.assert_frame_equal(in_place.genomes, written.genomes)
+    pd.testing.assert_frame_equal(in_place.contigs, written.contigs)
+    pd.testing.assert_frame_equal(in_place.pixels()[:], written.pixels()[:])
+    validate(target, full=True)
+
+
+def test_inplace_refuses_to_re_order_an_entry(tmp_path: Path, tiny_mmetacool: Path):
+    """An entry of a collection is not a file of its own: re-ordering it in
+    place is refused, before anything is written."""
+    before = tiny_mmetacool.read_bytes()
+    with pytest.raises(ValueError, match="cannot re-group an entry of a collection"):
         reassign(
-            target, _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"}), inplace=True
+            f"{tiny_mmetacool}::entries/entry1",
+            _table(tmp_path / "t.tsv", {"contig_A": "MAG_2"}),
+            inplace=True,
         )
-
-    # Refused before anything was written.
-    assert MetaCooler(target).genomes["name"].tolist() == [
-        "__unbinned__",
-        "MAG_1",
-        "MAG_2",
-    ]
+    assert tiny_mmetacool.read_bytes() == before
 
 
 def test_inplace_and_output_are_mutually_exclusive(

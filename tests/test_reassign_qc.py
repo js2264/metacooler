@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +33,7 @@ from metacooler.cli.main import cli
 from metacooler.io import reassign as reassign_module
 from metacooler.io.create import from_pairs
 from metacooler.io.reassign import reassign
+from metacooler.io.staging import copy_fresh
 from metacooler.ops.qc import qc
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
@@ -627,8 +629,10 @@ def test_relabelling_in_place_links_the_columns_it_leaves_alone(
     """The columns the relabelling leaves alone are the stored datasets, linked
     into the rebuilt table, not copies: a copy leaves the old dataset behind as
     dead space HDF5 does not reclaim, so every relabelling in place grew the
-    file by its contigs' columns. devel, which edited the table in place,
-    passes this too."""
+    file by its contigs' columns. A relabelling in place is now written to a
+    fresh copy of the map, which holds none of the dead space of earlier
+    edits, so the map holds at most the space its own edit left: no more than
+    a fresh copy of it, but for the small tables it rebuilt."""
     source = _create(
         tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
     )
@@ -640,14 +644,15 @@ def test_relabelling_in_place_links_the_columns_it_leaves_alone(
             "notes", data=notes.astype(np.uint8).view("S100000")[:, 0]
         )
     reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
-    with h5py.File(source, "r") as f:
-        offset = f["contigs"]["notes"].id.get_offset()
     size = source.stat().st_size
 
     for assignment in (ASSIGNMENT_A, ASSIGNMENT_B):
         reassign(source, assignment, inplace=True, missing="unbinned")
-    with h5py.File(source, "r") as f:
-        assert f["contigs"]["notes"].id.get_offset() == offset
+        fresh = tmp_path / "fresh.metacool"
+        copy_fresh(source, fresh)
+        # Not 500 kB of notes left behind by the edit.
+        assert source.stat().st_size - fresh.stat().st_size < 100_000
+        fresh.unlink()
     assert source.stat().st_size - size < 100_000
     _assert_sound(source)
 
@@ -670,17 +675,19 @@ def test_the_group_attributes_of_the_tables_are_kept(tmp_path: Path, pairs_file:
 def test_ctrl_c_while_the_tables_are_swapped_in_is_held_until_they_are(
     tmp_path: Path, pairs_file: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A SIGINT that arrives while the new tables replace the old ones is
-    delivered once they all have: the map holds the new assignment, whole.
-    Delivered at once, it left a map whose ``/genomes`` was the new one and
-    whose ``ngenomes`` the old, which no command could open."""
+    """A SIGINT that arrives while the new tables replace the old ones leaves
+    the map as it was, whole: the tables are swapped in a staged copy of the
+    map, which only replaces it once it validates. Swapped in the map itself,
+    an interrupt delivered at once left a map whose ``/genomes`` was the new
+    one and whose ``ngenomes`` the old, which no command could open (a SIGINT
+    held until the swap was done fixed that, before the swap was staged)."""
     import signal
 
     source = _create(
         tmp_path / "a.metacool", pairs_file, ASSIGNMENT_A, "one-bin-per-contig", "fasta"
     )
     expected = tmp_path / "b.metacool"
-    reassign(source, ASSIGNMENT_B, expected, missing="unbinned")
+    shutil.copy2(source, expected)
     move = h5py.Group.move
 
     def interrupted(self, source_name, dest_name):
@@ -694,21 +701,14 @@ def test_ctrl_c_while_the_tables_are_swapped_in_is_held_until_they_are(
 
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     _assert_sound(source)
-    for table in TABLES:
-        pd.testing.assert_frame_equal(
-            read_table(source, table), read_table(expected, table)
-        )
-    assert ".reassign-scratch" not in h5py.File(source, "r")
+    assert source.read_bytes() == expected.read_bytes()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".")) == []
 
 
 def test_relabelling_in_place_from_a_thread(tmp_path: Path, pairs_file: Path):
-    """Only the main thread may set a signal handler: elsewhere the swap runs
-    without holding SIGINT, instead of failing with ``signal only works in main
-    thread``.
-
-    A guard: before the swap held SIGINT, nothing set a handler, so this
-    passes without it too; it holds the hold to the main thread.
-    """
+    """Only the main thread may set a signal handler: a relabelling in place
+    sets none, and runs from any thread (it once held SIGINT during the swap,
+    and failed with ``signal only works in main thread`` there). A guard."""
     import threading
 
     source = _create(
@@ -734,8 +734,8 @@ def test_relabelling_in_place_under_a_handler_python_did_not_install(
 ):
     """A host that embeds Python (R through reticulate, say) may set the
     SIGINT handler from C: ``getsignal`` then returns ``None``, which
-    ``signal.signal`` cannot restore. The swap runs without holding SIGINT
-    there, leaving the host's handler alone."""
+    ``signal.signal`` cannot restore. metacooler sets no handler, so the
+    host's is left alone. A guard."""
     import signal
 
     source = _create(

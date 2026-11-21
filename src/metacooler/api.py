@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from metacooler.io.staging import MapChangedError, StateCheckedPath, file_state
 from metacooler.qc import unbinned_genome_id
 from metacooler.schema import (
     CLUSTER_TABLE_COLUMNS,
@@ -84,6 +85,9 @@ class MetaCooler:
 
         if not self._store.exists():
             raise FileNotFoundError(f"File not found: {self._store}")
+        # The file as it is opened: a read once it is replaced or written is
+        # refused (see _check_unchanged).
+        self._state = file_state(self._store)
 
         if group_path != "/":
             # Opening a sub-group inside an mmetacool file
@@ -126,8 +130,36 @@ class MetaCooler:
         contigs), which the index-based selectors, ``info``, ``binsize`` and
         ``shape`` never need; so an open, and a genome or contig query, does not
         pay for it.
+
+        cooler opens the file again for every chunk it reads, through its
+        ``store``: that is a path that checks, at each open, that the file is
+        still the one this map opened (:meth:`_check_unchanged`).
         """
-        return _open_cooler(self._cooler_uri, self._validate_on_open)
+        self._check_unchanged()
+        clr = _open_cooler(self._cooler_uri, self._validate_on_open)
+        clr.store = cast(str, StateCheckedPath(clr.filename, self._check_unchanged))
+        self._check_unchanged()
+        return clr
+
+    def _check_unchanged(self) -> None:
+        """Refuse to read the map once its file is replaced or written.
+
+        An in-place write replaces the file with a new one whose bins and
+        pixels may be in another order, and metacooler reads a map a chunk at a
+        time, opening its file for each: a read that spanned the replacement
+        mixed the bins of one map with the pixels of the other, silently.  A
+        write through this object's own :meth:`open` is not a change.
+
+        Raises:
+            MapChangedError: If the file is not the one this map opened, or
+                was written since.
+        """
+        if file_state(self._store) != self._state:
+            raise MapChangedError(
+                f"{self.uri} was replaced or written after it was opened (by an "
+                "in-place write, or another process): reading on would mix two "
+                "versions of the map. Open it again."
+            )
 
     def _check_decodable(self) -> None:
         """Fail now, by name, if cooler could not decode ``/contigs``.
@@ -448,6 +480,7 @@ class MetaCooler:
         Returns:
             DataFrame indexed 0 … n_genomes-1 with one row per genome.
         """
+        self._check_unchanged()
         if self._group_path != "/":
             grp = self._group_path.lstrip("/") + "/genomes"
             return read_table(self._store, grp)
@@ -464,6 +497,7 @@ class MetaCooler:
         Returns:
             DataFrame indexed 0 … n_contigs-1 with one row per contig.
         """
+        self._check_unchanged()
         if self._group_path != "/":
             grp = self._group_path.lstrip("/") + "/contigs"
             return read_table(self._store, grp)
@@ -1252,12 +1286,22 @@ class MetaCooler:
         Yields:
             The root ``h5py.File`` object.  When the ``with`` block exits
             the file is closed automatically.
+
+        Raises:
+            MapChangedError: If the file was replaced or written since this map
+                opened it (see :meth:`_check_unchanged`).  What this map writes
+                itself, through a mode other than ``"r"``, is not a change.
         """
-        with h5py.File(self._store, mode) as f:
-            if self._group_path and self._group_path != "/":
-                yield f[self._group_path.lstrip("/")]
-            else:
-                yield f
+        self._check_unchanged()
+        try:
+            with h5py.File(self._store, mode) as f:
+                if self._group_path and self._group_path != "/":
+                    yield f[self._group_path.lstrip("/")]
+                else:
+                    yield f
+        finally:
+            if mode != "r":
+                self._state = file_state(self._store)
 
 
 def _open_cooler(uri: str, validate: bool) -> cooler.Cooler:

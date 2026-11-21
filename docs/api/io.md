@@ -25,6 +25,25 @@ are re-exported at the top level, so `metacooler.from_pairs(...)` and
 Note that `network` and `dump_table` name their output parameter `out`, not
 `output`.
 
+## In-place writes { #in-place }
+
+`annotate(inplace=True)`, `reassign(inplace=True)`, `store_weights`,
+`write_clusters` and `drop_clusters` edit a map through a staged copy, under the
+map's lock, and replace it once the copy validates (see
+[In-place writes](../format.md#in-place-writes)). A caller that writes a map in
+several steps holds the lock for all of them:
+
+```python
+import metacooler
+
+with metacooler.lock("sample.metacool"):  # MapLockedError if another process writes it
+    metacooler.annotate("sample.metacool", contigs_table="depth.tsv", inplace=True)
+    metacooler.store_weights("sample.metacool", "w", weights, method="tool", depends_on="pixels")
+```
+
+A `MetaCooler` opened before a replacement refuses to read on
+(`metacooler.MapChangedError`): open the map again.
+
 ## A failed write { #keep-partial }
 
 `from_pairs`, `from_cool`, `collect`, `reassign` and `annotate` (the last two

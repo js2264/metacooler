@@ -20,7 +20,10 @@ What it guarantees:
   pixels and indexes are not read.  The cost is O(n_contigs).
 - **Nothing half-written.**  Every table is checked -- names, column clashes,
   ASCII in ``/contigs`` -- before anything is written; a table is rebuilt in a
-  scratch group and swapped into place; the map is validated afterwards.
+  scratch group and swapped into place; the map is validated afterwards.  In
+  place, every map is planned under the file's lock and written to a staged
+  copy of the file, which replaces it once every edited map validates (see
+  :mod:`metacooler.io.staging`).
 
 A bare ``.mmetacool`` path annotates every entry of the collection (each entry
 carries its own ``/genomes`` and ``/contigs``: ``zoomify`` levels, stacked
@@ -29,6 +32,7 @@ replicates); an entry URI annotates that entry alone.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
@@ -49,6 +53,7 @@ from metacooler.io._utils import (
     write_column,
 )
 from metacooler.io.colspec import CONTIG_METADATA_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
+from metacooler.io.staging import lock, map_output, staged_inplace
 from metacooler.io.weights import drop_stale_weights
 from metacooler.qc import is_qc_column
 from metacooler.schema import (
@@ -244,6 +249,8 @@ def annotate(
     if output is not None:
         from metacooler.io.create import _refuse_staging_an_input
 
+        output = map_output(output)
+
         check_output_path(output, force, inputs=inputs, defer_removal=True)
         _refuse_staging_an_input(output, inputs)
 
@@ -261,43 +268,46 @@ def annotate(
 
     # --- Plan every map before writing any ---
     file_path, group_path = parse_uri(str(uri))
-    groups = _map_groups(file_path, group_path)
-    edits = []
-    # Rows refused under unmatched="error", raised once every map is planned:
-    # a table that matches nothing at all gets its own, clearer refusal first.
-    unmatched_rows: list[str] = []
-    for group in groups:
-        map_uri = f"{file_path}::{group}"
-        if len(groups) > 1:
-            logger.info("Annotating entry %s", group)
-        edits.append(
-            _plan_map(
-                MetaCooler(map_uri),
-                group,
-                genomes_extra,
-                contig_table,
-                contigs_table,
-                dropping,
-                replace=replace,
-                missing=missing,
-                unmatched=unmatched,
-                unmatched_rows=unmatched_rows,
+    with contextlib.ExitStack() as held:
+        if inplace:
+            # Planned and written under the map's lock: what is planned is
+            # what the staged copy replaces.
+            held.enter_context(lock(file_path))
+        groups = _map_groups(file_path, group_path)
+        edits = []
+        # Rows refused under unmatched="error", raised once every map is
+        # planned: a table that matches nothing at all gets its own, clearer
+        # refusal first.
+        unmatched_rows: list[str] = []
+        for group in groups:
+            map_uri = f"{file_path}::{group}"
+            if len(groups) > 1:
+                logger.info("Annotating entry %s", group)
+            edits.append(
+                _plan_map(
+                    MetaCooler(map_uri),
+                    group,
+                    genomes_extra,
+                    contig_table,
+                    contigs_table,
+                    dropping,
+                    replace=replace,
+                    missing=missing,
+                    unmatched=unmatched,
+                    unmatched_rows=unmatched_rows,
+                )
             )
-        )
-    _check_plans(edits, genomes_table, contigs_table, dropping, unmatched_rows)
+        _check_plans(edits, genomes_table, contigs_table, dropping, unmatched_rows)
 
-    history = {
-        "genomes_table": None if genomes_table is None else str(genomes_table),
-        "contigs_table": None if contigs_table is None else str(contigs_table),
-        "replace": replace,
-        "missing": missing,
-    }
-    if inplace:
-        for edit in edits:
-            _write_map(file_path, edit.group, edit, metadata, history)
-            if edit.changed:
-                validate(edit.uri)
-        return
+        history = {
+            "genomes_table": None if genomes_table is None else str(genomes_table),
+            "contigs_table": None if contigs_table is None else str(contigs_table),
+            "replace": replace,
+            "missing": missing,
+        }
+        if inplace:
+            _write_in_place(file_path, edits, metadata, history)
+            return
 
     from metacooler.io.create import _staged_output
 
@@ -795,6 +805,26 @@ def _check_plans(
                     f"Refusing to write {edit.uri}: these /contigs values are not "
                     "ASCII:\n" + format_ascii_violations(violations)
                 )
+
+
+def _write_in_place(
+    file_path: Path, edits: list[_MapEdit], metadata: dict | None, history: dict
+) -> None:
+    """Apply the edits that change something to a staged copy of the file,
+    which replaces it once every edited map validates (see
+    :func:`metacooler.io.staging.staged_inplace`).  Nothing changed, nothing is
+    written."""
+    changed = [edit for edit in edits if edit.changed]
+    for edit in edits:
+        if not edit.changed:
+            logger.info("%s already holds these values; nothing to write.", edit.uri)
+    if not changed:
+        return
+    with staged_inplace(
+        file_path, validate_groups=[edit.group for edit in changed]
+    ) as staged:
+        for edit in changed:
+            _write_map(staged, edit.group, edit, metadata, history)
 
 
 def _write_map(

@@ -432,6 +432,36 @@ column called `qc_intra_contig_short`, say, is stored as
     detail the binned file cannot represent, and it is a plotting input rather
     than something any reader of the map needs. See [`ps`](cli.md#ps).
 
+## In-place writes { #in-place-writes }
+
+A writer that edits a map in place — `annotate --inplace`, `reassign
+--inplace`, `normalize`, and from Python `metacooler.store_weights`,
+`write_clusters` and `drop_clusters` — goes through two files beside it:
+
+| File | What it is |
+|------|------------|
+| `<map>.lock` | The map's lock, a JSON object naming its holder: `pid`, `host`, `start` (ISO 8601), `command` and `uuid`. Created when an edit starts (`O_EXCL`), removed when it ends, by its holder only. Next to a symbolic link, not its target: the link is what the edit replaces. An entry of a `.mmetacool` shares its collection's lock. |
+| `.<map>.<uuid>.<n>.staged` | The edited map: a fresh copy of the map (every object copied as stored), edited, validated in full, given the map's mode, then renamed over the map. `<uuid>` is the lock's, `<n>` numbers the edits made under it. Files whose name starts with `.<map>.<uuid>.` (cooler's `.__writing__`) are removed with it when an edit fails. |
+
+- **Holders.** A lock held by a live process is refused, by name. A lock whose
+  `pid` is a process of this host that is gone is taken over, with a warning:
+  moved aside, checked to still be the same lock, and replaced; the files its
+  holder staged are removed. A lock of another host is never broken. A lock
+  file that holds no JSON object is refused too: delete it by hand once no
+  process writes the map.
+- **Re-entrant.** A process that holds a map's lock (`metacooler.lock(path)`,
+  as metaTOR holds it for a whole run) calls the writers, which take the lock
+  unless their caller holds it. A process killed outright leaves its lock and
+  its staged file; the next writer that takes the stale lock removes both.
+  metacooler installs no signal handler.
+- **Reads.** `MetaCooler` records the file it opened (device, inode, size,
+  modification time) and refuses (`MapChangedError`) to read on once the file
+  was replaced or written, at every open, cooler's included: metacooler opens
+  the file for each chunk of pixels it reads, so a read across a replacement
+  would mix the bins of one map with the pixels of the other. What a map writes
+  through its own `open("r+")` is not a change. Open the map again to read the
+  new one.
+
 ## Cooler compatibility detail
 
 The compatibility mechanism relies on two things written by metacooler at file

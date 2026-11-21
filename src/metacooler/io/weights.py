@@ -346,6 +346,9 @@ def store_weights(
 ) -> None:
     """Store a normalization as a weight column of a map's ``/bins``, in place.
 
+    Through a staged copy of the map, under its lock, which replaces the map
+    once it validates (see :mod:`metacooler.io.staging`).
+
     The way any tool -- a binner, a normalization of its own -- puts a
     normalization in a map: ``show``, ``dump`` and ``network --balance NAME``
     then read it, as cooler, cooltools and HiGlass read ``/bins/NAME``.  The
@@ -407,35 +410,58 @@ def store_weights(
         )
     values = np.asarray(weights, dtype=np.float64)
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import lock, staged_inplace
+    from metacooler.uri import parse_uri
 
-    mc = MetaCooler(uri)
-    with mc.open("r+") as grp:
-        entries = check_depends_on(depends_on, grp["contigs"].keys())
-        bins = grp["bins"]
-        n_bins = int(bins["start"].shape[0])
+    file_path, group = parse_uri(str(uri))
+    with lock(file_path):
+        mc = MetaCooler(uri)
+        # Checked on the map before it is copied.
+        with mc.open() as grp:
+            entries = check_depends_on(depends_on, grp["contigs"].keys())
+            n_bins = int(grp["bins"]["start"].shape[0])
+            taken = name in grp["bins"]
         if values.shape != (n_bins,):
             raise ValueError(
                 f"Got {values.size} weight(s) for a map of {n_bins} bin(s); "
                 "refusing to write a column that would not line up."
             )
-        if name in bins:
-            if not force:
-                raise ValueError(
-                    f"/bins/{name} already exists in {mc.uri}: store these "
-                    "weights under another name, or replace that column with "
-                    "force=True."
-                )
-            del bins[name]
-        dataset = write_column(bins, name, values)
-        for key, value in weight_attributes(method, entries, params).items():
-            dataset.attrs[key] = _attr_value(value)
-        if commands:
-            raw = grp.attrs.get("metadata", "{}")
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            metadata = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            metadata["commands"] = [*metadata.get("commands", []), *commands]
-            grp.attrs["metadata"] = json.dumps(metadata)
+        if taken and not force:
+            raise ValueError(
+                f"/bins/{name} already exists in {mc.uri}: store these "
+                "weights under another name, or replace that column with "
+                "force=True."
+            )
+        with staged_inplace(uri) as staged, h5py.File(staged, "r+") as f:
+            key = group.strip("/")
+            _store_column(
+                f[key] if key else f, name, values, method, entries, params, commands
+            )
+
+
+def _store_column(
+    grp: h5py.Group,
+    name: str,
+    values: np.ndarray,
+    method: str,
+    entries: list[str],
+    params: dict,
+    commands: Sequence[str],
+) -> None:
+    """Write the weight column *name* of a map's group, and the commands."""
+    bins = grp["bins"]
+    if name in bins:
+        del bins[name]
+    dataset = write_column(bins, name, values)
+    for key, value in weight_attributes(method, entries, params).items():
+        dataset.attrs[key] = _attr_value(value)
+    if commands:
+        raw = grp.attrs.get("metadata", "{}")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        metadata = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        metadata["commands"] = [*metadata.get("commands", []), *commands]
+        grp.attrs["metadata"] = json.dumps(metadata)
 
 
 def read_weights(source: MetaCooler | str | Path, name: str) -> np.ndarray:

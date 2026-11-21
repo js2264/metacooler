@@ -44,12 +44,9 @@ before those columns existed has its block recomputed from the pixels.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import shutil
-import signal
-import threading
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -82,6 +79,7 @@ from metacooler.io.create import (
     _staged_output,
     _stream_remapped_pixels,
 )
+from metacooler.io.staging import map_output, staged_inplace
 from metacooler.io.weights import (
     drop_stale_weights,
     restore_weight_attrs,
@@ -114,8 +112,6 @@ from metacooler.schema import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
-
     from metacooler.api import MetaCooler
 
 logger = logging.getLogger("metacooler")
@@ -703,32 +699,6 @@ def _materialise_copy(mc: MetaCooler, target: Path) -> None:
 _SCRATCH = ".reassign-scratch"
 
 
-@contextlib.contextmanager
-def _sigint_deferred() -> Generator[None, None, None]:
-    """Hold a SIGINT (Ctrl-C) until the block ends, then deliver it.
-
-    The block swaps the tables of a map in: interrupted halfway, it would
-    leave a map that does not open. Python handles signals in its main thread
-    only, and only there can their handlers be set: elsewhere the block runs
-    as it is. So it does under a handler that Python did not install (one
-    that a host embedding Python set from C), which could not be restored.
-    """
-    if (
-        threading.current_thread() is not threading.main_thread()
-        or signal.getsignal(signal.SIGINT) is None
-    ):
-        yield
-        return
-    received: list[int] = []
-    previous = signal.signal(signal.SIGINT, lambda signum, _: received.append(signum))
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGINT, previous)
-        if received:
-            signal.raise_signal(signal.SIGINT)
-
-
 def _build_relabelled_contigs(
     stored: h5py.Group, new: h5py.Group, contigs: pd.DataFrame
 ) -> None:
@@ -845,19 +815,22 @@ def _write_relabelled(
             if _SCRATCH in grp:
                 del grp[_SCRATCH]
             raise
-        with _sigint_deferred():
-            for table in ("genomes", "contigs"):
-                del grp[table]
-                grp.move(f"{_SCRATCH}/{table}", table)
-            if "genome_offset" in grp["indexes"]:
-                del grp["indexes"]["genome_offset"]
-            grp.move(f"{_SCRATCH}/genome_offset", "indexes/genome_offset")
-            grp.attrs["ngenomes"] = len(genomes)
-            grp.attrs["contig-ordering"] = ordering
-            grp.attrs["metadata"] = json.dumps(metadata)
-            if assignment_changed:
-                drop_stale_weights(grp["bins"], assignment=True, why=_ASSIGNMENT)
-            del grp[_SCRATCH]
+        # The swap is never interrupted halfway in the map itself: it runs in
+        # a staged copy, in place as for an output (see
+        # metacooler.io.staging), which only replaces the map once it
+        # validates.
+        for table in ("genomes", "contigs"):
+            del grp[table]
+            grp.move(f"{_SCRATCH}/{table}", table)
+        if "genome_offset" in grp["indexes"]:
+            del grp["indexes"]["genome_offset"]
+        grp.move(f"{_SCRATCH}/genome_offset", "indexes/genome_offset")
+        grp.attrs["ngenomes"] = len(genomes)
+        grp.attrs["contig-ordering"] = ordering
+        grp.attrs["metadata"] = json.dumps(metadata)
+        if assignment_changed:
+            drop_stale_weights(grp["bins"], assignment=True, why=_ASSIGNMENT)
+        del grp[_SCRATCH]
 
 
 def _rewrite_regrouped(
@@ -1272,6 +1245,7 @@ def reassign(
         None if isinstance(contig_genome_map, dict) else contig_genome_map,
     ]
     if output is not None:
+        output = map_output(output)
         # Before anything is read: an output (or the partial file it is staged
         # as) that is one of the inputs is refused even under force, and an
         # existing output is left in place for _staged_output to replace once
@@ -1360,13 +1334,13 @@ def reassign(
             "triangle, summing each contact with its mirror. Pass layout='keep' "
             "to relabel without moving any pixel."
         )
-    if reorder and inplace:
+    if reorder and inplace and mc._group_path.strip("/"):
         raise ValueError(
-            f"inplace cannot be used here: laying the contigs out as {strategy!r} "
-            "moves them, which means permuting every bin and rewriting the whole "
-            "pixel table. Write a new file with output=..., or pass "
-            "layout='keep' to relabel without re-ordering (the genomes' bins "
-            "then stop being contiguous)."
+            f"inplace cannot re-group an entry of a collection: laying the "
+            f"contigs out as {strategy!r} rewrites the whole map, which is "
+            "written as a file of its own. Write a new file with output=..., "
+            "or pass layout='keep' to relabel the entry in place (the genomes' "
+            "bins then stop being contiguous)."
         )
 
     restated = {before[c] for c in report.moved} | {assignment[c] for c in report.moved}
@@ -1457,11 +1431,42 @@ def reassign(
 
     moved = bool(report.moved)
     if inplace:
-        _relabel_in_place(
-            mc, genomes, contigs, ordering, output_metadata, assignment_changed=moved
-        )
+        # A staged file replaces the map once it validates (see
+        # metacooler.io.staging): a copy of it, relabelled, or a new map with
+        # the contigs re-grouped.
+        with staged_inplace(mc.uri, copy=not reorder) as staged:
+            if reorder:
+                logger.info(
+                    "Re-ordering %d contigs of %s into %r layout, in place: the "
+                    "bins move with them, so the %s pixels are remapped and "
+                    "re-sorted.",
+                    len(contig_order),
+                    mc.uri,
+                    strategy,
+                    f"{int(mc.info['nnz']):,}",
+                )
+                _rewrite_regrouped(
+                    mc,
+                    staged,
+                    genomes,
+                    contigs,
+                    contig_order,
+                    ordering,
+                    output_metadata,
+                    chunksize,
+                    assignment_changed=moved,
+                )
+            else:
+                _relabel_in_place(
+                    staged,
+                    mc,
+                    genomes,
+                    contigs,
+                    ordering,
+                    output_metadata,
+                    assignment_changed=moved,
+                )
         target_uri = mc.uri
-        validate(target_uri)
     else:
         assert output is not None  # guaranteed by the argument check above
         target = Path(output)
@@ -1557,6 +1562,7 @@ def _genome_offset(contigs: pd.DataFrame, n_genomes: int) -> np.ndarray:
 
 
 def _relabel_in_place(
+    staged: Path,
     mc: MetaCooler,
     genomes: pd.DataFrame,
     contigs: pd.DataFrame,
@@ -1565,11 +1571,13 @@ def _relabel_in_place(
     *,
     assignment_changed: bool = True,
 ) -> None:
-    """Apply a relabelling to the source file itself.
+    """Apply a relabelling to a staged copy of the source file.
 
-    The caller re-validates the file.
+    The staged copy replaces the file once it validates (see
+    :func:`metacooler.io.staging.staged_inplace`).
 
     Args:
+        staged: The staged copy of the source file.
         mc: The open source file.
         genomes: The rebuilt ``/genomes`` table.
         contigs: The rebuilt ``/contigs`` table, in the file's row order.
@@ -1580,7 +1588,7 @@ def _relabel_in_place(
     """
     logger.info("Rewriting the genome assignment of %s in place", mc.uri)
     _write_relabelled(
-        mc.store,
+        staged,
         mc._group_path,
         genomes,
         contigs,

@@ -566,14 +566,31 @@ and none re-bins a single contact.
 
 | Command | What it changes | Cost |
 |---------|-----------------|------|
-| [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places; a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
-| [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds. |
+| [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places (plus a copy of the file, in place or not); a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
+| [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds, plus a copy of the file in place. |
 | [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels; tens of passes for `ice`. |
 | [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | Instant. |
 
 `reassign` and `annotate` write either an edited copy (`-o`) or the map itself
 (`--inplace`); `normalize` and `metadata` always edit the map itself, as
 `cooler balance` does.
+
+An edit of the map itself (`reassign --inplace`, `annotate --inplace`,
+`normalize`, and from Python `store_weights`, `write_clusters` and
+`drop_clusters`) never writes the map: under the map's lock, it writes a
+**staged copy** beside it, validates it in full, and renames it over the map.
+So the map is whole whatever stops the edit — an error, Ctrl-C, a failed
+validation — and it does not grow with what each edit replaces (HDF5 never
+reclaims that space). The price is a copy of the file per edit. The map keeps
+its mode, and a symbolic link is replaced by the edited map, its target left as
+it was. The lock, `<map>.lock`, keeps a second writer out: it is refused with
+the pid, host, start and command of the one writing, and a lock left by a
+process that was killed outright (`kill -9`) on the same host is taken over,
+with a warning, along with the staged file it left. A lock of another host is
+never broken: the error names the lock file to delete once that process is
+gone. A command that reads a map while it is replaced stops with an error
+rather than mixing two versions of it. See
+[In-place writes](format.md#in-place-writes).
 
 `reassign` and `annotate` meet in one place: after a reassignment, the metadata
 of the genomes whose contigs changed still describes their old contigs, and
@@ -604,7 +621,7 @@ metacooler reassign METACOOL_PATH --round NAME -o OUT.metacool [OPTIONS]
 | `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). `NA` as the genome column moves every contig the table lists to `__unbinned__`. |
 | `--round` | — | Take the assignment from a clustering round of the map instead of a table — see [A round as the genomes](#reassign-round). |
 | `-o, --output` | *required* | Output `.metacool` path. Required unless `--inplace`. |
-| `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file. Only possible when no contig has to move (see `--layout`). |
+| `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file: through a staged copy, which replaces it once it validates, under the map's lock (see [Edit an existing map](#edit)). Refused for an entry of a collection whose contigs have to move (see `--layout`). |
 | `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. To add or change a few columns without reassigning anything, use [`annotate`](#annotate). |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
 | `--missing` | `keep` with `--contigs`, `unbinned` with `--round` | What to do with a contig the table (or the round) does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
@@ -669,8 +686,10 @@ giving up the guarantee:
 
 A re-grouping that turns out to reproduce the order the file already has is
 detected and skipped, so merging two adjacent MAGs, renaming one, or unbinning
-a contig usually costs nothing. `--inplace` is available exactly when no
-re-ordering is needed, and is refused (before writing anything) when one is.
+a contig usually costs nothing. `--inplace` re-orders too: the new map is
+written beside the old one and replaces it once it validates. An entry of a
+collection, which is not a file of its own, can only be relabelled in place: a
+re-ordering is refused there, before anything is written.
 
 Re-grouping folds every remapped pixel into the upper triangle, which is only
 right for a symmetric matrix. A map stored as `storage-mode="square"` does not
@@ -747,7 +766,7 @@ metacooler reassign gut_T0.metacool \
     --genomes mag_quality_v2.tsv \
     -o gut_T0_v2.metacool
 
-# Relabel a 400 GB file without rewriting its pixel table
+# Relabel a 400 GB file without re-sorting its pixels (copied once, as stored)
 metacooler reassign huge.metacool --contigs fixes.tsv --layout keep --inplace
 
 # One entry of a collection; the output is a standalone map
@@ -846,8 +865,12 @@ Where it writes:
 | `METACOOL_PATH` | With `--inplace` | With `-o OUT` |
 |-----------------|------------------|---------------|
 | `x.metacool` | `x` itself | a copy of `x` |
-| `c.mmetacool::entries/rep1` | that entry, inside `c`; the other entries are untouched | a standalone `.metacool` |
+| `c.mmetacool::entries/rep1` | that entry, inside `c`; the other entries are copied as they are | a standalone `.metacool` |
 | `c.mmetacool` | **every entry** of `c` | a copy of the whole collection |
+
+In place, the whole file is written through a staged copy, under its lock (see
+[Edit an existing map](#edit)), and only when a value changes: a re-run that
+changes nothing writes nothing.
 
 Every table is checked against every map before anything is written, and each
 annotated map is validated. The run is recorded in the map's metadata: the
