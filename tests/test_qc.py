@@ -72,8 +72,8 @@ def known_pairs(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, int]]:
 
     rows = [
         # (chrom1, pos1, chrom2, pos2), one line each
-        # 3 intra-contig short (< 10 kb default threshold is everything here,
-        # so use an explicit small threshold in the tests that care)
+        # 2 intra-contig short and 1 long, at the explicit 1 kb threshold the
+        # tests that care pass (the default, 1001 bp, splits them alike)
         ("c1", 1_000, "c1", 1_500),  # same contig, 500 bp apart
         ("c1", 2_000, "c1", 2_400),  # same contig, 400 bp
         ("c2", 1_000, "c2", 9_000),  # same contig, 8000 bp
@@ -1144,6 +1144,77 @@ class TestAUserQcColumn:
         out = tmp_path / "rebinned.metacool"
         binnify(uri=source, output=out, binsize=2000)
         assert not set(QC_CONTIG_COLUMNS) & set(self._assert_kept(out).columns)
+
+
+# ----------------------------------------------------------------------
+# The default threshold: more than 1 kb apart, as MetaTOR's mge counts
+# ----------------------------------------------------------------------
+def test_default_threshold_is_more_than_1kb_apart(tmp_path: Path):
+    """At the default threshold, ``intra_contig_long`` holds exactly the pairs
+    of a contig whose ends are more than 1000 bp apart -- MetaTOR's ``mge``
+    test, ``abs(pos1 - pos2) > 1000`` -- in the block and per contig, so a map
+    tallied from pairs serves it as the pairs did."""
+    assert qc_engine.DEFAULT_DISTANCE_THRESHOLD == 1001
+    bins = tmp_path / "bins.bed"
+    bins.write_text("c1\t0\t5000\nc2\t0\t3000\n")
+    rows = [("c1", 100, "c1", 100 + d) for d in (999, 1000, 1001, 1002, 2500)]
+    rows += [("c2", 1500, "c2", 1500 - d) for d in (1000, 1001)]
+    rows += [("c1", 10, "c2", 10)]  # between contigs: neither split
+    pairs = tmp_path / "split.pairs"
+    pairs.write_text(
+        "#columns: readID chrom1 pos1 chrom2 pos2\n"
+        + "".join(
+            f"r{i}\t{c1}\t{p1}\t{c2}\t{p2}\n" for i, (c1, p1, c2, p2) in enumerate(rows)
+        )
+    )
+    out = tmp_path / "split.metacool"
+    from_pairs(uri=out, bins=bins, pairs=pairs)
+
+    mc = MetaCooler(out)
+    block = mc.metadata[QC_METADATA_KEY]
+    assert block["distance_threshold"] == 1001
+    intra = [(c1, abs(p2 - p1)) for c1, p1, c2, p2 in rows if c1 == c2]
+    assert block["intra_contig_long"] == sum(d > 1000 for _, d in intra) == 4
+    assert block["intra_contig_short"] == sum(d <= 1000 for _, d in intra) == 3
+    contigs = mc.contigs.set_index("name")
+    for contig in ("c1", "c2"):
+        far = sum(d > 1000 for c, d in intra if c == contig)
+        near = sum(d <= 1000 for c, d in intra if c == contig)
+        assert contigs.loc[contig, "qc_intra_contig_long"] == far
+        assert contigs.loc[contig, "qc_intra_contig_short"] == near
+
+
+@pytest.mark.parametrize(
+    ("argv", "option"),
+    [
+        (["create", "pairs"], "qc_threshold"),
+        (["create", "cool"], "qc_threshold"),
+        (["collect"], "qc_threshold"),
+        (["qc"], "threshold"),
+    ],
+)
+def test_every_threshold_option_defaults_to_1001(argv, option):
+    """Every command that tallies a block splits at 1001 bp by default."""
+    import click
+
+    from metacooler.cli.main import cli
+
+    command: click.Command = cli
+    for name in argv:
+        assert isinstance(command, click.Group)
+        command = command.commands[name]
+    (param,) = [p for p in command.params if p.name == option]
+    assert param.default == "1001"
+
+
+def test_cli_qc_default_threshold(tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    result = CliRunner().invoke(cli, ["qc", str(tiny_metacooler), "-q"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["distance_threshold"] == 1001
 
 
 # ----------------------------------------------------------------------

@@ -81,11 +81,17 @@ UNBINNED_GENOME = "__unbinned__"
 # Key the block is stored under inside a file's ``metadata`` attribute.
 QC_METADATA_KEY = "qc"
 
-# Default split between "short-range" and "long-range" intra-contig signal.
-# 10 kb is the convention in the metaHi-C literature: below it the signal is
-# dominated by the polymer's local contacts (and by undigested/religated
-# fragments), above it by genuine long-range 3D proximity.
-DEFAULT_DISTANCE_THRESHOLD = 10_000
+# Default split between "short-range" and "long-range" intra-contig signal: a
+# contact is long-range when its ends are at least this far apart
+# (``distance >= threshold``).  1001 bp makes ``intra_contig_long`` exactly the
+# pairs MetaTOR's ``mge`` step counts within a contig, those "more than 1 kb"
+# apart (``abs(pos1 - pos2) > 1000``), so a map tallied from pairs serves it as
+# the pairs themselves did.  A wider split (10 kb, the default before 0.4.0)
+# leaves nothing long-range in the short contigs that a metagenome is mostly
+# made of -- the mobile elements MetaTOR clusters among them.  A block records
+# the threshold it was tallied at (``distance_threshold``), which every reader
+# and writer keeps.
+DEFAULT_DISTANCE_THRESHOLD = 1001
 
 # The four mutually exclusive categories, in report order.
 QC_CATEGORIES = (

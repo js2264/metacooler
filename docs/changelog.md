@@ -76,6 +76,18 @@
 
 ### Changed
 
+- **Breaking: the QC block splits short and long contacts at 1001 bp**, where
+  it split them at 10 kb (`DEFAULT_DISTANCE_THRESHOLD`, the default of
+  `create pairs` and `create cool --qc-threshold`, `collect --qc-threshold`,
+  `qc --threshold`, and `reassign`'s for a source block that records none). A
+  contact is long-range when its ends are at least the threshold apart, so
+  `intra_contig_long` now counts the contacts more than 1 kb apart within a
+  contig: the pairs MetaTOR's `mge` step counts, which a map tallied from
+  pairs (as hicstuff writes them) now gives it. At 10 kb, every contig shorter
+  than 10 kb had no long-range contact at all. Every QC report's short/long
+  split moves accordingly. A map written before keeps the threshold its block
+  records (`metadata.qc.distance_threshold`), which `reassign` and `merge`
+  keep; `--qc-threshold 10kb` / `--threshold 10kb` give the former split.
 - **Every dump is keyed by name**, so the dumps join on their key columns.
   `dump -t contigs` prints `contig`, `genome` (the name of the genome the contig
   is in) and `length`, then the other columns; it no longer prints `name`, nor
