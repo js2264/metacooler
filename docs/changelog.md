@@ -27,7 +27,9 @@
   of another host, machine or PID namespace is never broken. Whoever takes a
   lock removes what killed writers staged beside the map, naming it. Python:
   `metacooler.lock(path)` holds a map's lock for a whole run (re-entrant for
-  its thread, so the writers called meanwhile take it on) and refuses with
+  its thread, so the writers called meanwhile take it on; with
+  `follow_symlinks=False`, the lock of a path itself, a link there not
+  followed: an output's) and refuses with
   `metacooler.MapLockedError` (a `MapLockError`, an `OSError`);
   `store_weights(source=mc)` refuses weights computed from a map that changed
   since, or, when `mc` is not the map written, whose bins are not its bins
@@ -40,8 +42,8 @@
   own — and a failure of any kind leaves the map as it was, a writer's failure
   whose error was caught included (`RuntimeError` when the session ends). The
   staged map has a lock of its own, refusing it to any other thread or
-  process; a session that wrote nothing leaves the map as it is, and one that
-  did writes it through a fresh file, so the map does not grow. A writer in a
+  process; a session whose staged map is as it was copied leaves the map as
+  it is, and one that wrote it writes it through a fresh file, so the map does not grow. A writer in a
   session records the session's map in its history (`reassign`'s `source`),
   never the staged path. With
   `output=PATH`, the edited map goes to a new file instead, an entry of a

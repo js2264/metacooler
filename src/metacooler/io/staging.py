@@ -202,16 +202,24 @@ def _lock_file_of(path: Path) -> Path:
     return path.with_name(path.name + LOCK_SUFFIX)
 
 
-def lock_path(uri: str | Path) -> Path:
+def lock_path(uri: str | Path, *, follow_symlinks: bool = True) -> Path:
     """The lock file of the map *uri*: ``<file>.lock``, next to its file.
 
     A URI locks its file: every entry of a ``.mmetacool`` shares the lock of the
     collection, and ``file::/`` is the file itself.  The path is absolute and
     resolved -- a symbolic link to the map is followed, as is any in its
     directory -- so the lock is the same whatever the working directory, the
-    name of the directory, or the link the map is reached through.
+    name of the directory, or the link the map is reached through.  With
+    *follow_symlinks* false, the file's own name is not followed (its
+    directories are): the lock of a path itself, as an output that is a
+    symbolic link is replaced, not written through (see :func:`staged_edit`).
     """
-    return _lock_file_of(_resolved(map_file(uri)))
+    return _lock_file_of(_lock_target(map_file(uri), follow_symlinks))
+
+
+def _lock_target(path: str | Path, follow_symlinks: bool) -> Path:
+    """The file whose lock :func:`lock` takes for *path*."""
+    return _resolved(path) if follow_symlinks else _named(path)
 
 
 def map_output(output: str | Path) -> Path:
@@ -350,13 +358,14 @@ def _holding(lock_file: Path) -> _Held | None:
     return held if held is not None and held.pid == os.getpid() else None
 
 
-def holds_lock(uri: str | Path) -> bool:
+def holds_lock(uri: str | Path, *, follow_symlinks: bool = True) -> bool:
     """Whether this thread holds the lock of the map *uri* (or writes it through
-    an edit session: see :func:`staged_edit`)."""
+    an edit session: see :func:`staged_edit`); *follow_symlinks* as for
+    :func:`lock`."""
     session = _session_of(map_file(uri))
     if session is not None:
         return session.thread == threading.get_ident()
-    held = _holding(lock_path(uri))
+    held = _holding(lock_path(uri, follow_symlinks=follow_symlinks))
     return held is not None and held.thread == threading.get_ident()
 
 
@@ -702,7 +711,9 @@ def _acquire(lock_file: Path, path: Path, mine: dict) -> None:
 
 
 @contextlib.contextmanager
-def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None, None]:
+def lock(
+    uri: str | Path, *, command: str | None = None, follow_symlinks: bool = True
+) -> Generator[Path, None, None]:
     """Hold the lock of a map for the time of the ``with`` block.
 
     The lock file, ``<map>.lock`` (see :func:`lock_path`), is created next to
@@ -732,10 +743,19 @@ def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None
     machine or PID namespace is never broken: the error names the files to
     delete.
 
+    With ``follow_symlinks=False``, the lock is that of the path's own name,
+    beside it, a symbolic link there not followed (the directories leading to
+    it are): the lock of an output that is a link, which is replaced, not
+    written through.  :func:`staged_edit` with an output takes the output's
+    lock so, and re-enters it when its thread holds it already.
+
     Args:
         uri: A map, as a path or a URI: a URI locks its file.
         command: The command the lock names (default: this process's command
             line).
+        follow_symlinks: Whether the lock is that of the file a symbolic link
+            at *uri* points to (the default: the file an in-place edit edits)
+            or that of the path itself.
 
     Yields:
         The lock file.
@@ -749,10 +769,10 @@ def lock(uri: str | Path, *, command: str | None = None) -> Generator[Path, None
     session = _session_of(map_file(uri))
     if session is not None:
         _check_session_thread(session, map_file(uri))
-        session.writes += 1
         yield session.lock_file
         return
-    with _locked(_resolved(map_file(uri)), command=command) as lock_file:
+    target = _lock_target(map_file(uri), follow_symlinks)
+    with _locked(target, command=command) as lock_file:
         yield lock_file
 
 
@@ -883,9 +903,6 @@ class _Session:
     #: the session ends.
     touched: set[str] = dataclasses.field(default_factory=set)
     rewrites: int = 0
-    #: The writes (and locks) of the staged map so far: a session in place
-    #: without any, whose staged map is as it was copied, leaves its map be.
-    writes: int = 0
     #: The error of a write that failed once it had the staged map: the
     #: session then installs nothing, even if its caller caught the error.
     failed: BaseException | None = None
@@ -1041,7 +1058,6 @@ def _in_session(
     check_unchanged(planned)
     if copy:  # a whole new map has whatever bins its writer gives it
         _check_planned_bins(planned, session.staged, group)
-    session.writes += 1
     if validate_groups is None:
         session.touched.add(group.strip("/"))
     else:
@@ -1132,6 +1148,26 @@ def _refuse_a_failed_session(session: _Session) -> None:
     ) from error
 
 
+def _written_state(path: Path) -> tuple[int, int, int, int] | None:
+    """What changes when the staged map *path* is written, however -- by a
+    writer, a raw ``h5py`` write, or a file renamed over it (``reassign``'s
+    output): its inode, size, and times of modification and change."""
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _as_copied(staged: Path) -> tuple[int, int, int, int] | None:
+    """The state of the staged map *staged* as copied, its modification time
+    set back ten seconds first: a write within the same tick of the clock
+    then changes it all the same, where file times are coarse."""
+    info = os.stat(staged)
+    os.utime(staged, ns=(info.st_atime_ns, info.st_mtime_ns - 10_000_000_000))
+    return _written_state(staged)
+
+
 def _check_copied(path: Path, before: tuple[int, int, int, int] | None) -> None:
     """Refuse a copy of *path* that was written or replaced while it was
     copied -- by a program that takes no metacooler lock, or, for an output
@@ -1162,10 +1198,13 @@ def staged_edit(
     In place (*output* ``None``), under the lock of the map's file (taken
     unless this thread holds it), the maps in *planned* are checked
     unchanged, and the whole file is copied, to replace it.  With *output*,
-    under the lock of *output* (taken unless this thread holds it) -- never
-    the map's: the map is only read --, the map alone is copied (an entry of
-    a ``.mmetacool`` becomes a standalone ``.metacool``), destined for that
-    path; a copy torn by a write of the map is refused.  The copy lies in a
+    under the lock of *output* itself (``lock(output, follow_symlinks=False)``,
+    taken unless this thread holds it) -- never the map's: the map is only
+    read --, the map alone is copied (an entry of a ``.mmetacool`` becomes a
+    standalone ``.metacool``), destined for that path; a copy torn by a write
+    of the map is refused.  A symbolic link at *output* is replaced, wherever
+    it points, the map included (which is left as it is); *output* that is
+    the map's own file -- the same name, or a hard link to it -- is refused.  The copy lies in a
     private directory beside the file it replaces, and has a lock file of its
     own, which names this process: the staged map is this thread's alone.
     The block gets the staged map's path (a URI into it for an entry edited
@@ -1179,9 +1218,9 @@ def staged_edit(
     map's owner, group, mode and extended attributes (an output gets a new
     file's mode), synced and renamed over the map's file (a symbolic link to
     it keeps pointing at it) or onto *output* (a link there is replaced, not
-    followed).  A session in place that wrote nothing -- no writer, no lock
-    of the staged map, and the staged map as copied -- leaves the map as it
-    is.  On any failure, ``KeyboardInterrupt`` and ``SystemExit`` included,
+    followed).  A session in place whose staged map is as it was copied --
+    its inode, size, and times of modification and change -- leaves the map
+    as it is, whatever ran: nothing was written.  On any failure, ``KeyboardInterrupt`` and ``SystemExit`` included,
     the staged copy is removed and the map (or *output*) is left as it was;
     and once a writer has failed with the staged map in hand, the session
     writes nothing even if its error was caught (``RuntimeError``), since the
@@ -1228,7 +1267,8 @@ def staged_edit(
         PermissionError: In place, if the map is read-only.
         RuntimeError: If a write of the session failed and its error was
             caught: nothing is written.
-        ValueError: If *output* is *uri*'s file, or for a nesting refused.
+        ValueError: If *output* is *uri*'s file (the same name, or a hard
+            link), or for a nesting refused.
     """
     from metacooler.uri import parse_uri
 
@@ -1256,7 +1296,6 @@ def staged_edit(
         check_unchanged(planned)
         _check_planned_bins(planned, joined.staged, key)
         joined.touched.add(key)
-        joined.writes += 1
         with _failing(joined):
             yield _session_uri(joined.staged, key)
         return
@@ -1301,13 +1340,13 @@ def staged_edit(
             before = file_state(source)
             copy_fresh(source, staged)
             _check_copied(source, before)
-            copied = file_state(staged)
+            copied = _as_copied(staged)
             with _registered(session):
                 yield _session_uri(staged, key)
             if os.getpid() != held.pid:
                 return
             _refuse_a_failed_session(session)
-            if session.writes or file_state(staged) != copied:
+            if _written_state(staged) != copied:
                 _validate_session(session)
                 _install(
                     staged, source, before=before, like=source, what="the edit session"

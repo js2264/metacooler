@@ -644,15 +644,17 @@ with metacooler.staged_edit("sample.metacool") as staged:
   program wrote meanwhile (`MapChangedError`). A writer that fails once it has
   the staged map fails the session: even if its error is caught, nothing is
   written when the session ends (`RuntimeError`, from that error), since the
-  staged map may hold part of that write. A session that wrote nothing leaves
-  the map as it is; one that did writes the staged map through a fresh file,
+  staged map may hold part of that write. A session whose staged map is as it
+  was copied (inode, size, times of modification and change) leaves the map as
+  it is, whatever ran; one that did writes the staged map through a fresh file,
   so the map does not grow, whatever its writers replaced. A writer's history
   (`reassign`'s `source`) names the session's map, never the staged path.
 - `staged_edit(uri, output=PATH)` copies the map to a new file instead, an
   entry of a `.mmetacool` as a standalone `.metacool` (refused if `PATH`
   exists, unless `force=True`; a link at `PATH` is replaced, not followed). It
-  holds the lock of `PATH` (`PATH.lock`), stages beside `PATH`, and takes no
-  lock of the map, which it only reads: a holder of the map's lock does not
+  holds the lock of `PATH` (`PATH.lock`, the lock `metacooler.lock(PATH,
+  follow_symlinks=False)` takes: a link at `PATH` is not followed), stages
+  beside `PATH`, and takes no lock of the map, which it only reads: a holder of the map's lock does not
   block it, and the map's directory need not be writable. A write of the map
   or of `PATH` from the session's thread is refused while it runs.
 - `planned=mc` refuses a session on a map that changed since `mc` was opened;

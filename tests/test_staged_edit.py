@@ -1095,3 +1095,155 @@ class TestRecordedPaths:
         history = MetaCooler(tiny_metacooler).metadata["reassign"]
         assert history[-1]["source"] == tiny_metacooler.name
         assert staging.recorded_uri(tiny_metacooler) == str(tiny_metacooler)
+
+
+# ---------------------------------------------------------------------------
+# The lock of a path itself; an output that is the map; what counts as written
+# ---------------------------------------------------------------------------
+class TestTheLockOfAPathItself:
+    """``lock(path, follow_symlinks=False)``: the lock of an output that is a
+    symbolic link, which is replaced, not followed."""
+
+    @pytest.mark.usefixtures("holder")
+    def test_a_link_to_a_map_another_process_holds(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        before = tiny_metacooler.read_bytes()
+        out = tmp_path / "out" / "map.metacool"
+        out.parent.mkdir()
+        out.symlink_to(tiny_metacooler)
+        with pytest.raises(MapLockedError, match="test holder"), lock(out):
+            pass  # the target's lock
+        with lock(out, follow_symlinks=False) as lock_file:
+            assert lock_file == lock_path(out, follow_symlinks=False)
+            assert lock_file == out.with_name("map.metacool.lock")
+            with staged_edit(tiny_metacooler, output=out, force=True) as staged:
+                _store(staged)
+            assert lock_file.exists()  # the outer block's, still
+        assert not out.is_symlink()
+        assert "w" in MetaCooler(out).bins()[:].columns
+        assert tiny_metacooler.read_bytes() == before
+        assert _left_beside(out) == []
+
+    def test_a_dangling_link(self, tiny_metacooler: Path, tmp_path: Path):
+        out = tmp_path / "out" / "map.metacool"
+        out.parent.mkdir()
+        out.symlink_to(tmp_path / "gone" / "map.metacool")
+        with pytest.raises(MapLockError), lock(out):
+            pass  # beside a target whose directory is gone
+        with (
+            lock(out, follow_symlinks=False),
+            staged_edit(tiny_metacooler, output=out, force=True) as staged,
+        ):
+            _store(staged)
+        assert not out.is_symlink()
+        validate(out, full=True)
+        assert _left_beside(out) == []
+
+    def test_re_entered_by_the_session(self, tiny_metacooler: Path, tmp_path: Path):
+        out = tmp_path / "edited.metacool"
+        with lock(out, follow_symlinks=False) as held:
+            run = json.loads(held.read_text())["uuid"]
+            with staged_edit(tiny_metacooler, output=out) as staged:
+                assert Path(staged).parent.name == f".edited.metacool.{run}.1.d"
+                assert holds_lock(out, follow_symlinks=False)
+                _store(staged)
+            assert held.exists()
+        assert not held.exists()
+        assert "w" in MetaCooler(out).bins()[:].columns
+
+
+class TestAnOutputThatIsTheMap:
+    def test_a_link_to_the_map_is_replaced(self, tiny_metacooler: Path, tmp_path: Path):
+        before = tiny_metacooler.read_bytes()
+        out = tmp_path / "link.metacool"
+        out.symlink_to(tiny_metacooler)
+        with staged_edit(tiny_metacooler, output=out, force=True) as staged:
+            _store(staged)
+        assert not out.is_symlink()
+        assert "w" in MetaCooler(out).bins()[:].columns
+        assert tiny_metacooler.read_bytes() == before
+
+    def test_the_maps_own_file_is_refused(self, tiny_metacooler: Path, tmp_path: Path):
+        hard = tmp_path / "hard.metacool"
+        os.link(tiny_metacooler, hard)
+        directory = tmp_path / "directory-link"
+        directory.symlink_to(tiny_metacooler.parent)
+        for output in (
+            tiny_metacooler,
+            f"{tiny_metacooler.parent}/./{tiny_metacooler.name}",
+            directory / tiny_metacooler.name,
+            hard,
+        ):
+            with (
+                pytest.raises(ValueError, match="is the file of the map edited"),
+                staged_edit(tiny_metacooler, output=output, force=True),
+            ):
+                pass
+        assert _left_beside(tiny_metacooler) == []
+
+
+def _assignment(tmp_path: Path) -> Path:
+    table = tmp_path / "bins.tsv"
+    table.write_text(
+        "contig_name\tgenome_name\ncontig_A\tMAG_1\ncontig_B\tMAG_1\n"
+        "contig_C\tMAG_2\ncontig_D\tMAG_2\n"
+    )
+    return table
+
+
+class TestWhatIsWritten:
+    """A session in place writes its map back when the staged file changed --
+    however it changed -- and only then."""
+
+    def test_a_reassignment_into_the_staged_map(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        with staged_edit(tiny_metacooler) as staged:
+            reassign(tiny_metacooler, _assignment(tmp_path), output=staged, force=True)
+        mc = MetaCooler(tiny_metacooler)
+        genome = dict(zip(mc.contigs["name"], mc.contigs["genome_id"], strict=True))
+        assert mc.genomes["name"][genome["contig_D"]] == "MAG_2"
+        assert mc.metadata["reassign"][-1]["source"] == str(tiny_metacooler)
+
+    def test_a_raw_write_as_soon_as_the_copy_is_made(self, tiny_metacooler: Path):
+        with staged_edit(tiny_metacooler) as staged, h5py.File(staged, "r+") as f:
+            f.attrs["note"] = "written"
+        with h5py.File(tiny_metacooler, "r") as f:
+            assert f.attrs["note"] == "written"
+
+    def test_a_writer_with_nothing_to_write(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        _annotate(tiny_metacooler, tmp_path)
+        inode = tiny_metacooler.stat().st_ino
+        with staged_edit(tiny_metacooler) as staged:
+            _annotate(staged, tmp_path)  # the values it holds already
+        assert tiny_metacooler.stat().st_ino == inode
+
+    @pytest.mark.parametrize("where", ["in place", "to an output", "an entry out"])
+    def test_metators_session(
+        self, tiny_metacooler: Path, tiny_mmetacool: Path, tmp_path: Path, where
+    ):
+        src = (
+            f"{tiny_mmetacool}::entries/entry1"
+            if where == "an entry out"
+            else str(tiny_metacooler)
+        )
+        output = None if where == "in place" else tmp_path / "out.metacool"
+        mc = MetaCooler(src)
+        before = mc.store.read_bytes()
+        with staged_edit(src, output=output, planned=mc) as staged:
+            reassign(src, _assignment(tmp_path), output=staged, force=True)
+            _annotate(staged, tmp_path)
+            _store(staged)
+            write_clusters(staged, *_rounds(staged))
+        result = output or src
+        validate(result, full=True)
+        written = MetaCooler(result)
+        assert written.metadata["reassign"][-1]["source"] == src
+        assert "coverage" in written.contigs.columns
+        assert "w" in written.bins()[:].columns
+        assert [r["name"] for r in written.cluster_rounds] == ["r1"]
+        if output is not None:  # the map was only read
+            assert mc.store.read_bytes() == before

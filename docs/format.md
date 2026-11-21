@@ -503,8 +503,9 @@ staged copy beside it:
   into it directly — no copy, no validation and no lock of its own — and the
   session validates it once and writes it through a fresh file once (see
   [Several edits at once](cli.md#staged-edit)), so the map does not grow
-  whatever its writers replaced; a session that wrote nothing leaves the map
-  as it is. A writer that records a map (`reassign`'s history, `binnify`'s)
+  whatever its writers replaced; a session whose staged map is as it was
+  copied — its inode, size, and times of modification and change — leaves the
+  map as it is, whatever ran. A writer that records a map (`reassign`'s history, `binnify`'s)
   names the session's map — the map edited, an entry's URI included, or the
   map copied out — never the staged path. The staged map's own lock refuses it to any other
   process, a forked child included; another thread is refused it too, and a
@@ -514,7 +515,8 @@ staged copy beside it:
   may hold part of that write. With `output=PATH` the edited map goes to
   `PATH` instead, an entry of a `.mmetacool` as a standalone `.metacool`: the
   session then holds `PATH`'s lock (`PATH.lock`, beside the path itself: a
-  link there is replaced) and stages beside `PATH` — so that whoever takes
+  link there is replaced; the lock `metacooler.lock(PATH,
+  follow_symlinks=False)` takes, which the session re-enters) and stages beside `PATH` — so that whoever takes
   that lock next removes what a killed session left there —, and takes no
   lock of the map, which it only reads: its copy is checked untorn. A write of
   the map copied out, or of `PATH`, from the session's thread is refused.
