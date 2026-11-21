@@ -2063,8 +2063,7 @@ class TestOneFileOutputs:
             copies = self._copies(m)
             self._per_level(m)
             zoomify(tiny_metacooler, tmp_path / "reference.mmetacool", levels=3)
-            # The old cost: per level, a copy and the fresh file it went through.
-            assert len(copies) == 4
+            assert len(copies) == 2  # the old cost: a copy per level
         copies = self._copies(monkeypatch)
         out = tmp_path / "pyramid.mmetacool"
         zoomify(tiny_metacooler, out, levels=3)
@@ -2117,7 +2116,7 @@ class TestOneFileOutputs:
                 cli, [*args, str(tmp_path / "reference.mmetacool")]
             )
             assert result.exit_code == 0, result.output
-            assert len(copies) == 4
+            assert len(copies) == 2
         copies = self._copies(monkeypatch)
         out = tmp_path / "stacked.mmetacool"
         result = CliRunner().invoke(cli, [*args, str(out)])

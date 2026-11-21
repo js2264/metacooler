@@ -716,13 +716,22 @@ def check_output_path(
             stage their output and rename it over *path* at the end, so a run
             that fails does not also destroy the previous result.
 
+    An output that an edit session of this thread edits, copies out or
+    writes is refused (its staged map is not), and an existing output is
+    removed under its lock (:func:`metacooler.io.staging.writing_output`), so
+    that a file another writer is writing is not removed under it.
+
     Raises:
-        ValueError: If *path* is the same file as one of *inputs*.
+        ValueError: If *path* is the same file as one of *inputs*, or the map
+            or the output of an edit session of this thread.
         FileExistsError: If *path* exists and *force* is False.
         IsADirectoryError: If *path* exists and is a directory.
     """
+    from metacooler.io.staging import lock, refuse_a_session_output
+
     path = Path(path)
     _refuse_input_as_output(path, inputs)
+    refuse_a_session_output(path)
     if not path.exists():
         return
     if path.is_dir():
@@ -732,7 +741,8 @@ def check_output_path(
             f"Output file {str(path)!r} already exists. Use --force to overwrite."
         )
     if not defer_removal:
-        path.unlink()
+        with lock(path, follow_symlinks=False):
+            path.unlink()
 
 
 def _refuse_input_as_output(path: Path, inputs: Iterable[str | Path | None]) -> None:

@@ -838,8 +838,19 @@ def _write_in_place(
             logger.info("%s already holds these values; nothing to write.", edit.uri)
     if not changed:
         return
+    # What a weight may depend on: the /contigs columns written.
+    touches = {
+        f"contigs/{column}"
+        for edit in changed
+        if "contigs" in edit.tables
+        for kind in ("added", "replaced", "dropped")
+        for column in getattr(edit.tables["contigs"], kind)
+    }
     with staged_inplace(
-        file_path, validate_groups=[edit.group for edit in changed], planned=planned
+        file_path,
+        validate_groups=[edit.group for edit in changed],
+        planned=planned,
+        touches=touches,
     ) as staged:
         for edit in changed:
             _write_map(staged, edit.group, edit, metadata, history)

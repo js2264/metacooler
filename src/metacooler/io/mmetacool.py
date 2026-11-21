@@ -7,7 +7,7 @@ from pathlib import Path
 
 import h5py
 
-from metacooler.io.staging import check_unchanged, staged_inplace
+from metacooler.io.staging import check_unchanged, staged_inplace, writing_output
 from metacooler.schema import (
     MMETACOOLER_FORMAT,
     MMETACOOLER_FORMAT_VERSION,
@@ -164,7 +164,7 @@ def create_mmetacool(
             raise FileNotFoundError(f"Source file not found for entry {name!r}: {src}")
         _require_metacool_source(str(src))
 
-    with h5py.File(output, "w") as dst:
+    with writing_output(output), h5py.File(output, "w") as dst:
         init_mmetacool_attrs(dst)
         for name, src in entries.items():
             logger.info("Adding entry %r from %s", name, src)

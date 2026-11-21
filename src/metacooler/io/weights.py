@@ -417,7 +417,7 @@ def store_weights(
         )
     values = np.asarray(weights, dtype=np.float64)
     from metacooler.api import MetaCooler
-    from metacooler.io.staging import lock, staged_inplace
+    from metacooler.io.staging import check_source_depends, lock, staged_inplace
     from metacooler.uri import parse_uri
 
     file_path, group = parse_uri(str(uri))
@@ -439,9 +439,12 @@ def store_weights(
                 "weights under another name, or replace that column with "
                 "force=True."
             )
+        # In an edit session: a source read before a write of the session
+        # that changed what the weight depends on is not current.
+        check_source_depends(uri, source, entries)
         planned = [mc] if source is None else [mc, source]
         with (
-            staged_inplace(uri, planned=planned) as staged,
+            staged_inplace(uri, planned=planned, touches=()) as staged,
             h5py.File(staged, "r+") as f,
         ):
             key = group.strip("/")

@@ -2995,12 +2995,30 @@ def _staged_output(
             On failure their partial files are kept or removed like
             *final*'s.
 
+    The output's lock is held throughout
+    (:func:`metacooler.io.staging.writing_output`).
+
     Yields:
         The temporary path to write to.
 
     Raises:
-        ValueError: If a temp path is one of *inputs*.
+        ValueError: If a temp path is one of *inputs*, or *final* is the map,
+            or the output, of an edit session of this thread.
+        MapLockedError: If another writer holds the output's lock.
     """
+    from metacooler.io.staging import writing_output
+
+    with writing_output(final):
+        yield from _staged_output_locked(final, keep_partial, inputs, companions)
+
+
+def _staged_output_locked(
+    final: Path,
+    keep_partial: bool,
+    inputs: Iterable[str | Path | None],
+    companions: Sequence[Path],
+) -> Generator[Path, None, None]:
+    """:func:`_staged_output`, under the output's lock."""
     tmp = _partial_path(final)
     staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
     for partial, _ in staged:

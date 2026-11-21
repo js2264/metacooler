@@ -83,23 +83,23 @@ def binnify(
         FileExistsError: If *output* exists and *force* is False.
     """
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import writing_output
 
     output = Path(output)
-    check_output_path(output, force=force, inputs=[uri])
-
     if binsize <= 0:
         raise ValueError(f"binsize must be a positive integer, got {binsize}.")
-
-    mc = MetaCooler(uri)
-    _binnify(
-        mc,
-        output,
-        binsize,
-        level=level,
-        chunksize=chunksize,
-        source_uri=uri,
-        source_metadata=mc.metadata,
-    )
+    with writing_output(output):
+        check_output_path(output, force=force, inputs=[uri])
+        mc = MetaCooler(uri)
+        _binnify(
+            mc,
+            output,
+            binsize,
+            level=level,
+            chunksize=chunksize,
+            source_uri=uri,
+            source_metadata=mc.metadata,
+        )
 
 
 def _binnify(

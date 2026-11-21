@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
@@ -130,8 +131,11 @@ class MetaCooler:
 
         if not self._store.exists():
             raise FileNotFoundError(f"File not found: {self._store}")
-        # The file as it is opened: a read once it is replaced or written is
-        # refused (see _check_unchanged).
+        # When, and as what, the file is opened: a read once it is replaced or
+        # written is refused (see _check_unchanged), and, in an edit session,
+        # a map opened before a write of the session is no source of what
+        # that write changed (staging.check_source_depends).
+        self._opened = time.monotonic()
         self._state = file_state(self._store)
 
         if group_path != "/":
@@ -896,7 +900,8 @@ class MetaCooler:
             KeyError: If a name is not a contig of the map.
         """
         if "_clr" in self.__dict__:  # cooler already holds the name -> id dict
-            found = {name: self._clr._chromids.get(name) for name in names}
+            chromids = self._clr._chromids  # one check, not one per name
+            found = {name: chromids.get(name) for name in names}
         elif len(names) == 1:
             found = {names[0]: self._find_contig(names[0])}
         else:

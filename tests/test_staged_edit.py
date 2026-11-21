@@ -121,8 +121,7 @@ class TestOneCopy:
             # Nothing has replaced the map yet.
             assert tiny_metacooler.stat().st_ino == inode
             assert (len(copies), len(validations)) == (1, 0)
-        # The copy, then the fresh file it is written through when it ends.
-        assert (len(copies), len(validations)) == (2, 1)
+        assert (len(copies), len(validations)) == (1, 1)
         assert tiny_metacooler.stat().st_ino != inode
         assert not in_session(staged)
         mc = MetaCooler(tiny_metacooler)
@@ -401,7 +400,7 @@ class TestNested:
                 _store(again, name="b")
             # Nothing written yet: the outer session writes.
             assert "a" not in MetaCooler(tiny_metacooler).bins()[:].columns
-        assert len(copies) == 2  # the copy, and the fresh file of the install
+        assert len(copies) == 1
         assert {"a", "b"} <= set(MetaCooler(tiny_metacooler).bins()[:].columns)
 
     def test_other_nestings_are_refused(self, tiny_metacooler: Path, tmp_path: Path):
@@ -975,23 +974,38 @@ def _writes(staged: str, tmp_path: Path) -> None:
     reassign(staged, {"contig_D": "MAG_2"}, inplace=True, layout="keep")
 
 
-class TestFreshInstalls:
-    """A map edited again and again does not grow: every install writes the
-    staged map through a fresh file."""
+def _metators_session(path: Path, tmp_path: Path) -> None:
+    """metaTOR's step: the map reassigned into the staged map, then annotated,
+    weighted and given its rounds."""
+    with staged_edit(path, planned=MetaCooler(path)) as staged:
+        reassign(path, _assignment(tmp_path), output=staged, force=True)
+        _annotate(staged, tmp_path)
+        _store(staged)
+        write_clusters(staged, *_rounds(staged))
+
+
+class TestBoundedMaps:
+    """A map edited again and again does not grow: every staged map starts as
+    a fresh copy, so a map holds at most the space one edit, or one session,
+    replaced -- never what earlier ones did."""
 
     def test_sessions_in_a_row(self, tiny_metacooler: Path, tmp_path: Path):
         _dead_space(tiny_metacooler)
-        sizes = []
-        for _ in range(4):
-            with staged_edit(tiny_metacooler) as staged:
-                _writes(staged, tmp_path)
+        dead = []
+        for _ in range(6):
+            _metators_session(tiny_metacooler, tmp_path)
             size = tiny_metacooler.stat().st_size
-            assert size == _fresh_size(tiny_metacooler, tmp_path)
-            sizes.append(size)
-        # The same values each time: only the histories grow.
-        assert max(sizes) - min(sizes) < 8_192, sizes
+            dead.append(size - _fresh_size(tiny_metacooler, tmp_path))
+        # One session's rewritten tables, measured from a fresh copy.
+        compact = tmp_path / "compact.metacool"
+        staging.copy_fresh(tiny_metacooler, compact)
+        _metators_session(compact, tmp_path)
+        one_session = compact.stat().st_size - _fresh_size(compact, tmp_path)
+        assert dead[0] < 1_000_000  # the 4 MB left before are gone
+        assert max(dead) <= one_session + 8_192, (dead, one_session)
+        assert max(dead[1:]) - min(dead[1:]) <= 8_192, dead  # no growth
 
-    def test_the_fresh_file_holds_what_was_staged(
+    def test_the_installed_map_is_the_staged_map(
         self, tiny_metacooler: Path, tmp_path: Path
     ):
         with staged_edit(tiny_metacooler) as staged:
@@ -1007,34 +1021,33 @@ class TestFreshInstalls:
         for _ in range(3):
             _store(tiny_metacooler)
             sizes.append(tiny_metacooler.stat().st_size)
-            assert sizes[-1] == _fresh_size(tiny_metacooler, tmp_path)
-        assert len(set(sizes)) == 1
+        assert sizes[0] < 1_000_000
+        # Once the column exists, each write replaces it: the same size.
+        assert len(set(sizes[1:])) == 1, sizes
 
-    def test_an_output_session(self, tiny_mmetacool: Path, tmp_path: Path):
-        out = tmp_path / "entry1.metacool"
-        with staged_edit(f"{tiny_mmetacool}::entries/entry1", output=out) as staged:
+    def test_an_output_session(self, tiny_metacooler: Path, tmp_path: Path):
+        _dead_space(tiny_metacooler)
+        out = tmp_path / "out.metacool"
+        with staged_edit(tiny_metacooler, output=out) as staged:
             _writes(staged, tmp_path)
-        assert out.stat().st_size == _fresh_size(out, tmp_path)
+        assert out.stat().st_size < 1_000_000
 
     def test_a_relabelled_copy_carries_no_space_of_its_source(
         self, tiny_metacooler: Path, tmp_path: Path
     ):
         _dead_space(tiny_metacooler)
-        before = tiny_metacooler.stat().st_size
         out = tmp_path / "relabelled.metacool"
         reassign(tiny_metacooler, {"contig_D": "MAG_2"}, output=out, layout="keep")
         annotated = tmp_path / "annotated.metacool"
         table = tmp_path / "depth.tsv"
         table.write_text("contig_name\tdepth\ncontig_A\t3.5\n")
         metacooler.annotate(tiny_metacooler, contigs_table=table, output=annotated)
-        for written in (out, annotated):
-            assert written.stat().st_size < before - 3_000_000
-        # metaTOR's pattern: a new map written from another, installed fresh.
+        # metaTOR's pattern: a new map written from another.
         new = tmp_path / "new.metacool"
         with staged_inplace(new, copy=False) as staged:
             reassign(tiny_metacooler, {"contig_D": "MAG_2"}, output=staged)
-            _dead_space(staged)
-        assert new.stat().st_size == _fresh_size(new, tmp_path)
+        for written in (out, annotated, new):
+            assert written.stat().st_size < 1_000_000
 
 
 def _recorded(path: str | Path) -> list[str]:

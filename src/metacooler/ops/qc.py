@@ -140,8 +140,13 @@ def _qc(
                 "be coarser than the one 'create pairs' recorded.",
             )
         from metacooler.io.staging import staged_inplace
+        from metacooler.qc import QC_CONTIG_COLUMNS
 
-        with staged_inplace(mc.uri, planned=mc) as staged:
+        with staged_inplace(
+            mc.uri,
+            planned=mc,
+            touches=[f"contigs/{column}" for column in QC_CONTIG_COLUMNS],
+        ) as staged:
             store_qc(
                 staged,
                 summary,

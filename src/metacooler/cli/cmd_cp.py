@@ -103,7 +103,9 @@ def cmd_cp(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
         if not dst_path.exists():
             import h5py
 
-            with h5py.File(dst_path, "w") as f:
+            from metacooler.io.staging import writing_output
+
+            with writing_output(dst_path), h5py.File(dst_path, "w") as f:
                 init_mmetacool_attrs(f)
             click.echo(f"Initialised new mmetacool file: {dst_path}")
         dst_entries = list_entries(dst_path)

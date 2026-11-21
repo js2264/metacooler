@@ -750,6 +750,14 @@ def merge(
     if len(inputs) < 2:
         raise ValueError("At least two input files required for merge")
     _refuse_repeated_inputs(inputs)
+    from metacooler.io.staging import writing_output
+
+    with writing_output(output):
+        _merge_into(inputs, output)
+
+
+def _merge_into(inputs: list[str], output: str | Path) -> None:
+    """:func:`merge`, under the output's lock."""
     # cooler writes the output in "w" mode; refuse to truncate an input with it.
     check_output_path(output, force=True, inputs=inputs, defer_removal=True)
     # The inputs are read by path, by cooler too: checked unchanged at the end.

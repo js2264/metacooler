@@ -436,7 +436,7 @@ def write_clusters(
             contig_lengths,
         )
         with (
-            staged_inplace(uri, planned=mc) as staged,
+            staged_inplace(uri, planned=mc, touches=()) as staged,
             h5py.File(staged, "r+") as f,
         ):
             grp = f[key] if key else f
@@ -500,7 +500,7 @@ def drop_clusters(uri: str | Path) -> bool:
                 return False
         # Through a staged copy, validated in full, which replaces the map.
         with (
-            staged_inplace(uri, planned=mc) as staged,
+            staged_inplace(uri, planned=mc, touches=()) as staged,
             h5py.File(staged, "r+") as f,
         ):
             grp = f[key] if key else f

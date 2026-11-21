@@ -1597,7 +1597,16 @@ def reassign(
         # A staged file replaces the map once it validates (see
         # metacooler.io.staging): a copy of it, relabelled, or a new map with
         # the contigs re-grouped.
-        with staged_inplace(mc.uri, copy=not reorder, planned=mc) as staged:
+        # A relabelling changes the assignment, and the /contigs columns that
+        # count by it; a re-grouping, anything.
+        touches = (
+            None
+            if reorder
+            else ["genome_id", *(f"contigs/{c}" for c in QC_CONTIG_COLUMNS)]
+        )
+        with staged_inplace(
+            mc.uri, copy=not reorder, planned=mc, touches=touches
+        ) as staged:
             if reorder:
                 logger.info(
                     "Re-ordering %d contigs of %s into %r layout, in place: the "
