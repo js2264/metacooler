@@ -18,15 +18,7 @@ from metacooler.cli.main import MetaCoolURI, cli
 
 @cli.command(
     name="extract",
-    help="""
-    Extract a standard cool file for specific genome(s)/contig(s). Genome
-    and contig selection can be combined: the output will include
-    all contigs from selected genomes plus any directly selected contigs.
-    [cyan]--filter[/cyan] then narrows that selection (or the whole file, when
-    no name is given), e.g. [cyan]--filter 'genomes.length > 1Mb'[/cyan].
-    By default, a single merged cool file is written. With --split, one cool
-    file per genome is created.
-    """,
+    help="Extract a standard cool file for specific genome(s)/contig(s).",
 )
 @click.argument("metacool_path", type=MetaCoolURI(require_entry=True))
 @click.option(
@@ -48,7 +40,10 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=str,
     multiple=True,
     callback=parse_comma_list,
-    help="Contig name(s) to extract (comma-separated or repeated).",
+    help=(
+        "Contig name(s) to extract, on top of those of --genomes "
+        "(comma-separated or repeated)."
+    ),
 )
 @filter_option
 @click.option(
