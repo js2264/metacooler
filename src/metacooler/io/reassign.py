@@ -79,7 +79,7 @@ from metacooler.io.create import (
     _staged_output,
     _stream_remapped_pixels,
 )
-from metacooler.io.staging import map_output, staged_inplace
+from metacooler.io.staging import locked_when_inplace, map_output, staged_inplace
 from metacooler.io.weights import (
     drop_stale_weights,
     restore_weight_attrs,
@@ -102,6 +102,7 @@ from metacooler.qc import (
     unbinned_genome_id,
 )
 from metacooler.schema import (
+    CLUSTERS_GROUP,
     CUSTOM_ORDERING,
     DEFAULT_CHUNKSIZE,
     GENOME_GROUPED_ORDERINGS,
@@ -677,8 +678,12 @@ def _materialise_copy(mc: MetaCooler, target: Path) -> None:
         target: Path to write; must not exist.
     """
     group = mc._group_path.strip("/")
+    # The map read is the map copied: a file replaced or written since is
+    # refused (MapChangedError), before and after the copy.
+    mc._check_unchanged()
     if not group:
         shutil.copy2(mc.store, target)
+        mc._check_unchanged()
         return
     with h5py.File(mc.store, "r") as src, h5py.File(target, "w") as dst:
         node = src[group]
@@ -692,6 +697,7 @@ def _materialise_copy(mc: MetaCooler, target: Path) -> None:
                 src.copy(node[key], dst, name=key)
         for key, value in node.attrs.items():
             dst.attrs[key] = value
+    mc._check_unchanged()
 
 
 #: Where the relabel path builds the new ``/genomes``, ``/contigs`` and
@@ -758,10 +764,9 @@ def _write_relabelled(
     group — dtype, chunks, filters.  So the tables on disk are the ones the
     regroup path would write.
 
-    Both tables and ``genome_offset`` are built in a scratch group, so a
-    failure while building them leaves the map as it was; they are then
-    swapped in, with the attributes, while a SIGINT is held, so Ctrl-C does
-    not leave a map halfway between two assignments.
+    Both tables and ``genome_offset`` are built in a scratch group, then
+    swapped in, with the attributes.  *path* is a staged copy (in place) or the
+    staged output: a failure, Ctrl-C included, leaves the map as it was.
 
     Args:
         path: File to modify.
@@ -831,6 +836,89 @@ def _write_relabelled(
         if assignment_changed:
             drop_stale_weights(grp["bins"], assignment=True, why=_ASSIGNMENT)
         del grp[_SCRATCH]
+
+
+#: What a re-grouping writes: the root members, the root attributes (cooler's
+#: and metacooler's; a legacy ``assembly-name`` is carried as
+#: ``genome-assembly``), the pixel columns and the index datasets.
+_REGROUP_ROOT_MEMBERS = frozenset(
+    {"genomes", "contigs", "bins", "pixels", "indexes", "chroms", CLUSTERS_GROUP}
+)
+_REGROUP_ROOT_ATTRS = frozenset(
+    {
+        "assembly-name",
+        "bin-size",
+        "bin-type",
+        "contig-ordering",
+        "creation-date",
+        "format",
+        "format-url",
+        "format-version",
+        "generated-by",
+        "genome-assembly",
+        "metacooler-format",
+        "metacooler-format-url",
+        "metacooler-format-version",
+        "metadata",
+        "nbins",
+        "nchroms",
+        "ngenomes",
+        "nnz",
+        "storage-mode",
+        "sum",
+    }
+)
+_REGROUP_PIXEL_COLUMNS = frozenset({"bin1_id", "bin2_id", "count"})
+_REGROUP_INDEXES = frozenset({"chrom_offset", "bin1_offset", "genome_offset"})
+
+
+def _not_carried_by_regroup(mc: MetaCooler) -> list[str]:
+    """What a re-grouping of the map would not carry, each named.
+
+    :func:`_rewrite_regrouped` writes the map anew from its tables: the
+    columns of ``/genomes``, ``/contigs`` and ``/bins`` (the weights with their
+    attributes), the counts of ``/pixels``, the clustering rounds and the
+    ``metadata``.  Anything else the map holds -- another group or dataset at
+    its root, a root attribute, another pixel column or index, an attribute of
+    a table or of one of its columns (but a weight's) -- is not written.
+    """
+    from metacooler.io.weights import weight_columns
+
+    dropped: list[str] = []
+    with mc.open() as grp:
+        dropped += [f"/{key}" for key in grp if key not in _REGROUP_ROOT_MEMBERS]
+        dropped += [
+            f"the root attribute {key!r}"
+            for key in grp.attrs
+            if key not in _REGROUP_ROOT_ATTRS
+        ]
+        dropped += [
+            f"/pixels/{key}"
+            for key in grp["pixels"]
+            if key not in _REGROUP_PIXEL_COLUMNS
+        ]
+        dropped += [
+            f"/indexes/{key}" for key in grp["indexes"] if key not in _REGROUP_INDEXES
+        ]
+        weights = set(weight_columns(grp["bins"]))
+        for table in ("genomes", "contigs", "bins", "pixels", "indexes"):
+            node = grp[table]
+            if node.attrs:
+                dropped.append(
+                    f"the attributes of /{table} ({', '.join(sorted(node.attrs))})"
+                )
+            for key in node:
+                column = node[key]
+                if (
+                    isinstance(column, h5py.Dataset)
+                    and column.attrs
+                    and not (table == "bins" and key in weights)
+                ):
+                    dropped.append(
+                        f"the attributes of /{table}/{key} "
+                        f"({', '.join(sorted(column.attrs))})"
+                    )
+    return dropped
 
 
 def _rewrite_regrouped(
@@ -1112,6 +1200,7 @@ def _with_columns(
     return frame.assign(**{column: table[column].to_numpy() for column in columns})
 
 
+@locked_when_inplace
 def reassign(
     uri: str | Path,
     contig_genome_map: str | Path | dict[str, str] | None = None,
@@ -1182,9 +1271,14 @@ def reassign(
             with that strategy.  Re-ordering costs a full pixel rewrite and is
             skipped automatically when the strategy reproduces the order the
             file already has.
-        inplace: Modify *uri* itself instead of writing a new file.  Only
-            possible when no re-ordering is required, since permuting the bins
-            means rewriting the pixel table.
+        inplace: Modify *uri* itself instead of writing a new file: under the
+            map's lock, taken before the map is read, through a staged copy
+            that replaces it once it validates (see
+            :mod:`metacooler.io.staging`).  A re-ordering writes the new map
+            beside the old one; it is refused for an entry of a collection, and
+            for a map holding what a re-ordering does not carry (extra groups,
+            root attributes, pixel columns or attributes of the tables), which
+            it names.
         metadata: Extra keys to merge into the output's ``metadata`` attribute.
             A ``commands`` list is appended to the carried provenance rather
             than replacing it.
@@ -1204,18 +1298,23 @@ def reassign(
             ``<output>.partial`` behind for inspection, as the default does
             (logged at ERROR).  ``False`` removes it instead, whatever stopped
             the run (``KeyboardInterrupt`` included), and logs that at INFO.
-            The output path itself is never written by a failed run.  Unused
-            with *inplace*, which stages nothing.
+            The output path itself is never written by a failed run.  With
+            *inplace*, a failure always removes the staged copy.
 
     Raises:
         ValueError: If the output arguments are inconsistent, if *output* is
-            one of the inputs, if *inplace* is asked for a reassignment that
-            requires re-ordering, if re-ordering is asked of a map whose
+            one of the inputs or names a group inside a file, if *inplace* is
+            asked to re-order an entry of a collection or a map holding what a
+            re-ordering does not carry, if re-ordering is asked of a map whose
             storage mode is not ``symmetric-upper``, if the table names no
             contig of this file, if neither or both of a table and a *round*
             are given, or if the map has no such round, the round holds no
             contig, or a contig is in two of its clusters.
         FileExistsError: If *output* exists and *force* is not set.
+        MapLockedError: With *inplace*, if another process or thread holds the
+            map's lock.
+        MapChangedError: With *inplace*, if the map changed while it was read.
+        PermissionError: With *inplace*, if the map is read-only.
     """
     from metacooler.api import MetaCooler
 
@@ -1336,12 +1435,31 @@ def reassign(
         )
     if reorder and inplace and mc._group_path.strip("/"):
         raise ValueError(
-            f"inplace cannot re-group an entry of a collection: laying the "
-            f"contigs out as {strategy!r} rewrites the whole map, which is "
-            "written as a file of its own. Write a new file with output=..., "
-            "or pass layout='keep' to relabel the entry in place (the genomes' "
-            "bins then stop being contiguous)."
+            f"An in-place reassignment cannot re-group an entry of a collection: "
+            f"laying the contigs out as {strategy!r} rewrites the whole map, "
+            "which is written as a file of its own. Write a new file (-o, or "
+            "output=...), or relabel the entry in place without re-ordering "
+            "(--layout keep, or layout='keep'): the genomes' bins then stop "
+            "being contiguous."
         )
+    if reorder:
+        dropped = _not_carried_by_regroup(mc)
+        if dropped and inplace:
+            raise ValueError(
+                f"An in-place reassignment of {uri} would re-group its contigs, "
+                f"which rewrites the map from its tables and drops what it "
+                f"holds besides: {'; '.join(dropped)}. Write a new file (-o, or "
+                "output=...), or relabel in place without re-ordering "
+                "(--layout keep, or layout='keep'), which keeps everything."
+            )
+        if dropped:
+            logger.warning(
+                "Re-grouping the contigs of %s writes %s from its tables, "
+                "without what it holds besides: %s.",
+                uri,
+                output,
+                "; ".join(dropped),
+            )
 
     restated = {before[c] for c in report.moved} | {assignment[c] for c in report.moved}
     if genomes_table is not None:
@@ -1434,7 +1552,7 @@ def reassign(
         # A staged file replaces the map once it validates (see
         # metacooler.io.staging): a copy of it, relabelled, or a new map with
         # the contigs re-grouped.
-        with staged_inplace(mc.uri, copy=not reorder) as staged:
+        with staged_inplace(mc.uri, copy=not reorder, planned=mc) as staged:
             if reorder:
                 logger.info(
                     "Re-ordering %d contigs of %s into %r layout, in place: the "
@@ -1540,9 +1658,7 @@ def _insert_n_bins(
         contigs: Contigs table in the file's own row order — the precondition
             that lets ``chrom_offset`` be read positionally.
     """
-    with h5py.File(mc.store, "r") as f:
-        key = mc._group_path.strip("/")
-        grp = f[key] if key else f
+    with mc.open() as grp:
         chrom_offset = np.asarray(grp["indexes"]["chrom_offset"][:], dtype=np.int64)
     bins_per_contig = np.diff(chrom_offset)
     counts = np.bincount(

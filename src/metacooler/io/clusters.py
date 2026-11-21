@@ -433,7 +433,10 @@ def write_clusters(
             contigs["name"].astype(str).to_numpy(),
             contig_lengths,
         )
-        with staged_inplace(uri) as staged, h5py.File(staged, "r+") as f:
+        with (
+            staged_inplace(uri, planned=mc) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
             grp = f[key] if key else f
             if _SCRATCH in grp:
                 del grp[_SCRATCH]
@@ -472,25 +475,26 @@ def drop_clusters(uri: str | Path) -> bool:
         ValueError: If *uri* is not a ``.metacool`` map (a plain cooler).
     """
     from metacooler.api import MetaCooler
-
-    # Resolves the URI without checking the map: drop_clusters is what
-    # removes a /clusters group that keeps it from opening.
-    MetaCooler(uri, validate=False)
-    if not is_metacooler(uri):
-        raise ValueError(
-            f"{uri} is not a .metacool map: its 'clusters' group, if any, is "
-            "not metacooler's, and is left alone."
-        )
     from metacooler.io.staging import lock, staged_inplace
 
     path, key = _map_group(uri)
     with lock(path):
-        with h5py.File(path, "r") as f:
-            grp = f[key] if key else f
+        # Resolves the URI without checking the map: drop_clusters is what
+        # removes a /clusters group that keeps it from opening.
+        mc = MetaCooler(uri, validate=False)
+        if not is_metacooler(uri):
+            raise ValueError(
+                f"{uri} is not a .metacool map: its 'clusters' group, if any, is "
+                "not metacooler's, and is left alone."
+            )
+        with mc.open() as grp:
             if CLUSTERS_GROUP not in grp:
                 return False
         # Through a staged copy, validated in full, which replaces the map.
-        with staged_inplace(uri) as staged, h5py.File(staged, "r+") as f:
+        with (
+            staged_inplace(uri, planned=mc) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
             grp = f[key] if key else f
             del grp[CLUSTERS_GROUP]
     return True

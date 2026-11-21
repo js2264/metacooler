@@ -4,25 +4,33 @@
 
 ### Added
 
-- **Locked, staged in-place writes.** `annotate --inplace`, `reassign
-  --inplace`, `normalize`, `store_weights`, `write_clusters` and
-  `drop_clusters` no longer write the map itself: under its lock, each writes a
-  fresh copy beside it, validates it in full, and renames it over the map, so
-  the map is whole whatever stops the edit (an error, a failed validation,
-  `KeyboardInterrupt`, `SystemExit`) and does not grow with every edit. The map
-  keeps its mode, and a symbolic link is replaced, not its target. The lock,
-  `<map>.lock`, names its holder (pid, host, start, command, uuid): a live one
-  is refused by name, a dead one of the same host is taken over with a
-  warning, and one of another host is never broken. Python:
-  `metacooler.lock(path)` holds a map's lock for a whole run (re-entrant for
-  its holder, so the writers called meanwhile take it on), and refuses with
-  `metacooler.MapLockedError` (a `MapLockError`, an `OSError`). See
+- **Locked, staged in-place writes.** Every edit of a map in place — `annotate
+  --inplace`, `reassign --inplace`, `normalize`, `metadata add|remove|load`,
+  `qc --store`, the collection commands `cp`, `mv` and `rm`, and from Python
+  `store_weights`, `write_clusters`, `drop_clusters` and the entry functions —
+  takes the map's lock before it reads the map, writes a fresh copy in a
+  private directory beside it, validates it in full, and renames it over the
+  map: the map is whole whatever stops the edit (an error, a failed
+  validation, `KeyboardInterrupt`, `SystemExit`) and does not grow with every
+  edit. The map keeps its mode and, where the process may set them, its owner
+  and group; a symbolic link is replaced, not its target. The lock,
+  `<map>.lock`, names its holder (pid, host, boot id, process start, command,
+  uuid): a live holder — another process, or another thread — is refused by
+  name; the lock of a process of this host that is gone (`kill -9`, or a
+  scheduler's `SIGTERM`: metacooler sets no signal handler) is taken over by
+  one process exactly, under a guard, with what that process staged; a lock
+  of another host is never broken. Python: `metacooler.lock(path)` holds a
+  map's lock for a whole run (re-entrant for its thread, so the writers called
+  meanwhile take it on) and refuses with `metacooler.MapLockedError` (a
+  `MapLockError`, an `OSError`); `store_weights(source=mc)` refuses weights
+  computed from a map that changed since. See
   [In-place writes](format.md#in-place-writes).
-- **A read across a replacement is refused.** `MetaCooler` checks, at every
-  open of its file, cooler's included, that the file is still the one it
-  opened, and raises `metacooler.MapChangedError` (an `OSError`) once it was
-  replaced or written by someone else: a read that spanned a replacement mixed
-  the bins of one map with the pixels of another.
+- **A read across a replacement is refused.** `MetaCooler` checks, before and
+  after every read — each chunk of pixels cooler reads, `info`, each table —
+  that its file is still the one it opened, and raises
+  `metacooler.MapChangedError` (an `OSError`) once it was replaced or written
+  by someone else: a read that spanned a replacement mixed the bins of one map
+  with the pixels of another.
 - **`normalize`** (alias `normalise`): normalization weights for metagenomic
   Hi-C, stored as a column of `/bins` the way `cooler balance` stores one —
   multiplicative, `NaN` for a masked bin, the pixels untouched — so cooler,
@@ -95,16 +103,29 @@
 
 ### Changed
 
+- **Breaking: a `MetaCooler` held across an in-place edit stops reading.**
+  It raises `MapChangedError` at its next read once the map is replaced or
+  written by another writer (or another `MetaCooler`): open the map again.
+  `MetaCooler.open("r+")` now takes the map's lock, and refuses a map changed
+  since it was opened; it still writes the file itself, unstaged.
+- **Breaking: in-place edits cost a copy of the map.** Every in-place edit
+  (see Added) copies the map, so it needs a writable directory, room for a
+  second copy of the map beside it, and the time of the copy and of a full
+  validation: `annotate --inplace` on a large map took seconds and now takes
+  as long as a copy. A map without write permission is refused (it was
+  refused by the edit in place, and would otherwise have been replaced in a
+  writable directory).
 - **`reassign --inplace` re-groups too**: a reassignment that has to move
   contigs to keep the genomes contiguous wrote only to a new file (`-o`); in
-  place, it now writes the new map beside the old one and replaces it. Not for
-  an entry of a collection, which is refused as before. An in-place edit now
-  costs a copy of the file (it used to edit a few datasets), the price of
-  never leaving a broken map; a Ctrl-C during a relabelling leaves the map as
-  it was, where the swap of the tables used to finish first. metacooler sets no
-  signal handler. An output given as a URI naming a group inside a file
-  (`out.mmetacool::entries/x`) is refused by `reassign` and `annotate`; `file::/`
-  is the file.
+  place, it now writes the new map beside the old one and replaces it. It is
+  refused, naming them, when the map holds what a re-grouping does not carry
+  (another group or dataset at its root, a root attribute, another pixel
+  column or index, attributes of a table or of its columns but a weight's),
+  and with `-o` a warning names them; it is refused for an entry of a
+  collection, as before. A Ctrl-C during a relabelling leaves the map as it
+  was, where the swap of the tables used to finish first. An output given as
+  a URI naming a group inside a file (`out.mmetacool::entries/x`) is refused by
+  `reassign` and `annotate`; `file::/` is the file.
 - **The `metator` alias of `--contigs-format` reads `Name,Final_cluster`**,
   MetaTOR 2.0's column for a contig's final cluster in `contig_data_final.txt`
   (as `metator dump` writes it), so that a dumped table feeds `create` and

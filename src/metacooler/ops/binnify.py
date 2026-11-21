@@ -219,6 +219,9 @@ def _binnify(
         # default never fires; `or` is what actually supplies the fallback.
         contig_ordering=mc.info.get("ordering") or "genome-then-alpha",
     )
+    # The rounds were copied from the source by path, after its pixels were
+    # read: the map read is the map copied (MapChangedError otherwise).
+    mc._check_unchanged()
 
     logger.info(
         "Re-binned %s → %s: binsize=%d, %d bins",

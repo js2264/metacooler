@@ -6,14 +6,14 @@ import contextlib
 import functools
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import cooler
 import h5py
 import numpy as np
 import pandas as pd
 
-from metacooler.io.staging import MapChangedError, StateCheckedPath, file_state
+from metacooler.io.staging import MapChangedError, file_state
 from metacooler.qc import unbinned_genome_id
 from metacooler.schema import (
     CLUSTER_TABLE_COLUMNS,
@@ -131,13 +131,15 @@ class MetaCooler:
         ``shape`` never need; so an open, and a genome or contig query, does not
         pay for it.
 
-        cooler opens the file again for every chunk it reads, through its
-        ``store``: that is a path that checks, at each open, that the file is
-        still the one this map opened (:meth:`_check_unchanged`).
+        Every read through it -- a selector's slice or fetch, ``info``,
+        ``extent``, ... -- checks before and after that the file is still the
+        one this map opened (:meth:`_check_unchanged`): cooler opens the file
+        again for every chunk it reads.
         """
         self._check_unchanged()
-        clr = _open_cooler(self._cooler_uri, self._validate_on_open)
-        clr.store = cast(str, StateCheckedPath(clr.filename, self._check_unchanged))
+        clr = _open_cooler(
+            self._cooler_uri, self._validate_on_open, self._check_unchanged
+        )
         self._check_unchanged()
         return clr
 
@@ -147,8 +149,10 @@ class MetaCooler:
         An in-place write replaces the file with a new one whose bins and
         pixels may be in another order, and metacooler reads a map a chunk at a
         time, opening its file for each: a read that spanned the replacement
-        mixed the bins of one map with the pixels of the other, silently.  A
-        write through this object's own :meth:`open` is not a change.
+        mixed the bins of one map with the pixels of the other, silently.
+        Every read checks before and after it (device, inode, size and
+        modification time, as at open).  A write through this object's own
+        :meth:`open` is not a change.
 
         Raises:
             MapChangedError: If the file is not the one this map opened, or
@@ -481,10 +485,14 @@ class MetaCooler:
             DataFrame indexed 0 … n_genomes-1 with one row per genome.
         """
         self._check_unchanged()
-        if self._group_path != "/":
-            grp = self._group_path.lstrip("/") + "/genomes"
-            return read_table(self._store, grp)
-        return read_table(self._store, "genomes")
+        key = (
+            self._group_path.lstrip("/") + "/genomes"
+            if self._group_path != "/"
+            else "genomes"
+        )
+        table = read_table(self._store, key)
+        self._check_unchanged()
+        return table
 
     @functools.cached_property
     def contigs(self) -> pd.DataFrame:
@@ -498,10 +506,14 @@ class MetaCooler:
             DataFrame indexed 0 … n_contigs-1 with one row per contig.
         """
         self._check_unchanged()
-        if self._group_path != "/":
-            grp = self._group_path.lstrip("/") + "/contigs"
-            return read_table(self._store, grp)
-        return read_table(self._store, "contigs")
+        key = (
+            self._group_path.lstrip("/") + "/contigs"
+            if self._group_path != "/"
+            else "contigs"
+        )
+        table = read_table(self._store, key)
+        self._check_unchanged()
+        return table
 
     # ------------------------------------------------------------------
     # Clustering rounds (see docs/format.md#clusters)
@@ -1281,31 +1293,157 @@ class MetaCooler:
 
         Args:
             mode: h5py file-open mode.  ``"r"`` (default) opens read-only;
-                ``"r+"`` opens for in-place modification.
+                ``"r+"`` (or ``"a"``) opens for in-place modification, under
+                the map's lock (:func:`metacooler.lock`): that write is *not*
+                staged -- it edits the file itself, as h5py does.  The
+                metacooler writers stage theirs.
 
         Yields:
-            The root ``h5py.File`` object.  When the ``with`` block exits
-            the file is closed automatically.
+            The map's group (the root ``h5py.File``, or an entry's group).
+            When the ``with`` block exits the file is closed automatically.
 
         Raises:
             MapChangedError: If the file was replaced or written since this map
-                opened it (see :meth:`_check_unchanged`).  What this map writes
-                itself, through a mode other than ``"r"``, is not a change.
+                opened it (see :meth:`_check_unchanged`), checked when it is
+                opened, and when a read ends.  What this map writes itself is
+                not a change.
+            MapLockedError: If another process or thread holds the map's lock
+                (a write mode only).
         """
-        self._check_unchanged()
-        try:
-            with h5py.File(self._store, mode) as f:
-                if self._group_path and self._group_path != "/":
-                    yield f[self._group_path.lstrip("/")]
-                else:
-                    yield f
-        finally:
-            if mode != "r":
+        key = self._group_path.lstrip("/") if self._group_path not in ("", "/") else ""
+        if mode == "r":
+            self._check_unchanged()
+            with h5py.File(self._store, "r") as f:
+                yield f[key] if key else f
+            self._check_unchanged()
+            return
+        from metacooler.io.staging import lock
+
+        with lock(self._store):
+            self._check_unchanged()
+            try:
+                with h5py.File(self._store, mode) as f:
+                    yield f[key] if key else f
+            finally:
                 self._state = file_state(self._store)
 
 
-def _open_cooler(uri: str, validate: bool) -> cooler.Cooler:
-    """``cooler.Cooler(uri)``, naming the problem when cooler cannot decode it.
+class _CheckedSelector:
+    """A cooler selector whose every read checks, before and after, that the
+    map's file is the one its :class:`MetaCooler` opened.
+
+    Slicing (``sel[lo:hi]``, ``sel["count"]``), ``fetch`` and the attributes
+    that read the file (``columns``, ``dtypes``, ...) are checked; a selector
+    they return is wrapped the same way.
+    """
+
+    __slots__ = ("_check", "_selector")
+
+    def __init__(self, selector: Any, check: Callable[[], None]) -> None:
+        self._selector: Any = selector
+        self._check = check
+
+    def __getitem__(self, key: object) -> object:
+        self._check()
+        out = self._selector[key]
+        self._check()
+        return _checked(out, self._check)
+
+    def fetch(self, *args: object, **kwargs: object) -> object:
+        self._check()
+        out = self._selector.fetch(*args, **kwargs)
+        self._check()
+        return _checked(out, self._check)
+
+    def __len__(self) -> int:
+        return len(self._selector)
+
+    def __contains__(self, key: object) -> bool:
+        self._check()
+        found = key in self._selector
+        self._check()
+        return found
+
+    def __getattr__(self, name: str) -> object:
+        self._check()
+        value = getattr(self._selector, name)
+        self._check()
+        if not callable(value):
+            return value
+
+        def call(*args: object, **kwargs: object) -> object:
+            self._check()
+            out = value(*args, **kwargs)
+            self._check()
+            return _checked(out, self._check)
+
+        return call
+
+    def __repr__(self) -> str:
+        return repr(self._selector)
+
+
+def _checked(value: object, check: Callable[[], None]) -> object:
+    """*value*, a selector wrapped to check its reads (see
+    :class:`_CheckedSelector`), or as it is."""
+    if (
+        hasattr(value, "fetch")
+        and hasattr(value, "__getitem__")
+        and not isinstance(value, (pd.DataFrame, pd.Series, np.ndarray))
+    ):
+        return _CheckedSelector(value, check)
+    return value
+
+
+class _CheckedCooler(cooler.Cooler):
+    """``cooler.Cooler`` whose reads check, before and after, that its file is
+    the one a :class:`MetaCooler` opened (``_check``).
+
+    Its store is cooler's own, a path, so any cooler version reads it: the
+    checks wrap what it returns -- selectors, ``info``, ``extent``,
+    ``offset`` -- not the file it opens.
+    """
+
+    _check: Callable[[], None]
+
+    def _read(self, read: Callable[..., object], *args: object, **kwargs: object):
+        self._check()
+        out = read(*args, **kwargs)
+        self._check()
+        return _checked(out, self._check)
+
+    def bins(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super().bins, *args, **kwargs)
+
+    def pixels(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super().pixels, *args, **kwargs)
+
+    def chroms(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super().chroms, *args, **kwargs)
+
+    def matrix(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super().matrix, *args, **kwargs)
+
+    def extent(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super().extent, *args, **kwargs)
+
+    def offset(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super().offset, *args, **kwargs)
+
+    def _load_dset(self, *args, **kwargs):  # type: ignore[override]
+        return self._read(super()._load_dset, *args, **kwargs)
+
+    @property
+    def info(self) -> dict:  # type: ignore[override]
+        self._check()
+        out = super().info
+        self._check()
+        return out
+
+
+def _open_cooler(uri: str, validate: bool, check: Callable[[], None]) -> cooler.Cooler:
+    """``cooler.Cooler(uri)``, its reads checked (see :class:`_CheckedCooler`),
+    naming the problem when cooler cannot decode it.
 
     cooler decodes every ``/chroms`` (= ``/contigs``) column as ASCII, so a
     file holding a non-ASCII name fails here with a bare ``UnicodeDecodeError``.
@@ -1314,11 +1452,13 @@ def _open_cooler(uri: str, validate: bool) -> cooler.Cooler:
     offending values.
     """
     try:
-        return cooler.Cooler(uri)
+        clr = _CheckedCooler(uri)
     except UnicodeDecodeError:
         if validate:
             _validate(uri)
         raise
+    clr._check = check
+    return clr
 
 
 #: Up to this many ranges are read one by one; past it, one read of their span.

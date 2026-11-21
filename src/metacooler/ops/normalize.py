@@ -23,6 +23,7 @@ holds exactly their contig-level values.  They store their weights with
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import warnings
 from collections.abc import Mapping, Sequence
@@ -127,6 +128,16 @@ def _open_target(uri: str | Path, name: str, *, store: bool, force: bool) -> Met
     return mc
 
 
+def _held_for_store(uri: str | Path, store: bool) -> contextlib.AbstractContextManager:
+    """The map's lock when the weights are to be stored (see
+    :func:`metacooler.lock`), else nothing."""
+    if not store:
+        return contextlib.nullcontext()
+    from metacooler.io.staging import lock, map_file
+
+    return lock(map_file(uri))
+
+
 def _finish(
     mc: MetaCooler,
     name: str,
@@ -157,6 +168,7 @@ def _finish(
             parameters=parameters,
             force=force,
             commands=commands,
+            source=mc,
         )
         logger.info("Stored the weights as /bins/%s in %s", name, mc.uri)
     return Normalization(
@@ -584,38 +596,41 @@ def normalize_ice(
             raise ValueError(f"{option} must be >= 0, got {value}")
     if tol <= 0:
         raise ValueError(f"tol must be > 0, got {tol}")
-    mc = _open_target(uri, name, store=store, force=force)
-    options = {
-        "ignore_diags": int(ignore_diags),
-        "mad_max": int(mad_max),
-        "min_nnz": int(min_nnz),
-        "min_count": int(min_count),
-        "tol": tol,
-        "max_iters": int(max_iters),
-        "chunksize": chunksize,
-    }
-    if scope == "genome":
-        weights, stats = _ice_by_genome(mc, **options)
-        depends = [DEPENDS_ON_PIXELS, DEPENDS_ON_ASSIGNMENT]
-    else:
-        weights, stats = _ice_with_cooler(mc, cis_only=scope == "contig", **options)
-        depends = [DEPENDS_ON_PIXELS]
-    parameters: dict[str, object] = {
-        "scope": scope,
-        **{k: v for k, v in options.items() if k != "chunksize"},
-        **stats,
-    }
-    return _finish(
-        mc,
-        name,
-        weights,
-        method="ice",
-        depends_on=depends,
-        parameters=parameters,
-        store=store,
-        force=force,
-        commands=commands,
-    )
+    # Held from before the map is read to after the weights are stored:
+    # no other writer changes it meanwhile.
+    with _held_for_store(uri, store):
+        mc = _open_target(uri, name, store=store, force=force)
+        options = {
+            "ignore_diags": int(ignore_diags),
+            "mad_max": int(mad_max),
+            "min_nnz": int(min_nnz),
+            "min_count": int(min_count),
+            "tol": tol,
+            "max_iters": int(max_iters),
+            "chunksize": chunksize,
+        }
+        if scope == "genome":
+            weights, stats = _ice_by_genome(mc, **options)
+            depends = [DEPENDS_ON_PIXELS, DEPENDS_ON_ASSIGNMENT]
+        else:
+            weights, stats = _ice_with_cooler(mc, cis_only=scope == "contig", **options)
+            depends = [DEPENDS_ON_PIXELS]
+        parameters: dict[str, object] = {
+            "scope": scope,
+            **{k: v for k, v in options.items() if k != "chunksize"},
+            **stats,
+        }
+        return _finish(
+            mc,
+            name,
+            weights,
+            method="ice",
+            depends_on=depends,
+            parameters=parameters,
+            store=store,
+            force=force,
+            commands=commands,
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -679,74 +694,85 @@ def normalize_normcc(
         ValueError: If too few contigs pass the filters to fit the regression.
     """
     _check_quantile(spurious, "spurious")
-    mc = _open_target(uri, name, store=store, force=force)
-    contigs = mc.contigs
-    lengths = contigs["length"].to_numpy(dtype=np.float64)
-    found = _contig_sites(mc, sites=sites, enzymes=enzymes, fasta=fasta)
+    # Held from before the map is read to after the weights are stored:
+    # no other writer changes it meanwhile.
+    with _held_for_store(uri, store):
+        mc = _open_target(uri, name, store=store, force=force)
+        contigs = mc.contigs
+        lengths = contigs["length"].to_numpy(dtype=np.float64)
+        found = _contig_sites(mc, sites=sites, enzymes=enzymes, fasta=fasta)
 
-    matrix = _contig_matrix(mc, chunksize)
-    intra = matrix.diagonal()
-    off = _off_diagonal(matrix)
-    long_enough = lengths >= min_length
-    keep = (
-        long_enough & (_largest_contact(off, long_enough) >= min_signal) & (intra > 0)
-    )
-    covariates = ["intercept"]
-    columns = [np.ones(len(lengths))]
-    if found is not None:
-        keep &= np.isfinite(found.counts) & (found.counts > 0)
-        covariates.append("log_sites")
-        columns.append(np.log(np.where(keep, found.counts, 1.0)))
-    covariates += ["log_length", "log_intra_contacts"]
-    columns += [np.log(np.maximum(lengths, 1.0)), np.log(np.where(keep, intra, 1.0))]
-    n_kept = int(keep.sum())
-    if n_kept <= len(covariates):
-        raise ValueError(
-            f"Only {n_kept} contig(s) pass NormCC's filters (length >= {min_length} "
-            f"bp, an intra-contig contact, a contact of at least {min_signal} with "
-            "another contig"
-            + (", a restriction site" if found is not None else "")
-            + f"), too few to fit {len(covariates)} coefficients."
+        matrix = _contig_matrix(mc, chunksize)
+        intra = matrix.diagonal()
+        off = _off_diagonal(matrix)
+        long_enough = lengths >= min_length
+        keep = (
+            long_enough
+            & (_largest_contact(off, long_enough) >= min_signal)
+            & (intra > 0)
         )
-    signal = off @ keep.astype(np.float64)
-    X = np.column_stack(columns)[keep]
-    beta = fit_nb_glm(signal[keep], X, alpha=1.0)
-    mu = np.exp(X @ beta)
-    contig_weights = np.full(len(lengths), np.nan)
-    contig_weights[keep] = np.sqrt(mu.max() / mu)
-    cutoff, n_contacts = _spurious_cutoff(off, contig_weights, keep, spurious)
-    logger.info(
-        "NormCC fitted on %s contig(s): %s; spurious-contact cutoff %.6g "
-        "(the %g quantile of %s normalized contig-pair contacts)",
-        f"{n_kept:,}",
-        ", ".join(f"{c}={b:.4g}" for c, b in zip(covariates, beta, strict=True)),
-        cutoff,
-        spurious,
-        f"{n_contacts:,}",
-    )
-    parameters: dict[str, object] = {
-        "covariates": covariates,
-        "coefficients": beta,
-        "dispersion": 1.0,
-        "min_length": int(min_length),
-        "min_signal": min_signal,
-        "n_contigs_fitted": n_kept,
-        "spurious_quantile": spurious,
-        SPURIOUS_CUTOFF_ATTR: cutoff,
-        SPURIOUS_RULE_ATTR: "<",
-        **(found.attrs if found is not None else {}),
-    }
-    return _finish(
-        mc,
-        name,
-        contig_weights[mc._bin_contig_ids],
-        method="normcc",
-        depends_on=[DEPENDS_ON_PIXELS, *(found.depends if found is not None else [])],
-        parameters=parameters,
-        store=store,
-        force=force,
-        commands=commands,
-    )
+        covariates = ["intercept"]
+        columns = [np.ones(len(lengths))]
+        if found is not None:
+            keep &= np.isfinite(found.counts) & (found.counts > 0)
+            covariates.append("log_sites")
+            columns.append(np.log(np.where(keep, found.counts, 1.0)))
+        covariates += ["log_length", "log_intra_contacts"]
+        columns += [
+            np.log(np.maximum(lengths, 1.0)),
+            np.log(np.where(keep, intra, 1.0)),
+        ]
+        n_kept = int(keep.sum())
+        if n_kept <= len(covariates):
+            raise ValueError(
+                f"Only {n_kept} contig(s) pass NormCC's filters (length >= {min_length} "
+                f"bp, an intra-contig contact, a contact of at least {min_signal} with "
+                "another contig"
+                + (", a restriction site" if found is not None else "")
+                + f"), too few to fit {len(covariates)} coefficients."
+            )
+        signal = off @ keep.astype(np.float64)
+        X = np.column_stack(columns)[keep]
+        beta = fit_nb_glm(signal[keep], X, alpha=1.0)
+        mu = np.exp(X @ beta)
+        contig_weights = np.full(len(lengths), np.nan)
+        contig_weights[keep] = np.sqrt(mu.max() / mu)
+        cutoff, n_contacts = _spurious_cutoff(off, contig_weights, keep, spurious)
+        logger.info(
+            "NormCC fitted on %s contig(s): %s; spurious-contact cutoff %.6g "
+            "(the %g quantile of %s normalized contig-pair contacts)",
+            f"{n_kept:,}",
+            ", ".join(f"{c}={b:.4g}" for c, b in zip(covariates, beta, strict=True)),
+            cutoff,
+            spurious,
+            f"{n_contacts:,}",
+        )
+        parameters: dict[str, object] = {
+            "covariates": covariates,
+            "coefficients": beta,
+            "dispersion": 1.0,
+            "min_length": int(min_length),
+            "min_signal": min_signal,
+            "n_contigs_fitted": n_kept,
+            "spurious_quantile": spurious,
+            SPURIOUS_CUTOFF_ATTR: cutoff,
+            SPURIOUS_RULE_ATTR: "<",
+            **(found.attrs if found is not None else {}),
+        }
+        return _finish(
+            mc,
+            name,
+            contig_weights[mc._bin_contig_ids],
+            method="normcc",
+            depends_on=[
+                DEPENDS_ON_PIXELS,
+                *(found.depends if found is not None else []),
+            ],
+            parameters=parameters,
+            store=store,
+            force=force,
+            commands=commands,
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -821,137 +847,144 @@ def normalize_hiczin(
     _check_quantile(spurious, "spurious")
     if max_pairs < 0:
         raise ValueError(f"max_pairs must be >= 0, got {max_pairs}")
-    mc = _open_target(uri, name, store=store, force=force)
-    contigs = mc.contigs
-    lengths = contigs["length"].to_numpy(dtype=np.float64)
-    cov = _numeric_contig_column(contigs, coverage, what="coverage")
-    found = _contig_sites(mc, sites=sites, enzymes=enzymes, fasta=fasta)
+    # Held from before the map is read to after the weights are stored:
+    # no other writer changes it meanwhile.
+    with _held_for_store(uri, store):
+        mc = _open_target(uri, name, store=store, force=force)
+        contigs = mc.contigs
+        lengths = contigs["length"].to_numpy(dtype=np.float64)
+        cov = _numeric_contig_column(contigs, coverage, what="coverage")
+        found = _contig_sites(mc, sites=sites, enzymes=enzymes, fasta=fasta)
 
-    matrix = _contig_matrix(mc, chunksize)
-    off = _off_diagonal(matrix)
-    long_enough = lengths >= min_length
-    keep = (
-        long_enough
-        & (_largest_contact(off, long_enough) >= min_signal)
-        & np.isfinite(cov)
-    )
-    if found is not None:
-        keep &= np.isfinite(found.counts)
-    positive = keep & (cov > 0)
-    if not positive.any():
-        raise ValueError(
-            "No contig passing HiCzin's filters has a positive coverage in "
-            f"/contigs/{coverage}."
+        matrix = _contig_matrix(mc, chunksize)
+        off = _off_diagonal(matrix)
+        long_enough = lengths >= min_length
+        keep = (
+            long_enough
+            & (_largest_contact(off, long_enough) >= min_signal)
+            & np.isfinite(cov)
         )
-    cov = np.where(keep & (cov == 0), cov[positive].min(), cov)
+        if found is not None:
+            keep &= np.isfinite(found.counts)
+        positive = keep & (cov > 0)
+        if not positive.any():
+            raise ValueError(
+                "No contig passing HiCzin's filters has a positive coverage in "
+                f"/contigs/{coverage}."
+            )
+        cov = np.where(keep & (cov == 0), cov[positive].min(), cov)
 
-    covariates = []
-    logs = []
-    if found is not None:
-        covariates.append("log_sites")
-        logs.append(np.log(np.where(found.counts > 0, found.counts, 1.0)))
-    covariates += ["log_length", "log_coverage"]
-    logs += [np.log(np.maximum(lengths, 1.0)), np.log(np.where(cov > 0, cov, 1.0))]
-    log_cov = np.column_stack(logs)
+        covariates = []
+        logs = []
+        if found is not None:
+            covariates.append("log_sites")
+            logs.append(np.log(np.where(found.counts > 0, found.counts, 1.0)))
+        covariates += ["log_length", "log_coverage"]
+        logs += [np.log(np.maximum(lengths, 1.0)), np.log(np.where(cov > 0, cov, 1.0))]
+        log_cov = np.column_stack(logs)
 
-    # The pairs of kept contigs of one genome, enumerated genome by genome.
-    genome = contigs["genome_id"].to_numpy(dtype=np.int64)
-    unbinned = unbinned_genome_id(mc.genomes["name"])
-    member = keep if unbinned is None else keep & (genome != unbinned)
-    candidates = np.flatnonzero(member)
-    order = candidates[np.argsort(genome[candidates], kind="stable")]
-    _, starts, sizes = np.unique(genome[order], return_index=True, return_counts=True)
-    total = int(np.sum(sizes * (sizes - 1) // 2))
-    if total == 0:
-        raise ValueError(
-            "HiCzin fits the contacts between contigs of one genome, but no genome "
-            f"has two contigs passing its filters (length >= {min_length} bp, a "
-            f"contact of at least {min_signal} with another contig, a coverage)."
+        # The pairs of kept contigs of one genome, enumerated genome by genome.
+        genome = contigs["genome_id"].to_numpy(dtype=np.int64)
+        unbinned = unbinned_genome_id(mc.genomes["name"])
+        member = keep if unbinned is None else keep & (genome != unbinned)
+        candidates = np.flatnonzero(member)
+        order = candidates[np.argsort(genome[candidates], kind="stable")]
+        _, starts, sizes = np.unique(
+            genome[order], return_index=True, return_counts=True
         )
-    sampled = bool(max_pairs) and total > max_pairs
-    if sampled:
-        rng = np.random.default_rng(seed)
-        index = np.sort(rng.choice(total, size=max_pairs, replace=False))
-    else:
-        index = np.arange(total, dtype=np.int64)
-    group, a, b = pairs_within_groups(sizes, index)
-    ci = order[starts[group] + a]
-    cj = order[starts[group] + b]
-    y = np.asarray(matrix[ci, cj]).ravel()
+        total = int(np.sum(sizes * (sizes - 1) // 2))
+        if total == 0:
+            raise ValueError(
+                "HiCzin fits the contacts between contigs of one genome, but no genome "
+                f"has two contigs passing its filters (length >= {min_length} bp, a "
+                f"contact of at least {min_signal} with another contig, a coverage)."
+            )
+        sampled = bool(max_pairs) and total > max_pairs
+        if sampled:
+            rng = np.random.default_rng(seed)
+            index = np.sort(rng.choice(total, size=max_pairs, replace=False))
+        else:
+            index = np.arange(total, dtype=np.int64)
+        group, a, b = pairs_within_groups(sizes, index)
+        ci = order[starts[group] + a]
+        cj = order[starts[group] + b]
+        y = np.asarray(matrix[ci, cj]).ravel()
 
-    pair_logs = log_cov[ci] + log_cov[cj]
-    means = pair_logs.mean(axis=0)
-    sds = pair_logs.std(axis=0, ddof=1) if len(y) > 1 else np.zeros(len(covariates))
-    # Identical values can leave a standard deviation of rounding error.
-    constant = [
-        c
-        for c, s, m in zip(covariates, sds, means, strict=True)
-        if not s > 1e-9 * max(1.0, abs(m))
-    ]
-    if constant:
-        raise ValueError(
-            f"HiCzin standardises its covariates, but {', '.join(constant)} is "
-            "constant across the fitted pairs."
+        pair_logs = log_cov[ci] + log_cov[cj]
+        means = pair_logs.mean(axis=0)
+        sds = pair_logs.std(axis=0, ddof=1) if len(y) > 1 else np.zeros(len(covariates))
+        # Identical values can leave a standard deviation of rounding error.
+        constant = [
+            c
+            for c, s, m in zip(covariates, sds, means, strict=True)
+            if not s > 1e-9 * max(1.0, abs(m))
+        ]
+        if constant:
+            raise ValueError(
+                f"HiCzin standardises its covariates, but {', '.join(constant)} is "
+                "constant across the fitted pairs."
+            )
+        X = np.column_stack([np.ones(len(y)), (pair_logs - means) / sds])
+        fit = fit_zinb(y, X)
+
+        contig_weights = np.full(len(lengths), np.nan)
+        contig_weights[keep] = hiczin_contig_weights(
+            fit.beta, means, sds, log_cov[keep]
         )
-    X = np.column_stack([np.ones(len(y)), (pair_logs - means) / sds])
-    fit = fit_zinb(y, X)
-
-    contig_weights = np.full(len(lengths), np.nan)
-    contig_weights[keep] = hiczin_contig_weights(fit.beta, means, sds, log_cov[keep])
-    normalized = y * contig_weights[ci] * contig_weights[cj]
-    positive_norm = normalized[normalized > 0]
-    cutoff = (
-        float(np.quantile(positive_norm, spurious))
-        if positive_norm.size
-        else float("nan")
-    )
-    logger.info(
-        "HiCzin fitted on %s pair(s) of contigs of one genome%s (%s with a "
-        "contact): count model %s, theta=%.4g; spurious-contact cutoff %.6g",
-        f"{len(y):,}",
-        f" sampled from {total:,}" if sampled else "",
-        f"{int(np.count_nonzero(y)):,}",
-        ", ".join(
-            f"{c}={v:.4g}"
-            for c, v in zip(["intercept", *covariates], fit.beta, strict=True)
-        ),
-        fit.theta,
-        cutoff,
-    )
-    parameters: dict[str, object] = {
-        "covariates": ["intercept", *covariates],
-        "coefficients": fit.beta,
-        "zero_inflation_coefficients": fit.gamma,
-        "theta": fit.theta,
-        "covariate_means": means,
-        "covariate_sds": sds,
-        "converged": fit.converged,
-        "min_length": int(min_length),
-        "min_signal": min_signal,
-        "coverage": f"{CONTIG_COLUMN_PREFIX}{coverage}",
-        "n_pairs_fitted": len(y),
-        "n_pairs_total": total,
-        "seed": seed if sampled else None,
-        "spurious_quantile": spurious,
-        SPURIOUS_CUTOFF_ATTR: cutoff,
-        SPURIOUS_RULE_ATTR: "<=",
-        **(found.attrs if found is not None else {}),
-    }
-    return _finish(
-        mc,
-        name,
-        contig_weights[mc._bin_contig_ids],
-        method="hiczin",
-        # Fitted on the pairs of contigs of one genome: a reassignment
-        # changes the pairs, hence the fit.
-        depends_on=[
-            DEPENDS_ON_PIXELS,
-            DEPENDS_ON_ASSIGNMENT,
-            f"{CONTIG_COLUMN_PREFIX}{coverage}",
-            *(found.depends if found is not None else []),
-        ],
-        parameters=parameters,
-        store=store,
-        force=force,
-        commands=commands,
-    )
+        normalized = y * contig_weights[ci] * contig_weights[cj]
+        positive_norm = normalized[normalized > 0]
+        cutoff = (
+            float(np.quantile(positive_norm, spurious))
+            if positive_norm.size
+            else float("nan")
+        )
+        logger.info(
+            "HiCzin fitted on %s pair(s) of contigs of one genome%s (%s with a "
+            "contact): count model %s, theta=%.4g; spurious-contact cutoff %.6g",
+            f"{len(y):,}",
+            f" sampled from {total:,}" if sampled else "",
+            f"{int(np.count_nonzero(y)):,}",
+            ", ".join(
+                f"{c}={v:.4g}"
+                for c, v in zip(["intercept", *covariates], fit.beta, strict=True)
+            ),
+            fit.theta,
+            cutoff,
+        )
+        parameters: dict[str, object] = {
+            "covariates": ["intercept", *covariates],
+            "coefficients": fit.beta,
+            "zero_inflation_coefficients": fit.gamma,
+            "theta": fit.theta,
+            "covariate_means": means,
+            "covariate_sds": sds,
+            "converged": fit.converged,
+            "min_length": int(min_length),
+            "min_signal": min_signal,
+            "coverage": f"{CONTIG_COLUMN_PREFIX}{coverage}",
+            "n_pairs_fitted": len(y),
+            "n_pairs_total": total,
+            "seed": seed if sampled else None,
+            "spurious_quantile": spurious,
+            SPURIOUS_CUTOFF_ATTR: cutoff,
+            SPURIOUS_RULE_ATTR: "<=",
+            **(found.attrs if found is not None else {}),
+        }
+        return _finish(
+            mc,
+            name,
+            contig_weights[mc._bin_contig_ids],
+            method="hiczin",
+            # Fitted on the pairs of contigs of one genome: a reassignment
+            # changes the pairs, hence the fit.
+            depends_on=[
+                DEPENDS_ON_PIXELS,
+                DEPENDS_ON_ASSIGNMENT,
+                f"{CONTIG_COLUMN_PREFIX}{coverage}",
+                *(found.depends if found is not None else []),
+            ],
+            parameters=parameters,
+            store=store,
+            force=force,
+            commands=commands,
+        )

@@ -21,9 +21,9 @@ What it guarantees:
 - **Nothing half-written.**  Every table is checked -- names, column clashes,
   ASCII in ``/contigs`` -- before anything is written; a table is rebuilt in a
   scratch group and swapped into place; the map is validated afterwards.  In
-  place, every map is planned under the file's lock and written to a staged
-  copy of the file, which replaces it once every edited map validates (see
-  :mod:`metacooler.io.staging`).
+  place, every map is planned under the file's lock, taken before it is read,
+  and written to a staged copy of the file, which replaces it once every
+  edited map validates (see :mod:`metacooler.io.staging`).
 
 A bare ``.mmetacool`` path annotates every entry of the collection (each entry
 carries its own ``/genomes`` and ``/contigs``: ``zoomify`` levels, stacked
@@ -53,7 +53,12 @@ from metacooler.io._utils import (
     write_column,
 )
 from metacooler.io.colspec import CONTIG_METADATA_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
-from metacooler.io.staging import lock, map_output, staged_inplace
+from metacooler.io.staging import (
+    check_unchanged,
+    lock,
+    map_output,
+    staged_inplace,
+)
 from metacooler.io.weights import drop_stale_weights
 from metacooler.qc import is_qc_column
 from metacooler.schema import (
@@ -202,8 +207,8 @@ def annotate(
             ``<output>.partial`` behind for inspection, as the default does
             (logged at ERROR).  ``False`` removes it instead, whatever stopped
             the run (``KeyboardInterrupt`` included), and logs that at INFO.
-            The output path itself is never written by a failed run.  Unused
-            with *inplace*, which stages nothing.
+            The output path itself is never written by a failed run.  With
+            *inplace*, a failure always removes the staged copy.
 
     Raises:
         ValueError: On inconsistent arguments, a table that matches nothing (or,
@@ -275,6 +280,9 @@ def annotate(
             held.enter_context(lock(file_path))
         groups = _map_groups(file_path, group_path)
         edits = []
+        # The maps as read for the plan: what is written is checked against
+        # them (MapChangedError if a file changed since).
+        planned: list[MetaCooler] = []
         # Rows refused under unmatched="error", raised once every map is
         # planned: a table that matches nothing at all gets its own, clearer
         # refusal first.
@@ -283,9 +291,10 @@ def annotate(
             map_uri = f"{file_path}::{group}"
             if len(groups) > 1:
                 logger.info("Annotating entry %s", group)
+            planned.append(MetaCooler(map_uri))
             edits.append(
                 _plan_map(
-                    MetaCooler(map_uri),
+                    planned[-1],
                     group,
                     genomes_extra,
                     contig_table,
@@ -306,7 +315,7 @@ def annotate(
             "missing": missing,
         }
         if inplace:
-            _write_in_place(file_path, edits, metadata, history)
+            _write_in_place(file_path, edits, metadata, history, planned)
             return
 
     from metacooler.io.create import _staged_output
@@ -318,11 +327,13 @@ def annotate(
             # One entry out of a collection: a standalone map, as reassign does.
             from metacooler.io.reassign import _materialise_copy
 
-            _materialise_copy(MetaCooler(f"{file_path}::{group_path}"), staged)
+            _materialise_copy(planned[0], staged)
             moved = [dataclasses.replace(edits[0], group="/")]
         else:
             shutil.copy2(file_path, staged)
             moved = edits
+        # The file copied is the file planned on (MapChangedError otherwise).
+        check_unchanged(planned)
         for edit in moved:
             _write_map(staged, edit.group, edit, metadata, history, always=True)
             validate(f"{staged}::{edit.group}")
@@ -808,7 +819,11 @@ def _check_plans(
 
 
 def _write_in_place(
-    file_path: Path, edits: list[_MapEdit], metadata: dict | None, history: dict
+    file_path: Path,
+    edits: list[_MapEdit],
+    metadata: dict | None,
+    history: dict,
+    planned: list[MetaCooler],
 ) -> None:
     """Apply the edits that change something to a staged copy of the file,
     which replaces it once every edited map validates (see
@@ -821,7 +836,7 @@ def _write_in_place(
     if not changed:
         return
     with staged_inplace(
-        file_path, validate_groups=[edit.group for edit in changed]
+        file_path, validate_groups=[edit.group for edit in changed], planned=planned
     ) as staged:
         for edit in changed:
             _write_map(staged, edit.group, edit, metadata, history)

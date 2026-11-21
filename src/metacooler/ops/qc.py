@@ -67,8 +67,30 @@ def qc(
 
     Raises:
         ValueError: If *distance_threshold* is negative.
-        OSError: If *store* is set and the file cannot be opened for writing.
+        OSError: If *store* is set and the file cannot be written: another
+            process holds its lock (``MapLockedError``), it changed while it
+            was read (``MapChangedError``), or it is read-only.
     """
+    if not store:
+        return _qc(uri, distance_threshold=distance_threshold, chunksize=chunksize)
+    from metacooler.io.staging import lock, map_file
+
+    # Stored in place: under the map's lock from before it is read, through a
+    # staged copy (see metacooler.io.staging).
+    with lock(map_file(uri)):
+        return _qc(
+            uri, distance_threshold=distance_threshold, chunksize=chunksize, store=True
+        )
+
+
+def _qc(
+    uri: str | Path,
+    *,
+    distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
+    chunksize: int = DEFAULT_CHUNKSIZE,
+    store: bool = False,
+) -> QCResult:
+    """:func:`qc`'s work, under the map's lock when it stores the result."""
     mc = MetaCooler(uri)
     genomes = mc.genomes
     contigs = mc.contigs
@@ -117,13 +139,16 @@ def qc(
                 "between bin midpoints: the intra-contig short/long split will "
                 "be coarser than the one 'create pairs' recorded.",
             )
-        store_qc(
-            mc.store,
-            summary,
-            per_genome,
-            tally.contig_table(contigs["name"].to_numpy()),
-            group_path=mc._group_path,
-        )
+        from metacooler.io.staging import staged_inplace
+
+        with staged_inplace(mc.uri, planned=mc) as staged:
+            store_qc(
+                staged,
+                summary,
+                per_genome,
+                tally.contig_table(contigs["name"].to_numpy()),
+                group_path=mc._group_path,
+            )
         logger.info(
             "Stored QC block and per-genome and per-contig columns in %s", mc.uri
         )

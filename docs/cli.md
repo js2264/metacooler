@@ -569,28 +569,36 @@ and none re-bins a single contact.
 | [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places (plus a copy of the file, in place or not); a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
 | [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds, plus a copy of the file in place. |
 | [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels; tens of passes for `ice`. |
-| [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | Instant. |
+| [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | A copy of the file. |
 
 `reassign` and `annotate` write either an edited copy (`-o`) or the map itself
-(`--inplace`); `normalize` and `metadata` always edit the map itself, as
-`cooler balance` does.
+(`--inplace`); `normalize`, `metadata` and `qc --store` always edit the map
+itself, as `cooler balance` does.
 
-An edit of the map itself (`reassign --inplace`, `annotate --inplace`,
-`normalize`, and from Python `store_weights`, `write_clusters` and
-`drop_clusters`) never writes the map: under the map's lock, it writes a
-**staged copy** beside it, validates it in full, and renames it over the map.
-So the map is whole whatever stops the edit — an error, Ctrl-C, a failed
-validation — and it does not grow with what each edit replaces (HDF5 never
-reclaims that space). The price is a copy of the file per edit. The map keeps
-its mode, and a symbolic link is replaced by the edited map, its target left as
-it was. The lock, `<map>.lock`, keeps a second writer out: it is refused with
-the pid, host, start and command of the one writing, and a lock left by a
-process that was killed outright (`kill -9`) on the same host is taken over,
-with a warning, along with the staged file it left. A lock of another host is
+An edit of the map itself — `reassign --inplace`, `annotate --inplace`,
+`normalize`, `metadata add|remove|load`, `qc --store`, the collection commands
+`cp`, `mv` and `rm` and, from Python, `store_weights`, `write_clusters`,
+`drop_clusters` and the entry functions — never writes the map: under the map's
+lock, taken before it reads the map, it writes a **staged copy** in a private
+directory beside it, validates it in full, and renames it over the map. So the
+map is whole whatever stops the edit — an error, Ctrl-C, a failed validation —
+and it does not grow with what each edit replaces (HDF5 never reclaims that
+space). It costs a copy of the file per edit, in time and in disk space beside
+the map, and a full validation, and needs a writable directory. The map keeps
+its mode and, where the process may set them, its owner and group; a map
+without write permission is refused, as editing it in place was; a symbolic
+link is replaced by the edited map, its target left as it was.
+
+The lock, `<map>.lock`, keeps a second writer out — another process, or
+another thread: it is refused with the pid, host, start and command of the one
+writing. A lock left by a process that is gone — killed outright (`kill -9`),
+or stopped by a scheduler's `SIGTERM` at its time limit: metacooler sets no
+signal handler — is taken over by the next writer on the same host, with a
+warning, and what that process staged is removed. A lock of another host is
 never broken: the error names the lock file to delete once that process is
-gone. A command that reads a map while it is replaced stops with an error
-rather than mixing two versions of it. See
-[In-place writes](format.md#in-place-writes).
+gone. A command that reads a map while it is replaced, or a `MetaCooler`
+opened before, stops with an error rather than mixing two versions of the map:
+open it again. See [In-place writes](format.md#in-place-writes).
 
 `reassign` and `annotate` meet in one place: after a reassignment, the metadata
 of the genomes whose contigs changed still describes their old contigs, and
@@ -779,7 +787,8 @@ Add, replace or drop the **metadata columns** of `/genomes` and `/contigs` in a
 map that already exists — completeness and taxonomy from CheckM2 or GTDB-Tk,
 coverage from a depth table, anything that arrives after the map was built.
 Rows are matched by name; the genome assignment, the bins and the pixels are
-never touched, so this costs seconds even on a large map. **API:**
+never touched: with `-o`, the cost is a copy of the map; with `--inplace`, a
+staged copy that replaces it (see [Edit an existing map](#edit)). **API:**
 `metacooler.annotate` (`metacooler.io.annotate.annotate`).
 
 ```console

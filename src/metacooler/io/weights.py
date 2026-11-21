@@ -343,11 +343,16 @@ def store_weights(
     parameters: Mapping[str, object] | None = None,
     force: bool = False,
     commands: Sequence[str] = (),
+    source: MetaCooler | None = None,
 ) -> None:
     """Store a normalization as a weight column of a map's ``/bins``, in place.
 
     Through a staged copy of the map, under its lock, which replaces the map
-    once it validates (see :mod:`metacooler.io.staging`).
+    once it validates (see :mod:`metacooler.io.staging`).  Weights computed
+    from the map belong to the map as it was read: hold its lock
+    (:func:`metacooler.lock`) from before that read, and pass the map read as
+    *source*, so that a map changed meanwhile is refused rather than given
+    weights that do not line up with its bins.
 
     The way any tool -- a binner, a normalization of its own -- puts a
     normalization in a map: ``show``, ``dump`` and ``network --balance NAME``
@@ -374,6 +379,8 @@ def store_weights(
             stored as attributes of the column; ``None`` values are left out.
         force: Replace a column of that name if there is one.
         commands: Command lines to append to ``metadata["commands"]``.
+        source: The map the weights were computed from, as opened for it:
+            refused (``MapChangedError``) if its file changed since.
 
     Raises:
         ValueError: If *name* cannot hold a weight column, or is taken and
@@ -432,7 +439,11 @@ def store_weights(
                 "weights under another name, or replace that column with "
                 "force=True."
             )
-        with staged_inplace(uri) as staged, h5py.File(staged, "r+") as f:
+        planned = [mc] if source is None else [mc, source]
+        with (
+            staged_inplace(uri, planned=planned) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
             key = group.strip("/")
             _store_column(
                 f[key] if key else f, name, values, method, entries, params, commands
