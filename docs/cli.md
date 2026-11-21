@@ -1483,7 +1483,9 @@ per pair of contigs, `node1` before `node2` in the map's order, a contig's
 contacts with itself included once. `out` takes a path, or an open text stream,
 which is written to and left open (the command passes stdout); at bin level the
 returned table holds every pixel, where a path or a stream gets them chunk by
-chunk.
+chunk. Before metacooler 0.4.0, `network` without `out` printed the edges;
+`out=sys.stdout` still does. A map without a pixel gives an empty table with the
+dtypes of any other.
 
 ```python
 import metacooler
