@@ -628,10 +628,12 @@ def _destinations(
     paths = {group.name: out / f"{group.name}{FASTA_SUFFIX}" for group in selection}
     existing = []
     for path in paths.values():
-        # Refuses an input, or a directory, in the way: replaced only once
-        # written, an existing file is kept until then.
+        # Refuses an input, a directory, a device or a FIFO in the way:
+        # replaced only once written, an existing file is kept until then. A
+        # symbolic link there, dangling or not, is an existing file: the
+        # rename replaces the link, never its target.
         check_output_path(path, True, inputs=inputs, defer_removal=True)
-        if path.exists():
+        if os.path.lexists(path):
             existing.append(path.name)
     if existing and not force:
         raise FileExistsError(

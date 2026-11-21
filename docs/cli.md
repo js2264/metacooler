@@ -1533,12 +1533,13 @@ a `/`) or that would name one file where case is ignored (`Bin` and `bin`, on
 macOS or Windows) ask for `--single-file`; a name with whitespace cannot name
 a record with `--stitch` or `--single-file`; the existing `<name>.fa` files are
 refused without `-f`, all of them at once (the error counts them and names the
-first five). Then the assembly is read, and every contig to write checked.
-Nothing is written before all of that passes. Every file is then written to a
-temporary file beside it (`.fasta-*.tmp`), and once all of them are written,
-each is renamed over its destination: a failure while writing (a full disk,
-Ctrl-C) leaves no new file and every existing one as it was; only a failure
-between two renames could leave the set half updated.
+first five) — a symbolic link there, even a dangling one, is one: `-f` replaces
+the link, never its target. Then the assembly is read, and every contig to
+write checked. Nothing is written before all of that passes. Every file is
+then written to a temporary file beside it (`.fasta-*.tmp`), and once all of
+them are written, each is renamed over its destination: a failure while
+writing (a full disk, Ctrl-C) leaves no new file and every existing one as it
+was; only a failure between two renames could leave the set half updated.
 
 Each run reads the whole assembly once, and copies a compressed or piped one
 first: from Python, give every group of a run to one `write_fasta` call.
