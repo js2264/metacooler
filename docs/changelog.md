@@ -72,6 +72,20 @@
   by someone else: a read that spanned a replacement mixed the bins of one map
   with the pixels of another. `merge` and `collect`, which read their inputs
   by path, write nothing when an input changed while they read it.
+- **`fasta`**: the contig sequences of each genome, or of each cluster of a
+  clustering round (`--round`), as FASTA, from the assembly the map was made
+  from (plain or gzip-compressed; nothing is written next to it). By default
+  one `<name>.fa` per genome, each contig's record copied byte for byte —
+  header line and line breaks included — in map order. `--stitch` writes one
+  record per genome or cluster, its contigs joined by `--spacer` N (100) and
+  wrapped at 80 columns; `--single-file` puts every record in one file, a
+  contig's header line prefixed with its genome (`<genome>|<header>`);
+  `--unbinned` adds the contigs in no genome, as `__unbinned__`, never
+  stitched. `--genomes` and `--filter` narrow the selection; with `--round`,
+  `--filter` also reads the round's clusters (`clusters.<column>`, as
+  `dump -t clusters` prints them), which every other command refuses by name.
+  Python: `metacooler.write_fasta`, whose `groups` writes groups of contigs the
+  map does not hold yet, each in the order given.
 - **`normalize`** (alias `normalise`): normalization weights for metagenomic
   Hi-C, stored as a column of `/bins` the way `cooler balance` stores one —
   multiplicative, `NaN` for a masked bin, the pixels untouched — so cooler,

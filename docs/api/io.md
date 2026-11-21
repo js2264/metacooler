@@ -11,6 +11,7 @@ are re-exported at the top level, so `metacooler.from_pairs(...)` and
 | `reassign` | `metacooler.io.reassign` |
 | `annotate` | `metacooler.io.annotate` |
 | `extract` | `metacooler.io.extract` |
+| `write_fasta` | `metacooler.io.fasta` |
 | `flatten` | `metacooler.io.flatten` |
 | `merge` | `metacooler.io.merge` |
 | `network` | `metacooler.io.network` |
@@ -153,6 +154,16 @@ except Exception:
     options:
       heading: "Extracting subsets"
       toc_label: "Extracting subsets"
+
+::: metacooler.io.fasta
+    options:
+      heading: "Writing sequences"
+      toc_label: "Writing sequences"
+      members:
+        - write_fasta
+        - LINE_WIDTH
+        - DEFAULT_SPACER
+        - SINGLE_FILE_SEPARATOR
 
 ::: metacooler.io.dump
     options:

@@ -258,6 +258,7 @@ click.rich_click.COMMAND_GROUPS = {
             "name": "Extract and view",
             "commands": [
                 "extract",
+                "fasta",
                 "flatten",
                 "dump",
                 "network",
@@ -307,6 +308,7 @@ from metacooler.cli import (  # noqa: E402, F401
     cmd_create_pairs,
     cmd_dump,
     cmd_extract,
+    cmd_fasta,
     cmd_flatten,
     cmd_info,
     cmd_ls,

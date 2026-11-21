@@ -20,6 +20,7 @@ import pandas as pd
 
 from metacooler._version import __version__
 from metacooler.schema import (
+    CLUSTER_DUMP_KEYS,
     COOLER_FORMAT,
     COOLER_FORMAT_URL,
     METACOOLER_FORMAT,
@@ -1535,6 +1536,13 @@ def genomes_filter_frame(genomes: pd.DataFrame) -> pd.DataFrame:
     """What ``--filter genomes.*`` reads: :func:`genomes_view`, plus ``name``
     as stored (see :func:`contigs_filter_frame`)."""
     return genomes_view(genomes).assign(name=genomes["name"])
+
+
+def clusters_filter_frame(clusters: pd.DataFrame) -> pd.DataFrame:
+    """What ``--filter clusters.*`` reads (``fasta --round``): the clusters as
+    ``dump -t clusters`` prints them (``MetaCooler.clusters``, the name under
+    ``cluster``), plus ``name`` as stored (see :func:`contigs_filter_frame`)."""
+    return clusters.rename(columns=CLUSTER_DUMP_KEYS).assign(name=clusters["name"])
 
 
 #: The columns ``dump`` computes from the map, besides the keys: a dump read

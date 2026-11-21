@@ -125,6 +125,43 @@ def parse_filter_list(ctx, param, value):
     return exprs
 
 
+def parse_cluster_filter_list(ctx, param, value):
+    """:func:`parse_filter_list`, for a command that also reads the clusters of
+    a round (``fasta --round``): ``clusters.<column>`` parses too."""
+    from metacooler.filters import TABLES_WITH_CLUSTERS, FilterError, parse_filter
+
+    exprs = [v for v in (value or ())]
+    for expr in exprs:
+        try:
+            parse_filter(expr, tables=TABLES_WITH_CLUSTERS)
+        except FilterError as exc:
+            raise click.BadParameter(str(exc)) from exc
+    return exprs
+
+
+def cluster_filter_option(f):
+    """``--filter``, with the clusters of a round as a third table."""
+    return click.option(
+        "--filter",
+        "filters",
+        type=str,
+        multiple=True,
+        callback=parse_cluster_filter_list,
+        metavar="EXPR",
+        help=(
+            "Keep only rows matching [cyan]<table>.<column> <op> <value>[/cyan], "
+            "where [cyan]<table>[/cyan] is [yellow]genomes[/yellow] or "
+            "[yellow]contigs[/yellow], or with [cyan]--round[/cyan] "
+            "[yellow]clusters[/yellow] (the round's table, as "
+            "[cyan]dump -t clusters[/cyan] prints it) — e.g. "
+            "[cyan]--filter 'genomes.Completeness >= 90'[/cyan]. Operators: "
+            "[cyan]> >= < <= == != =~ !~[/cyan]. Numbers accept "
+            "[cyan]bp/kb/Mb/Gb[/cyan] suffixes. Repeat the option to require "
+            "several conditions at once."
+        ),
+    )(f)
+
+
 def filter_option(f):
     """Attach the standard repeatable ``--filter`` option to a command."""
     return click.option(
