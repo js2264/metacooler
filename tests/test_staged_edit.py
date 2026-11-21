@@ -1598,6 +1598,22 @@ class TestAMapCopiedOut:
         with h5py.File(out, "r") as f:
             assert "by" not in f.attrs
 
+    def test_a_map_written_since_after_a_regrouping(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        """After a write of the session that may have changed the bins, a map
+        opened on the map as copied is read again: written since, it cannot
+        be, and is refused."""
+        out = tmp_path / "out.metacool"
+        source = MetaCooler(tiny_metacooler)
+        with staged_edit(tiny_metacooler, output=out, planned=source) as staged:
+            with h5py.File(tiny_metacooler, "r+") as f:  # another program
+                f.attrs["by"] = "another program"
+            reassign(staged, {"contig_A": "MAG_2"}, inplace=True)  # re-groups
+            with pytest.raises(MapChangedError, match="bins of the map written"):
+                _put_weights(staged, _bin_keys(staged), source)
+        validate(out, full=True)
+
     def test_a_map_read_after_a_regrouping_has_its_old_bins(
         self, tiny_metacooler: Path
     ):
@@ -1710,6 +1726,16 @@ class TestWhatAWeightDependsOn:
             written.bins()[:]["hit"], 1.0 / _by_contig(written, "coverage")
         )
         assert [r["name"] for r in written.cluster_rounds] == ["r1"]
+
+    def test_an_open_for_writing_changes_anything(self, tiny_metacooler: Path):
+        before = MetaCooler(tiny_metacooler)
+        with staged_edit(tiny_metacooler) as staged:
+            with MetaCooler(staged).open("r+") as grp:
+                grp.attrs["note"] = "written"
+            with pytest.raises(MapChangedError, match="changed pixels"):
+                _put_weights(staged, _bin_keys(tiny_metacooler), before)
+        with h5py.File(tiny_metacooler, "r") as f:
+            assert f.attrs["note"] == "written"
 
     def test_a_raw_write_changes_anything(self, tiny_metacooler: Path):
         before = MetaCooler(tiny_metacooler)

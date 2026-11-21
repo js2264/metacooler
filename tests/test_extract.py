@@ -66,6 +66,18 @@ class TestExtract:
         assert set(c1.chromnames) == {"contig_A", "contig_B"}
         assert set(c2.chromnames) == {"contig_C"}
 
+    def test_extract_split_keeps_an_existing_file_without_force(
+        self, tiny_metacooler, tmp_path
+    ):
+        out = tmp_path / "split"
+        existing = tmp_path / "split_MAG_1.cool"
+        existing.write_text("an earlier extraction")
+        with pytest.raises(FileExistsError, match="Use --force"):
+            extract(tiny_metacooler, genomes=["MAG_1"], output=out, split=True)
+        assert existing.read_text() == "an earlier extraction"
+        extract(tiny_metacooler, genomes=["MAG_1"], output=out, split=True, force=True)
+        assert set(cooler.Cooler(str(existing)).chromnames) == {"contig_A", "contig_B"}
+
     def test_extract_split_with_contigs_raises(self, tiny_metacooler, tmp_path):
         out = tmp_path / "split"
         # --split is genome-only: combining it with --contigs is an error.
