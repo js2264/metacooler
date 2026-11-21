@@ -14,7 +14,6 @@ import pandas as pd
 from metacooler.io._utils import (
     aggregate_pixels,
     check_output_path,
-    chrom_codes,
     to_upper_triangle,
 )
 from metacooler.io.weights import read_weights, spurious_cutoff
@@ -68,6 +67,34 @@ def _weighted(
     return b1[ok], b2[ok], values[ok]
 
 
+def _chunk_edges(
+    chunk: pd.DataFrame,
+    bin_to_node: np.ndarray,
+    weight: str,
+    weights: np.ndarray | None,
+) -> pd.DataFrame:
+    """The edges of one pixel chunk, summed by node pair (pixel-shaped, as
+    :func:`_fold` takes them)."""
+    b1, b2, values = _weighted(chunk, weight, weights)
+    n1, n2 = to_upper_triangle(bin_to_node[b1], bin_to_node[b2])
+    # A node pair sums every pixel between two contigs or genomes, and
+    # aggregate_pixels keeps the dtype it is given: an int32 count column
+    # (what create writes) wrapped past 2**31 to a negative edge weight.
+    # Widen integers as ops/aggregate does; float weights pass unchanged.
+    if np.issubdtype(values.dtype, np.integer):
+        values = values.astype(np.int64, copy=False)
+    return aggregate_pixels(
+        [pd.DataFrame({"bin1_id": n1, "bin2_id": n2, "count": values}, copy=False)]
+    )
+
+
+def _as_edges(pixels: pd.DataFrame) -> pd.DataFrame:
+    """A pixel-shaped frame of node pairs, its columns named as edges."""
+    return pixels.rename(
+        columns={"bin1_id": "node1", "bin2_id": "node2", "count": "value"}
+    )
+
+
 def _aggregate_pairs(
     mc,
     bin_to_node: np.ndarray,
@@ -95,29 +122,14 @@ def _aggregate_pairs(
 
     for lo in range(0, n_pix, chunksize):
         chunk = mc._clr.pixels()[lo : lo + chunksize]
-        b1, b2, values = _weighted(chunk, weight, weights)
-        n1, n2 = to_upper_triangle(bin_to_node[b1], bin_to_node[b2])
-        # A node pair sums every pixel between two contigs or genomes, and
-        # aggregate_pixels keeps the dtype it is given: an int32 count column
-        # (what create writes) wrapped past 2**31 to a negative edge weight.
-        # Widen integers as ops/aggregate does; float weights pass unchanged.
-        if np.issubdtype(values.dtype, np.integer):
-            values = values.astype(np.int64, copy=False)
-        df = pd.DataFrame(
-            {"bin1_id": n1, "bin2_id": n2, "count": values},
-            copy=False,
-        )
-        pending.append(aggregate_pixels([df]))
+        pending.append(_chunk_edges(chunk, bin_to_node, weight, weights))
         if len(pending) >= _FOLD_EVERY:
             running = _fold(pending if running is None else [running, *pending])
             pending = []
 
     if running is None and not pending:
         return None
-    edges = _fold(pending if running is None else [running, *pending])
-    return edges.rename(
-        columns={"bin1_id": "node1", "bin2_id": "node2", "count": "value"}
-    )
+    return _as_edges(_fold(pending if running is None else [running, *pending]))
 
 
 def _spurious_rule(mc, balance: str | None, level: str) -> tuple[float, str]:
@@ -186,9 +198,7 @@ def _regroup(edges: pd.DataFrame, contig_to_genome: np.ndarray) -> pd.DataFrame 
             )
         ]
     )
-    return summed.rename(
-        columns={"bin1_id": "node1", "bin2_id": "node2", "count": "value"}
-    )
+    return _as_edges(summed)
 
 
 def network(
@@ -201,13 +211,15 @@ def network(
     force: bool = False,
     balance: str | None = None,
     drop_spurious: bool = False,
+    ids: bool = False,
 ) -> pd.DataFrame | None:
     """Export a network edge list from a metacool file, or return it.
 
     The edges are ``node1``, ``node2``, ``value``: contig or genome names at
-    ``contig`` and ``genome`` level, one row per pair of nodes with
-    ``node1 <= node2`` in the map's order (a node's contacts with itself
-    included, once), and bin ids at ``bin`` level, one row per pixel.
+    ``contig`` and ``genome`` level (their ids with *ids*), one row per pair
+    of nodes with ``node1 <= node2`` in the map's order (a node's contacts
+    with itself included, once), and bin ids at ``bin`` level, one row per
+    pixel.
 
     Args:
         uri: Path to the source ``.metacool`` file.
@@ -230,6 +242,16 @@ def network(
             *balance* normalization deems spurious (its stored
             ``spurious_cutoff``; NormCC and HiCzin record one) before the
             edges are summed to genomes.
+        ids: Give each contig or genome as its id instead of its name: its
+            row in ``/contigs`` or ``/genomes``, the index of
+            ``MetaCooler.contigs`` or ``MetaCooler.genomes`` (a row of this
+            map, which a ``reassign`` may renumber), as ``int64``, the type of
+            the bin ids at ``bin`` level.  The rows and their order are those
+            of the names, which ``contigs["name"].to_numpy()[edges["node1"]]``
+            gives back.  The edges are summed by id either way: *ids* only
+            leaves the names off, and with them a string per node of every
+            edge.  At ``bin`` level, whose nodes are bin ids already, it
+            changes nothing.
 
     Raises:
         ValueError: If *weight* column does not exist in the pixels table, if
@@ -240,7 +262,8 @@ def network(
         FileExistsError: If *out* exists and *force* is False.
 
     Returns:
-        The edges, when *out* is ``None``; otherwise ``None``.
+        The edges, when *out* is ``None``; otherwise ``None``.  With *ids*,
+        ``node1`` and ``node2`` are ``int64`` even without an edge.
     """
     from metacooler.api import MetaCooler
 
@@ -298,15 +321,15 @@ def network(
                 fout.write(df.to_csv(sep="\t", index=False, header=False))
         return None
 
-    # Contig and genome levels: map every bin to its node, then reduce.
-    bin_to_contig = chrom_codes(mc.bins())
-    contig_to_genome = mc.contigs["genome_id"].to_numpy()
-    if level == "contig":
-        bin_to_node = bin_to_contig
-        node_names = mc.contigs["name"].values
-    else:
-        bin_to_node = contig_to_genome[bin_to_contig]
-        node_names = mc.genomes["name"].values
+    # Contig and genome levels: map every bin to its node, then reduce, in ids
+    # throughout -- a bin's contig from indexes/chrom_offset, a contig's genome
+    # from /contigs/genome_id, neither the bin table nor a name -- so that the
+    # names are read and put on at the end, and only without *ids*.
+    bin_to_contig = mc._bin_contig_ids
+    contig_to_genome = mc._contig_genome_ids
+    bin_to_node = (
+        bin_to_contig if level == "contig" else contig_to_genome[bin_to_contig]
+    )
 
     if cutoff is None:
         agg = _aggregate_pairs(mc, bin_to_node, weight, n_pix, chunksize, weights)
@@ -317,13 +340,21 @@ def network(
         )
         if agg is not None and level == "genome":
             agg = _regroup(agg, contig_to_genome)
+    if agg is None and ids:
+        # No edge: an empty pixel chunk's, so that the columns keep the types
+        # edges would have.
+        empty = cast(pd.DataFrame, mc._clr.pixels()[:0])
+        agg = _as_edges(_chunk_edges(empty, bin_to_node, weight, weights))
     if agg is None:
         edges = pd.DataFrame(columns=list(_EDGE_COLUMNS))
+    elif ids:
+        edges = agg
     else:
+        names = (mc.contigs if level == "contig" else mc.genomes)["name"].values
         edges = pd.DataFrame(
             {
-                "node1": node_names[agg["node1"].values],
-                "node2": node_names[agg["node2"].values],
+                "node1": names[agg["node1"].values],
+                "node2": names[agg["node2"].values],
                 "value": agg["value"].values,
             }
         )

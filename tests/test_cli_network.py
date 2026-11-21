@@ -221,6 +221,58 @@ class TestNetworkCLITiny:
         )
 
 
+class TestNetworkCLIIds:
+    """``--ids``: contig or genome ids, what ``network(ids=True)`` writes."""
+
+    @pytest.mark.parametrize("level", ["contig", "genome"])
+    def test_ids_are_what_the_api_writes(self, runner, a1_rep1_1kb, tmp_path, level):
+        from metacooler.api import MetaCooler
+        from metacooler.io.network import network
+
+        out = tmp_path / "ids.tsv"
+        result = runner.invoke(
+            cli,
+            ["network", str(a1_rep1_1kb), "--level", level, "--ids", "-o", str(out)],
+        )
+        assert result.exit_code == 0, result.output
+        expected = tmp_path / "api.tsv"
+        network(a1_rep1_1kb, level=level, ids=True, out=expected)
+        assert out.read_bytes() == expected.read_bytes()
+        mc = MetaCooler(a1_rep1_1kb)
+        names = (mc.contigs if level == "contig" else mc.genomes)["name"].tolist()
+        named = runner.invoke(
+            cli, ["network", str(a1_rep1_1kb), "--level", level, "-q"]
+        )
+        assert named.exit_code == 0, named.output
+        rows = [line.split("\t") for line in out.read_text().splitlines()]
+        assert [
+            f"{names[int(n1)]}\t{names[int(n2)]}\t{value}" for n1, n2, value in rows
+        ] == named.output.splitlines()
+
+    def test_ids_to_stdout_with_a_header(self, runner, tiny_metacooler):
+        result = runner.invoke(
+            cli, ["network", str(tiny_metacooler), "--ids", "--header", "-q"]
+        )
+        assert result.exit_code == 0, result.output
+        header, *rows = result.output.splitlines()
+        assert header == "node1\tnode2\tvalue"
+        assert rows
+        for row in rows:
+            assert all(field.isdigit() for field in row.split("\t"))
+
+    def test_ids_change_nothing_at_bin_level(self, runner, tiny_metacooler):
+        argv = ["network", str(tiny_metacooler), "--level", "bin", "-q"]
+        with_ids = runner.invoke(cli, [*argv, "--ids"])
+        without = runner.invoke(cli, argv)
+        assert with_ids.exit_code == 0, with_ids.output
+        assert with_ids.output == without.output
+
+    def test_help_lists_ids(self, runner):
+        result = runner.invoke(cli, ["network", "--help"])
+        assert result.exit_code == 0
+        assert "--ids" in result.output
+
+
 # ---------------------------------------------------------------------------
 # TestNetworkCLIRealData — real assembly files
 # ---------------------------------------------------------------------------

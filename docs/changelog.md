@@ -111,6 +111,16 @@
   `cooler dump --balanced`) and `network`, for any weight column;
   **`network --drop-spurious`** drops the contig pairs below the
   spurious-contact cutoff NormCC and HiCzin store.
+- **`network --ids`** (API: `network(..., ids=True)`): at contig and genome
+  level, each node is the contig's or genome's id, its row in `/contigs` or
+  `/genomes` (`int64`), instead of its name: the same edges, in the same
+  order. The edges are summed by id either way, so a tool that works in ids,
+  as metaTOR does, no longer has a name put on every edge only to look it up
+  again: on a map of 200 k contigs and 10 M pixels (5.6 M contig edges),
+  metaTOR's round trip took 6.4 s where `ids=True` takes 2.2 s. At
+  `--level bin`, whose nodes are bin ids already, `--ids` changes nothing.
+  Without it, `network` writes what it wrote, but sums the edges without
+  reading the bin table, and reads the names only at the end.
 - **Normalization weights are dropped when they go stale.** `reassign` drops
   the weights that depend on the genome assignment when a contig changes genome
   — and, when it rewrites the map, restores the attributes of the weights it
