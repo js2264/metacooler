@@ -1637,12 +1637,10 @@ class TestWhatTheMapKeeps:
         assert os.getxattr(tiny_metacooler, "user.project") == b"gut"
         assert os.getxattr(tiny_metacooler, "system.posix_acl_access") == _ACL
 
-    def test_what_cannot_be_kept_is_named(
+    def test_an_owner_that_cannot_be_kept_is_named(
         self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch, caplog
     ):
-        """A group member cannot give the map's owner back (only its group);
-        an attribute that cannot be set is named."""
-        os.setxattr(tiny_metacooler, "user.project", b"gut")
+        """A group member cannot give the map's owner back, only its group."""
         info = tiny_metacooler.stat()
         real_chown = os.chown
 
@@ -1655,13 +1653,9 @@ class TestWhatTheMapKeeps:
         monkeypatch.setattr(
             staging.os, "stat", _faking_owner(os.stat, tiny_metacooler, info)
         )
-        monkeypatch.setattr(
-            staging.os, "setxattr", lambda *a: (_ for _ in ()).throw(OSError(1, "no"))
-        )
         with caplog.at_level("WARNING", logger="metacooler"):
             _store(tiny_metacooler)
         assert "its owner (uid 4242) cannot be kept" in caplog.text
-        assert "its extended attribute(s) user.project cannot be kept" in caplog.text
         assert "its group" not in caplog.text
 
     def test_a_group_that_cannot_be_kept_is_named(
@@ -2171,23 +2165,41 @@ class TestCorners:
         staging._remove_foreign_staging(tmp_path / "missing" / "m.metacool", "x")
 
     def test_extended_attributes_that_cannot_be_listed_or_set(
-        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tiny_metacooler: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
     ):
+        """Where extended attributes cannot be listed, none is copied; one that
+        cannot be set is named; the SELinux label is left to the policy.  (The
+        os functions are Linux's: set, not replaced, elsewhere.)"""
         target = tmp_path / "copy"
         target.write_text("x")
+
+        def unsupported(path):
+            raise OSError(95, "Not supported")
+
+        monkeypatch.setattr(staging.os, "listxattr", unsupported, raising=False)
+        staging._copy_xattrs(tiny_metacooler, target)  # nothing to copy
+        tried: list[str] = []
+
+        def setxattr(path, name, value):
+            tried.append(name)
+            if name == "user.b":
+                raise OSError(1, "Operation not permitted")
+
         monkeypatch.setattr(
             staging.os,
             "listxattr",
-            lambda path: (_ for _ in ()).throw(OSError(95, "Not supported")),
+            lambda path: ["security.selinux", "user.a", "user.b"],
+            raising=False,
         )
-        staging._copy_xattrs(tiny_metacooler, target)  # nothing to copy
-        set_names: list[str] = []
         monkeypatch.setattr(
-            staging.os, "listxattr", lambda path: ["security.selinux", "user.a"]
+            staging.os, "getxattr", lambda path, name: b"v", raising=False
         )
-        monkeypatch.setattr(staging.os, "getxattr", lambda path, name: b"v")
-        monkeypatch.setattr(
-            staging.os, "setxattr", lambda path, name, value: set_names.append(name)
-        )
-        staging._copy_xattrs(tiny_metacooler, target)
-        assert set_names == ["user.a"]  # the SELinux label is the policy's
+        monkeypatch.setattr(staging.os, "setxattr", setxattr, raising=False)
+        with caplog.at_level("WARNING", logger="metacooler"):
+            staging._copy_xattrs(tiny_metacooler, target)
+        assert tried == ["user.a", "user.b"]
+        assert "its extended attribute(s) user.b cannot be kept" in caplog.text
