@@ -19,15 +19,15 @@ def contend(path: str, rounds: int, barrier, results) -> None:
     from metacooler.io.staging import MapLockedError, lock
 
     for r in range(rounds):
-        barrier.wait()
+        barrier.wait(60)
         try:
             with lock(path):
                 results.put((r, os.getpid(), "held"))
-                barrier.wait()
+                barrier.wait(60)
         except MapLockedError:
             results.put((r, os.getpid(), "refused"))
-            barrier.wait()
-        barrier.wait()
+            barrier.wait(60)
+        barrier.wait(60)
 
 
 def hold(path: str, ready, release) -> None:

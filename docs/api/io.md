@@ -51,6 +51,19 @@ A `MetaCooler` opened before a replacement refuses to read on
 (`metacooler.MapChangedError`): open the map again. Both errors, and
 `MapLockError`, are `OSError`s.
 
+Several edits in a row go through one staged copy, validated and renamed once,
+with `metacooler.staged_edit` (see [Several edits at once](../cli.md#staged-edit)):
+
+```python
+with metacooler.staged_edit("sample.metacool") as staged:
+    metacooler.store_weights(staged, "w", weights, method="tool", depends_on="pixels")
+    metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
+
+# An entry of a collection, edited into a standalone map:
+with metacooler.staged_edit("run.mmetacool::entries/r1", output="r1.metacool") as staged:
+    metacooler.write_clusters(staged, rounds, clusters, members)
+```
+
 ## A failed write { #keep-partial }
 
 `from_pairs`, `from_cool`, `collect`, `reassign` and `annotate` (the last two
@@ -124,6 +137,17 @@ except Exception:
     options:
       heading: "Metacooler collections"
       toc_label: "Metacooler collections"
+
+::: metacooler.io.staging
+    options:
+      heading: "Locks and edit sessions"
+      toc_label: "Locks and edit sessions"
+      members:
+        - lock
+        - staged_edit
+        - MapLockError
+        - MapLockedError
+        - MapChangedError
 
 ::: metacooler.io.extract
     options:

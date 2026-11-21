@@ -568,7 +568,7 @@ and none re-bins a single contact.
 |---------|-----------------|------|
 | [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places (plus a copy of the file, in place or not); a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
 | [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds, plus a copy of the file in place. |
-| [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels; tens of passes for `ice`. |
+| [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels (tens for `ice`), plus a copy of the file and its full validation. |
 | [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | A copy of the file. |
 
 `reassign` and `annotate` write either an edited copy (`-o`) or the map itself
@@ -585,18 +585,24 @@ map is whole whatever stops the edit — an error, Ctrl-C, a failed validation �
 and it does not grow with what each edit replaces (HDF5 never reclaims that
 space). It costs a copy of the file per edit, in time and in disk space beside
 the map, and a full validation, and needs a writable directory. The map keeps
-its mode and, where the process may set them, its owner and group; a map
-without write permission is refused, as editing it in place was; a symbolic
-link is replaced by the edited map, its target left as it was.
+its owner and group where the process may set them (a member of a shared
+map's group keeps its group, and a warning names what it cannot keep), its
+mode and its extended attributes, POSIX ACLs included; a map without write
+permission is refused, as editing it in place was. An edit through a symbolic
+link edits its target, and the link keeps pointing at it; an output (`-o`)
+that is a link is replaced, never written through. A program that writes the
+map without metacooler's lock (`cooler balance`, say) while its copy is
+edited makes the edit fail rather than lose that program's write.
 
 The lock, `<map>.lock`, keeps a second writer out — another process, or
 another thread: it is refused with the pid, host, start and command of the one
 writing. A lock left by a process that is gone — killed outright (`kill -9`),
 or stopped by a scheduler's `SIGTERM` at its time limit: metacooler sets no
 signal handler — is taken over by the next writer on the same host, with a
-warning, and what that process staged is removed. A lock of another host is
-never broken: the error names the lock file to delete once that process is
-gone. A command that reads a map while it is replaced, or a `MetaCooler`
+warning. A lock of another host (or of another machine or PID namespace
+under the same host name: a container) is never broken: the error names the
+lock file, and the staging directories, to delete once that process is gone.
+Whoever takes the lock next removes what a killed writer staged, naming it. A command that reads a map while it is replaced, or a `MetaCooler`
 opened before, stops with an error rather than mixing two versions of the map:
 open it again. See [In-place writes](format.md#in-place-writes).
 
@@ -607,6 +613,42 @@ QC run on the new bins.
 
 One option of another command also edits a map: [`qc --store`](#qc) writes the
 contact-quality block and the `qc_*` columns back into the map it measured.
+
+### Several edits at once, from Python { #staged-edit }
+
+Each in-place edit copies and validates the whole map. A pipeline that makes
+several edits in a row opens one **edit session** instead: one staged copy,
+written by every writer it is given to, validated once and renamed once.
+
+```python
+import metacooler
+
+with metacooler.staged_edit("sample.metacool") as staged:
+    metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
+    metacooler.store_weights(staged, "w", weights, method="tool", depends_on="pixels")
+    metacooler.write_clusters(staged, rounds, clusters, members)
+# Here, and only here, sample.metacool is replaced: whole, validated.
+```
+
+- Every writer — `annotate(inplace=True)`, `reassign(inplace=True)`,
+  `store_weights`, `write_clusters`, `drop_clusters`, `contact_qc(store=True)`,
+  the `normalize_*` functions, the entry functions — given the staged map by
+  the session's thread writes it directly: no copy, no validation, no lock of
+  its own. Another thread is refused it, and a write of the map itself (not of
+  its staged copy) from the session's thread is refused while the session
+  runs.
+- On any failure, `KeyboardInterrupt` and `SystemExit` included, the staged
+  copy is removed and the map is left as it was; so is a map that another
+  program wrote meanwhile (`MapChangedError`).
+- `staged_edit(uri, output=PATH)` copies the map to a new file instead, an
+  entry of a `.mmetacool` as a standalone `.metacool` (refused if `PATH`
+  exists, unless `force=True`; a link at `PATH` is replaced, not followed).
+- `planned=mc` refuses a session on a map that changed since `mc` was opened;
+  `command=` names the session in the map's lock. A session takes the map's
+  lock unless its thread holds it already (`metacooler.lock`), and a nested
+  session on the same map joins the open one.
+- A `MetaCooler` of the staged map, opened before a write of the session,
+  stops reading after it (`MapChangedError`): open it again.
 
 ### `reassign` { #reassign }
 

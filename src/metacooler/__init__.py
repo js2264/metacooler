@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         MapLockedError,
         MapLockError,
         lock,
+        staged_edit,
     )
     from metacooler.io.weights import read_weights, store_weights
     from metacooler.ops.aggregate import aggregate
@@ -119,6 +120,7 @@ __all__ = [
     "parse_uri",
     # in-place writes
     "lock",
+    "staged_edit",
     "MapLockError",
     "MapLockedError",
     "MapChangedError",
@@ -303,6 +305,10 @@ def __getattr__(name: str) -> object:
         from metacooler.io.staging import lock as _lock
 
         return _lock
+    if name == "staged_edit":
+        from metacooler.io.staging import staged_edit as _staged_edit
+
+        return _staged_edit
     if name == "MapLockError":
         from metacooler.io.staging import MapLockError as _MapLockError
 

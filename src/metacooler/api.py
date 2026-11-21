@@ -1317,8 +1317,9 @@ class MetaCooler:
                 yield f[key] if key else f
             self._check_unchanged()
             return
-        from metacooler.io.staging import lock
+        from metacooler.io.staging import _refuse_the_map_of_a_session, lock
 
+        _refuse_the_map_of_a_session(self._store)
         with lock(self._store):
             self._check_unchanged()
             try:
@@ -1439,6 +1440,18 @@ class _CheckedCooler(cooler.Cooler):
         out = super().info
         self._check()
         return out
+
+    @contextlib.contextmanager
+    def open(self, mode: str = "r", **kwargs):  # type: ignore[override]
+        """``cooler.Cooler.open``, checked on entry and exit: cooler's own
+        readers -- ``balance_cooler``'s chunks, ``cooler.parallel`` -- open the
+        file through it."""
+        self._check()
+        # cooler annotates open() as returning the group it yields.
+        opener: Any = super().open
+        with opener(mode, **kwargs) as grp:
+            yield grp
+        self._check()
 
 
 def _open_cooler(uri: str, validate: bool, check: Callable[[], None]) -> cooler.Cooler:

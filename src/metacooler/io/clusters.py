@@ -412,15 +412,17 @@ def write_clusters(
             metacooler computes (``n_contigs``, ``length``).
     """
     from metacooler.api import MetaCooler
-    from metacooler.io.staging import lock, staged_inplace
+    from metacooler.io.staging import in_session, lock, staged_inplace
 
     path, key = _map_group(uri)
     with lock(path):
         # The map is checked in full before anything is written, so that the
-        # new group, itself checked before the swap, is the only change.
+        # new group, itself checked before the swap, is the only change -- but
+        # in an edit session, which validates once, when it ends.
         try:
             mc = MetaCooler(uri)
-            validate(uri)
+            if not in_session(uri):
+                validate(uri)
         except MetaCoolerFormatError as exc:
             _hint_broken_clusters(uri, exc)
             raise

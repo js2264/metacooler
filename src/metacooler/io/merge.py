@@ -25,6 +25,11 @@ from metacooler.io._utils import (
     write_cooler,
 )
 from metacooler.io.clusters import clusters_digest, copy_clusters
+from metacooler.io.staging import (
+    MapChangedError,
+    check_inputs_unchanged,
+    input_states,
+)
 from metacooler.qc import (
     QC_CATEGORIES,
     QC_CONTIG_COLUMNS,
@@ -747,6 +752,8 @@ def merge(
     _refuse_repeated_inputs(inputs)
     # cooler writes the output in "w" mode; refuse to truncate an input with it.
     check_output_path(output, force=True, inputs=inputs, defer_removal=True)
+    # The inputs are read by path, by cooler too: checked unchanged at the end.
+    states = input_states(inputs)
 
     # Validate and compare axes
     first = inputs[0]
@@ -923,4 +930,9 @@ def merge(
     if summed_qc is not None:
         _store_summed_qc(output, summed_qc)
 
+    try:
+        check_inputs_unchanged(states)
+    except MapChangedError:
+        Path(output).unlink(missing_ok=True)
+        raise
     validate(output)

@@ -97,6 +97,7 @@ class TestInit:
             "parse_uri",
             # in-place writes
             "lock",
+            "staged_edit",
             "MapLockError",
             "MapLockedError",
             "MapChangedError",

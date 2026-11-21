@@ -12,25 +12,38 @@
   private directory beside it, validates it in full, and renames it over the
   map: the map is whole whatever stops the edit (an error, a failed
   validation, `KeyboardInterrupt`, `SystemExit`) and does not grow with every
-  edit. The map keeps its mode and, where the process may set them, its owner
-  and group; a symbolic link is replaced, not its target. The lock,
-  `<map>.lock`, names its holder (pid, host, boot id, process start, command,
-  uuid): a live holder — another process, or another thread — is refused by
-  name; the lock of a process of this host that is gone (`kill -9`, or a
-  scheduler's `SIGTERM`: metacooler sets no signal handler) is taken over by
-  one process exactly, under a guard, with what that process staged; a lock
-  of another host is never broken. Python: `metacooler.lock(path)` holds a
-  map's lock for a whole run (re-entrant for its thread, so the writers called
-  meanwhile take it on) and refuses with `metacooler.MapLockedError` (a
-  `MapLockError`, an `OSError`); `store_weights(source=mc)` refuses weights
-  computed from a map that changed since. See
-  [In-place writes](format.md#in-place-writes).
+  edit. The map keeps its owner and group where the process may set them (a
+  member of a shared map's group keeps its group; a warning names what cannot
+  be kept), its mode and its extended attributes, POSIX ACLs included; an
+  edit through a symbolic link edits its target, the link left pointing at it.
+  A program that writes the map without the lock while its copy is edited
+  (`cooler balance`, say) makes the edit fail rather than lose that write. The
+  lock, `<map>.lock`, names its holder (pid, host, machine id, PID namespace,
+  boot id, process start, command, uuid): a live holder — another process, or
+  another thread — is refused by name; the lock of a process of this host
+  that is gone (`kill -9`, or a scheduler's `SIGTERM`: metacooler sets no
+  signal handler) is taken over by one process exactly, under a guard; a lock
+  of another host, machine or PID namespace is never broken. Whoever takes a
+  lock removes what killed writers staged beside the map, naming it. Python:
+  `metacooler.lock(path)` holds a map's lock for a whole run (re-entrant for
+  its thread, so the writers called meanwhile take it on) and refuses with
+  `metacooler.MapLockedError` (a `MapLockError`, an `OSError`);
+  `store_weights(source=mc)` refuses weights computed from a map that changed
+  since. See [In-place writes](format.md#in-place-writes).
+- **`metacooler.staged_edit`**: several edits of a map through one staged
+  copy, validated and renamed once. Every writer given its staged map by the
+  session's thread writes it directly — no copy, no validation, no lock of its
+  own — and a failure of any kind leaves the map as it was. With
+  `output=PATH`, the edited map goes to a new file instead, an entry of a
+  `.mmetacool` as a standalone `.metacool`. See
+  [Several edits at once](cli.md#staged-edit).
 - **A read across a replacement is refused.** `MetaCooler` checks, before and
   after every read — each chunk of pixels cooler reads, `info`, each table —
   that its file is still the one it opened, and raises
   `metacooler.MapChangedError` (an `OSError`) once it was replaced or written
   by someone else: a read that spanned a replacement mixed the bins of one map
-  with the pixels of another.
+  with the pixels of another. `merge` and `collect`, which read their inputs
+  by path, write nothing when an input changed while they read it.
 - **`normalize`** (alias `normalise`): normalization weights for metagenomic
   Hi-C, stored as a column of `/bins` the way `cooler balance` stores one —
   multiplicative, `NaN` for a masked bin, the pixels untouched — so cooler,
@@ -112,9 +125,10 @@
   (see Added) copies the map, so it needs a writable directory, room for a
   second copy of the map beside it, and the time of the copy and of a full
   validation: `annotate --inplace` on a large map took seconds and now takes
-  as long as a copy. A map without write permission is refused (it was
-  refused by the edit in place, and would otherwise have been replaced in a
-  writable directory).
+  as long as a copy (several edits in a row cost one copy through
+  `metacooler.staged_edit`). A map without write permission is refused (it
+  was refused by the edit in place, and would otherwise have been replaced in
+  a writable directory).
 - **`reassign --inplace` re-groups too**: a reassignment that has to move
   contigs to keep the genomes contiguous wrote only to a new file (`-o`); in
   place, it now writes the new map beside the old one and replaces it. It is

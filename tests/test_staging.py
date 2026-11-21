@@ -14,10 +14,12 @@ child, and what a re-grouping would drop.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing
 import os
 import pickle
+import shutil
 import socket
 import threading
 import time
@@ -63,16 +65,31 @@ from metacooler.schema import MetaCoolerFormatError, validate
 
 #: A pid no process of this host has (above any pid_max).
 DEAD_PID = 999_999_999
+#: Lock uuids, as they name what their holder stages.
+DEAD_RUN = "deadbeef" * 4
+OTHER_RUN = "0f" * 16
 SPAWN = multiprocessing.get_context("spawn")
 
 
+def _here() -> dict:
+    """Where this process runs, as a lock records it."""
+    return {
+        "host": socket.gethostname(),
+        "machine_id": staging._machine_id(),
+        "pid_ns": staging._pid_namespace(),
+    }
+
+
 def _write_lock(
-    path: Path, pid: int, *, host: str | None = None, run: str = "deadrun", **extra
+    path: Path, pid: int, *, host: str | None = None, run: str = DEAD_RUN, **extra
 ) -> dict:
-    """A lock file of *path*, as a holder of *pid* on *host* wrote it."""
+    """A lock file of *path*, as a holder of *pid* on *host* (of this machine
+    and PID namespace, unless *extra* says otherwise) wrote it."""
     holder = {
         "pid": pid,
         "host": host or socket.gethostname(),
+        "machine_id": staging._machine_id(),
+        "pid_ns": staging._pid_namespace(),
         "start": "2026-11-20T10:00:00+0000",
         "command": "metator pipeline map.metacool",
         "uuid": run,
@@ -80,6 +97,49 @@ def _write_lock(
     }
     lock_path(path).write_text(json.dumps(holder))
     return holder
+
+
+def _walk(group: h5py.Group, prefix: str = "", ignore: frozenset = frozenset()) -> dict:
+    """Everything *group* holds, as stored: datasets (dtype, shape, chunks,
+    filters, values), groups, soft links (relative to *prefix*) and every
+    attribute with its dtype."""
+    found: dict = {
+        "attrs": {
+            name: (
+                np.asarray(group.attrs[name]).tolist(),
+                str(group.attrs.get_id(name).dtype),
+            )
+            for name in group.attrs
+            if name not in ignore
+        }
+    }
+    for name in group:
+        link = group.get(name, getlink=True)
+        if isinstance(link, h5py.SoftLink):
+            found[name] = ("link", link.path.removeprefix(prefix))
+            continue
+        node = group[name]
+        if isinstance(node, h5py.Group):
+            found[name] = _walk(node, prefix, ignore)
+        else:
+            found[name] = (
+                str(node.dtype),
+                node.shape,
+                node.chunks,
+                node.compression,
+                node.compression_opts,
+                node.shuffle,
+                np.asarray(node[()]).tobytes(),
+                {
+                    key: (
+                        np.asarray(node.attrs[key]).tolist(),
+                        str(node.attrs.get_id(key).dtype),
+                    )
+                    for key in node.attrs
+                    if key not in ignore
+                },
+            )
+    return found
 
 
 def _left_beside(path: Path) -> list[str]:
@@ -211,15 +271,22 @@ class TestLock:
             assert lock_file == tiny_mmetacool.with_name("tiny.mmetacool.lock")
             assert holds_lock(f"{tiny_mmetacool}::entries/entry2")
 
-    def test_next_to_a_symbolic_link_not_its_target(
+    def test_beside_the_target_of_a_symbolic_link(
         self, tiny_metacooler: Path, tmp_path: Path
     ):
-        """The link is what an in-place write replaces, so it is what is
-        locked."""
-        link = tmp_path / "link.metacool"
+        """The target is what an in-place edit through a link replaces, so it
+        is what is locked: the link and the target share one lock."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        link = elsewhere / "link.metacool"
         link.symlink_to(tiny_metacooler)
         with lock(link) as lock_file:
-            assert lock_file == tmp_path / "link.metacool.lock"
+            assert lock_file == tiny_metacooler.with_name("tiny.metacool.lock")
+            assert lock_path(tiny_metacooler) == lock_file
+            assert holds_lock(tiny_metacooler)
+            with pytest.raises(MapLockedError):
+                _in_thread(lambda: lock(tiny_metacooler).__enter__())
+        assert not lock_file.exists()
 
     def test_one_lock_whatever_the_name_of_its_directory(
         self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -295,7 +362,7 @@ class TestLock:
         """A lock seen empty may be one its creator is writing: read again."""
         lock_file = lock_path(tiny_metacooler)
         lock_file.write_text("")
-        live = {"pid": os.getppid(), "host": socket.gethostname(), "uuid": "live"}
+        live = {"pid": os.getppid(), **_here(), "uuid": "live"}
 
         def written_later():
             time.sleep(0.05)
@@ -314,16 +381,19 @@ class TestLock:
         self, tiny_metacooler: Path, caplog: pytest.LogCaptureFixture
     ):
         """A lock of a process of this host that is gone (killed outright) is
-        taken over, and what it staged is removed: its own only."""
-        _write_lock(tiny_metacooler, DEAD_PID, run="deadrun")
+        taken over, and what any writer that no longer holds the lock staged
+        is removed, each named; other files are left alone."""
+        _write_lock(tiny_metacooler, DEAD_PID, run=DEAD_RUN)
         mine = tiny_metacooler.parent
-        staged = mine / ".tiny.metacool.deadrun.1.d"
+        staged = mine / f".tiny.metacool.{DEAD_RUN}.1.d"
         staged.mkdir()
         (staged / "tiny.metacool").write_text("half a map")
-        partial = mine / ".tiny.metacool.deadrun.1.staged"
-        other = mine / ".tiny.metacool.otherrun.1.d"
+        partial = mine / f".tiny.metacool.{DEAD_RUN}.1.staged"
+        other = mine / f".tiny.metacool.{OTHER_RUN}.2.d"
         partial.write_text("x")
         other.mkdir()
+        swap = mine / ".tiny.metacool.swp"
+        swap.write_text("an editor's")
         with (
             caplog.at_level("WARNING", logger="metacooler"),
             lock(tiny_metacooler) as lock_file,
@@ -331,8 +401,10 @@ class TestLock:
             assert json.loads(lock_file.read_text())["pid"] == os.getpid()
         assert f"Took over {lock_path(tiny_metacooler)}" in caplog.text
         assert f"pid {DEAD_PID}" in caplog.text
-        assert "Removed .tiny.metacool.deadrun.1.d," in caplog.text
-        assert not staged.exists() and not partial.exists() and other.exists()
+        for name in (staged.name, partial.name, other.name):
+            assert f"Removed {name}, left beside" in caplog.text
+        assert not staged.exists() and not partial.exists() and not other.exists()
+        assert swap.exists()
         assert not lock_path(tiny_metacooler).exists()
 
     @pytest.mark.parametrize("why", ["own pid", "earlier boot", "reused pid"])
@@ -506,7 +578,13 @@ class TestLock:
     def test_no_takeover_on_windows(self, monkeypatch: pytest.MonkeyPatch):
         """os.kill(pid, 0) terminates a process on Windows: no lock is judged
         stale there."""
-        holder = {"pid": DEAD_PID, "host": socket.gethostname(), "uuid": "x"}
+        holder = {
+            "pid": DEAD_PID,
+            "host": socket.gethostname(),
+            "machine_id": staging._machine_id(),
+            "pid_ns": staging._pid_namespace(),
+            "uuid": "x",
+        }
         assert staging._is_stale(holder)
         monkeypatch.setattr(staging.os, "name", "nt")
         assert not staging._is_stale(holder)
@@ -516,6 +594,7 @@ class TestLock:
     ):
         (tmp_path / ".map.run.1.staged").write_text("x")
         (tmp_path / ".map.run.1.fresh").write_text("x")
+        (tmp_path / "map.metacool").write_text("not staged")
         removed = os.remove
 
         def refuse_one(path):
@@ -599,9 +678,7 @@ class TestTakeover:
     ):
         stale = _write_lock(tiny_metacooler, DEAD_PID, run="dead")
         guard = Path(f"{lock_path(tiny_metacooler)}.takeover")
-        guard.write_text(
-            json.dumps({"pid": DEAD_PID, "host": socket.gethostname(), "uuid": "g"})
-        )
+        guard.write_text(json.dumps({"pid": DEAD_PID, **_here(), "uuid": "g"}))
         with (
             pytest.raises(MapLockedError, match="stopped while it took over") as caught,
             lock(tiny_metacooler),
@@ -620,9 +697,7 @@ class TestTakeover:
         stays too long is refused, the map's holder named."""
         _write_lock(tiny_metacooler, DEAD_PID, run="dead")
         guard = Path(f"{lock_path(tiny_metacooler)}.takeover")
-        guard.write_text(
-            json.dumps({"pid": os.getppid(), "host": socket.gethostname(), "uuid": "g"})
-        )
+        guard.write_text(json.dumps({"pid": os.getppid(), **_here(), "uuid": "g"}))
         monkeypatch.setattr(staging, "_TAKEOVER_WAIT", 0.1)
         with (
             pytest.raises(MapLockedError, match="has been taking over"),
@@ -754,16 +829,22 @@ class TestStagedWrites:
         assert (info.st_uid, info.st_gid) == (1234, 4321)
 
     @pytest.mark.parametrize("writer", list(WRITERS))
-    def test_a_symbolic_link_is_replaced_not_its_target(
+    def test_an_edit_through_a_symbolic_link_edits_its_target(
         self, tiny_metacooler: Path, tmp_path: Path, writer: str
     ):
-        link = tmp_path / "link.metacool"
+        """In place through a link: the target is replaced (beside it), and the
+        link stays a link to it."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        link = elsewhere / "link.metacool"
         link.symlink_to(tiny_metacooler)
-        target = tiny_metacooler.read_bytes()
+        inode = tiny_metacooler.stat().st_ino
         WRITERS[writer](link, tmp_path)
-        assert not link.is_symlink()
-        assert tiny_metacooler.read_bytes() == target
-        validate(link, full=True)
+        assert link.is_symlink() and os.readlink(link) == str(tiny_metacooler)
+        assert tiny_metacooler.stat().st_ino != inode
+        validate(tiny_metacooler, full=True)
+        assert _left_beside(tiny_metacooler) == []
+        assert sorted(p.name for p in elsewhere.iterdir()) == ["link.metacool"]
 
     def test_the_staged_map_is_private(self, tiny_metacooler: Path):
         """The staged copy of a private map is never readable by others, while
@@ -970,8 +1051,8 @@ class TestStagedWrites:
     def test_the_next_writer_removes_what_a_killed_one_left(
         self, tiny_metacooler: Path
     ):
-        _write_lock(tiny_metacooler, DEAD_PID, run="deadrun")
-        left = tiny_metacooler.with_name(".tiny.metacool.deadrun.1.d")
+        _write_lock(tiny_metacooler, DEAD_PID, run=DEAD_RUN)
+        left = tiny_metacooler.with_name(f".tiny.metacool.{DEAD_RUN}.1.d")
         left.mkdir()
         (left / "tiny.metacool").write_text("half a map")
         (left / "tmp8x2.multi.cool").write_text("cooler's")
@@ -1249,7 +1330,18 @@ class TestRegroupCarries:
     def _add_extras(path: Path, extra: str) -> str:
         """Give the map one thing a re-grouping does not write; return how the
         refusal names it."""
+        if extra.startswith("clusters"):
+            write_clusters(path, *_rounds(path))
         with h5py.File(path, "r+") as f:
+            if extra == "clusters attribute":
+                f["clusters"].attrs["tool-note"] = "keep me"
+                return "the attribute 'tool-note' of /clusters"
+            if extra == "clusters column attribute":
+                f["clusters/table/name"].attrs["unit"] = "none"
+                return "the attribute 'unit' of /clusters/table/name"
+            if extra == "clusters dataset":
+                f["clusters"].create_dataset("provenance", data=np.arange(3))
+                return "/clusters/provenance"
             if extra == "group":
                 f.create_group("metator").create_dataset("scores", data=[1, 2])
                 return "/metator"
@@ -1277,6 +1369,9 @@ class TestRegroupCarries:
         "table attribute",
         "column attribute",
         "index",
+        "clusters attribute",
+        "clusters column attribute",
+        "clusters dataset",
     ]
 
     @pytest.mark.parametrize("extra", EXTRAS)
@@ -1508,3 +1603,591 @@ class TestReads:
     def test_file_state(self, tiny_metacooler: Path):
         assert staging.file_state(tiny_metacooler.with_name("nothing")) is None
         assert staging.file_state(tiny_metacooler) is not None
+
+
+# ---------------------------------------------------------------------------
+# Second pass: owner, group, xattrs; what killed writers left; lost updates;
+# PID namespaces; registry waits and forks; checked cooler opens
+# ---------------------------------------------------------------------------
+def _acl(*entries: tuple[int, int, int]) -> bytes:
+    """A POSIX ACL as Linux stores it in ``system.posix_acl_access``."""
+    import struct
+
+    return struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+
+
+#: user::rw- user:1234:r-- group::r-- mask::r-- other::---
+_ACL = _acl(
+    (0x01, 6, 0xFFFFFFFF),
+    (0x02, 4, 1234),
+    (0x04, 4, 0xFFFFFFFF),
+    (0x10, 4, 0xFFFFFFFF),
+    (0x20, 0, 0xFFFFFFFF),
+)
+
+
+class TestWhatTheMapKeeps:
+    def test_extended_attributes_and_acls_are_kept(self, tiny_metacooler: Path):
+        try:
+            os.setxattr(tiny_metacooler, "user.project", b"gut")
+            os.setxattr(tiny_metacooler, "system.posix_acl_access", _ACL)
+        except (OSError, AttributeError):
+            pytest.skip("no extended attributes or ACLs here")
+        _store(tiny_metacooler)
+        assert os.getxattr(tiny_metacooler, "user.project") == b"gut"
+        assert os.getxattr(tiny_metacooler, "system.posix_acl_access") == _ACL
+
+    def test_what_cannot_be_kept_is_named(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        """A group member cannot give the map's owner back (only its group);
+        an attribute that cannot be set is named."""
+        os.setxattr(tiny_metacooler, "user.project", b"gut")
+        info = tiny_metacooler.stat()
+        real_chown = os.chown
+
+        def as_a_member(path, uid, gid):
+            if uid != -1:
+                raise PermissionError(1, "Operation not permitted")
+            real_chown(path, uid, gid)
+
+        monkeypatch.setattr(staging.os, "chown", as_a_member)
+        monkeypatch.setattr(
+            staging.os, "stat", _faking_owner(os.stat, tiny_metacooler, info)
+        )
+        monkeypatch.setattr(
+            staging.os, "setxattr", lambda *a: (_ for _ in ()).throw(OSError(1, "no"))
+        )
+        with caplog.at_level("WARNING", logger="metacooler"):
+            _store(tiny_metacooler)
+        assert "its owner (uid 4242) cannot be kept" in caplog.text
+        assert "its extended attribute(s) user.project cannot be kept" in caplog.text
+        assert "its group" not in caplog.text
+
+    def test_a_group_that_cannot_be_kept_is_named(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        info = tiny_metacooler.stat()
+
+        def refused(*args):
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(staging.os, "chown", refused)
+        monkeypatch.setattr(
+            staging.os,
+            "stat",
+            _faking_owner(os.stat, tiny_metacooler, info, gid=4343),
+        )
+        with caplog.at_level("WARNING", logger="metacooler"):
+            _store(tiny_metacooler)
+        assert "its group (gid 4343) cannot be kept" in caplog.text
+
+    @pytest.mark.skipif(
+        not hasattr(os, "fork") or os.geteuid() != 0,
+        reason="needs root, to act as two other users",
+    )
+    def test_a_group_member_keeps_the_group_of_a_shared_map(
+        self, tiny_metacooler: Path, caplog
+    ):
+        """A member of a lab's group edits a map another member owns, in the
+        lab's set-group-id directory: the map keeps its group and mode (its
+        owner is now the editor's: a warning says so), so both still read it."""
+        import tempfile
+
+        top = Path(tempfile.mkdtemp(prefix="mc-shared-"))
+        try:
+            os.chmod(top, 0o755)
+            share = top / "lab"
+            share.mkdir()
+            os.chown(share, 1001, 2000)
+            os.chmod(share, 0o2775)
+            path = share / "map.metacool"
+            shutil.copy(tiny_metacooler, path)
+            os.chown(path, 1001, 2000)
+            os.chmod(path, 0o660)
+            _store(tiny_metacooler)  # every module this needs is imported
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - the child reports by its status
+                status = 1
+                try:
+                    os.setgroups([2000])
+                    os.setresgid(1002, 1002, 1002)
+                    os.setresuid(1002, 1002, 1002)
+                    edit_metadata(path, lambda meta: meta.update({"by": "bob"}))
+                    status = 0
+                finally:
+                    os._exit(status)
+            _, status = os.waitpid(pid, 0)
+            assert os.waitstatus_to_exitcode(status) == 0
+            info = path.stat()
+            assert (info.st_uid, info.st_gid) == (1002, 2000)
+            assert info.st_mode & 0o7777 == 0o660
+            assert MetaCooler(path).metadata["by"] == "bob"
+            assert sorted(p.name for p in share.iterdir()) == ["map.metacool"]
+        finally:
+            shutil.rmtree(top)
+
+    def test_the_staging_directory_keeps_the_set_group_id_bit(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        """In a set-group-id directory, the staged map takes its group."""
+        share = tmp_path / "lab"
+        share.mkdir()
+        os.chmod(share, 0o2775)
+        path = share / "map.metacool"
+        shutil.copy(tiny_metacooler, path)
+        with staged_inplace(path) as staged:
+            assert os.stat(staged.parent).st_mode & 0o7777 == 0o2700
+            assert os.stat(staged).st_gid == os.stat(share).st_gid
+        validate(path, full=True)
+
+
+def _faking_owner(real_stat, path: Path, info, *, uid: int = 4242, gid=None):
+    """``os.stat`` that reports *path* owned by *uid* (and *gid*)."""
+
+    class _Stat:
+        def __init__(self, actual):
+            self._actual = actual
+
+        def __getattr__(self, name):
+            if name == "st_uid":
+                return uid
+            if name == "st_gid":
+                return info.st_gid if gid is None else gid
+            return getattr(self._actual, name)
+
+    def fake(target, *args, **kwargs):
+        actual = real_stat(target, *args, **kwargs)
+        return _Stat(actual) if Path(target) == path else actual
+
+    return fake
+
+
+class TestWhatKilledWritersLeft:
+    def test_another_hosts_lock_deleted_by_hand(self, tiny_metacooler: Path, caplog):
+        """A writer of another node, killed: refused, by name, with what to
+        delete; once its lock is deleted, the next writer removes its staged
+        copy."""
+        _write_lock(tiny_metacooler, 4321, host="node12", run=DEAD_RUN)
+        left = tiny_metacooler.with_name(f".tiny.metacool.{DEAD_RUN}.1.d")
+        left.mkdir()
+        (left / "tiny.metacool").write_text("a full copy")
+        with pytest.raises(MapLockedError) as caught:
+            _store(tiny_metacooler)
+        message = str(caught.value)
+        assert str(lock_path(tiny_metacooler)) in message
+        assert f".tiny.metacool.{DEAD_RUN}.*.d/" in message
+        assert "another host, machine or PID namespace" in message
+        os.unlink(caught.value.lock_file)
+        with caplog.at_level("WARNING", logger="metacooler"):
+            _store(tiny_metacooler)
+        assert f"Removed {left.name}, left beside" in caplog.text
+        assert _left_beside(tiny_metacooler) == []
+
+    def test_what_cannot_be_removed_is_named(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        left = tiny_metacooler.with_name(f".tiny.metacool.{OTHER_RUN}.3.d")
+        left.mkdir()
+
+        def refused(target):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(staging, "_remove", refused)
+        with caplog.at_level("WARNING", logger="metacooler"):
+            _store(tiny_metacooler)
+        assert f"Could not remove {left}" in caplog.text
+        assert "delete it by hand" in caplog.text
+
+    def test_a_live_holder_names_what_it_stages(self, tiny_metacooler: Path, holder):
+        with pytest.raises(MapLockedError) as caught:
+            _store(tiny_metacooler)
+        run = caught.value.holder["uuid"]
+        assert f".tiny.metacool.{run}.*.d/" in str(caught.value)
+
+
+class TestLostUpdates:
+    def test_a_write_by_another_program_meanwhile_is_not_lost(
+        self, tiny_metacooler: Path
+    ):
+        """A program that takes no metacooler lock writes the map while its
+        copy is edited: the edit is refused, and the map keeps that write."""
+        with (
+            pytest.raises(MapChangedError, match="another program"),
+            staged_inplace(tiny_metacooler) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
+            f.attrs["ours"] = 1
+            with h5py.File(tiny_metacooler, "r+") as other:
+                other.attrs["theirs"] = 1
+        with h5py.File(tiny_metacooler, "r") as f:
+            assert f.attrs["theirs"] == 1 and "ours" not in f.attrs
+        assert _left_beside(tiny_metacooler) == []
+
+    def test_a_map_created_meanwhile(self, tiny_metacooler: Path, tmp_path: Path):
+        path = tmp_path / "new.metacool"
+        with (
+            pytest.raises(MapChangedError),
+            staged_inplace(path, copy=False) as staged,
+        ):
+            staging.copy_fresh(tiny_metacooler, staged)
+            shutil.copy(tiny_metacooler, path)
+        assert path.read_bytes() == tiny_metacooler.read_bytes()
+
+
+class TestOtherNamespaces:
+    @pytest.mark.parametrize("key", ["pid_ns", "machine_id"])
+    def test_another_namespace_or_machine_is_never_broken(
+        self, tiny_metacooler: Path, key: str
+    ):
+        """The same host name, another PID namespace or machine (a container
+        with the host's network): its pid means nothing here, so its lock is
+        never broken, even when no process here has that pid."""
+        holder = _write_lock(tiny_metacooler, DEAD_PID, **{key: "elsewhere"})
+        with (
+            pytest.raises(MapLockedError, match="PID namespace"),
+            lock(tiny_metacooler),
+        ):
+            pass
+        assert json.loads(lock_path(tiny_metacooler).read_text()) == holder
+
+    def test_a_lock_that_does_not_say_where_is_never_broken(
+        self, tiny_metacooler: Path
+    ):
+        """metaTOR's own lock (no machine id, no PID namespace) held in this very
+        process: refused, never taken for a stale one of this pid."""
+        holder = {
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "started": "2026-11-21T03:00:00+0000",
+            "command": "metator pipeline",
+            "run": "x",
+        }
+        lock_path(tiny_metacooler).write_text(json.dumps(holder))
+        if staging._pid_namespace() is None and staging._machine_id() is None:
+            pytest.skip("no PID namespace nor machine id here to tell it by")
+        with pytest.raises(MapLockedError), lock(tiny_metacooler):
+            pass
+        assert json.loads(lock_path(tiny_metacooler).read_text()) == holder
+
+    def test_where_a_process_runs(self, monkeypatch: pytest.MonkeyPatch):
+        real = Path.read_text
+
+        def dbus_only(self, *args, **kwargs):
+            if str(self) == "/etc/machine-id":
+                raise FileNotFoundError(str(self))
+            if str(self) == "/var/lib/dbus/machine-id":
+                return "abc\n"
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", dbus_only)
+        assert staging._machine_id() == "abc"
+
+        def none(self, *args, **kwargs):
+            raise FileNotFoundError(str(self))
+
+        monkeypatch.setattr(Path, "read_text", none)
+        assert staging._machine_id() is None
+
+        def no_proc(path):
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr(staging.os, "readlink", no_proc)
+        assert staging._pid_namespace() is None
+
+
+class TestRegistry:
+    def test_a_wait_does_not_hold_other_maps(self, tmp_path: Path):
+        """A thread that waits on a lock file being written (2 s) leaves other
+        threads free to lock other maps."""
+        a, b = tmp_path / "a.metacool", tmp_path / "b.metacool"
+        a.touch()
+        b.touch()
+        lock_path(a).write_text("")
+        waiting = threading.Thread(
+            target=lambda: pytest.raises(MapLockedError, lambda: lock(a).__enter__())
+        )
+        waiting.start()
+        time.sleep(0.2)
+        start = time.monotonic()
+        with lock(b):
+            pass
+        assert time.monotonic() - start < 1.0
+        waiting.join()
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+    @pytest.mark.filterwarnings(
+        "ignore:This process .* is multi-threaded:DeprecationWarning"
+    )
+    def test_a_forked_child_gets_a_free_registry(self, tmp_path: Path):
+        """A thread holds the registry when the process forks: the child still
+        locks a map (it used to wait for ever)."""
+        b = tmp_path / "b.metacool"
+        b.touch()
+        held, release = threading.Event(), threading.Event()
+
+        def hold_registry():
+            with staging._REGISTRY:
+                held.set()
+                release.wait(30)
+
+        thread = threading.Thread(target=hold_registry)
+        thread.start()
+        held.wait(10)
+        try:
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - the child reports by its status
+                status = 1
+                try:
+                    with lock(b):
+                        status = 0
+                finally:
+                    os._exit(status)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                pytest.fail("the child waited for the registry")
+            assert os.waitstatus_to_exitcode(status) == 0
+        finally:
+            release.set()
+            thread.join()
+
+
+class TestCheckedCooler:
+    def test_coolers_own_open_is_checked(self, tiny_metacooler: Path):
+        mc = MetaCooler(tiny_metacooler)
+        clr: Any = mc._clr
+        with clr.open() as grp:
+            assert "pixels" in grp
+        _store(tiny_metacooler)
+        with pytest.raises(MapChangedError), clr.open():
+            pass
+
+    def test_cooler_balancing_across_a_replacement_is_refused(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``normalize ice --scope global`` reads its chunks through cooler's
+        balance_cooler, which opens the file per chunk."""
+        import cooler.parallel
+
+        calls = {"n": 0}
+        real = cooler.parallel.chunkgetter.__call__
+
+        def replaced_midway(self, span):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                _touch(tiny_metacooler)
+            return real(self, span)
+
+        monkeypatch.setattr(cooler.parallel.chunkgetter, "__call__", replaced_midway)
+        with pytest.raises(MapChangedError):
+            normalize_ice(tiny_metacooler, scope="global", store=False, chunksize=10)
+        assert calls["n"] >= 2
+
+    def test_a_merge_input_changed_meanwhile(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import cooler
+
+        other = tmp_path / "other.metacool"
+        shutil.copy(tiny_metacooler, other)
+        out = tmp_path / "merged.metacool"
+        real = cooler.merge_coolers
+
+        def changed_midway(*args, **kwargs):
+            _touch(other)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(cooler, "merge_coolers", changed_midway)
+        with pytest.raises(MapChangedError, match="while it was read"):
+            metacooler.merge([tiny_metacooler, other], out)
+        assert not out.exists()
+
+    def test_a_collect_input_changed_meanwhile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from _cools import BSUB, ECOLI, make_cool
+
+        from metacooler.io import collect as collect_module
+
+        ecoli = make_cool(tmp_path / "ecoli.cool", ECOLI)
+        bsub = make_cool(tmp_path / "bsub.cool", BSUB)
+        real = collect_module.write_cooler
+
+        def changed_midway(*args, **kwargs):
+            out = real(*args, **kwargs)
+            _touch(ecoli)
+            return out
+
+        monkeypatch.setattr(collect_module, "write_cooler", changed_midway)
+        out = tmp_path / "collected.metacool"
+        with pytest.raises(MapChangedError, match="ecoli.cool"):
+            metacooler.collect([ecoli, bsub], out, keep_partial=False)
+        assert not out.exists()
+
+
+class TestOneFileOutputs:
+    """``zoomify`` and ``stack`` build a new file only they use: in one staged
+    file, each level or entry appended to it directly, validated once and
+    renamed once -- not a copy of the growing file per level."""
+
+    @staticmethod
+    def _per_level(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Turn the direct writes off: every append is staged on its own, as
+        before (the reference output)."""
+
+        @contextlib.contextmanager
+        def staged_each_time(path):
+            yield Path(path)
+
+        monkeypatch.setattr(staging, "_writing_directly", staged_each_time)
+
+    @staticmethod
+    def _copies(monkeypatch: pytest.MonkeyPatch) -> list:
+        copies: list = []
+        real = staging.copy_fresh
+
+        def counted(*args, **kwargs):
+            copies.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(staging, "copy_fresh", counted)
+        return copies
+
+    def test_zoomify(self, tiny_metacooler: Path, tmp_path: Path, monkeypatch):
+        from metacooler.ops.zoomify import zoomify
+
+        with monkeypatch.context() as m:
+            copies = self._copies(m)
+            self._per_level(m)
+            zoomify(tiny_metacooler, tmp_path / "reference.mmetacool", levels=3)
+            assert len(copies) == 2  # the old cost: a copy per level
+        copies = self._copies(monkeypatch)
+        out = tmp_path / "pyramid.mmetacool"
+        zoomify(tiny_metacooler, out, levels=3)
+        assert copies == []
+        metacooler.validate_mmetacooler(out)
+        ignore = frozenset({"creation-date", "metadata"})
+        with (
+            h5py.File(out, "r") as f,
+            h5py.File(tmp_path / "reference.mmetacool", "r") as g,
+        ):
+            assert _walk(f, ignore=ignore) == _walk(g, ignore=ignore)
+        assert _left_beside(out) == []
+
+    def test_zoomify_replaces_a_previous_output_only_when_done(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch
+    ):
+        from metacooler.ops import binnify as binnify_module
+        from metacooler.ops.zoomify import zoomify
+
+        out = tmp_path / "pyramid.mmetacool"
+        out.write_text("a previous pyramid")
+
+        def fails(*args, **kwargs):
+            raise RuntimeError("level failed")
+
+        monkeypatch.setattr(binnify_module, "_binnify", fails)
+        with pytest.raises(RuntimeError, match="level failed"):
+            zoomify(tiny_metacooler, out, levels=3, force=True)
+        assert out.read_text() == "a previous pyramid"
+        assert sorted(p.name for p in tmp_path.iterdir() if "pyramid" in p.name) == [
+            "pyramid.mmetacool"
+        ]
+
+    def test_stack_with_entries(
+        self, tiny_mmetacool: Path, tiny_metacooler: Path, tmp_path: Path, monkeypatch
+    ):
+        args = [
+            "stack",
+            f"{tiny_mmetacool}::entries/entry1",
+            f"{tiny_mmetacool}::entries/entry2",
+            str(tiny_metacooler),
+            "--names",
+            "a,b,c",
+            "-o",
+        ]
+        with monkeypatch.context() as m:
+            copies = self._copies(m)
+            self._per_level(m)
+            result = CliRunner().invoke(
+                cli, [*args, str(tmp_path / "reference.mmetacool")]
+            )
+            assert result.exit_code == 0, result.output
+            assert len(copies) == 2
+        copies = self._copies(monkeypatch)
+        out = tmp_path / "stacked.mmetacool"
+        result = CliRunner().invoke(cli, [*args, str(out)])
+        assert result.exit_code == 0, result.output
+        assert copies == []
+        with (
+            h5py.File(out, "r") as f,
+            h5py.File(tmp_path / "reference.mmetacool", "r") as g,
+        ):
+            assert _walk(f) == _walk(g)
+        assert _left_beside(out) == []
+
+
+class TestCorners:
+    def test_after_a_fork_the_registry_is_fresh(self, tiny_metacooler: Path):
+        old = staging._REGISTRY
+        staging._after_fork_in_child()
+        assert staging._REGISTRY is not old
+        with lock(tiny_metacooler):
+            assert holds_lock(tiny_metacooler)
+
+    def test_a_pause_outside_the_registry_sleeps(self):
+        start = time.monotonic()
+        staging._pause(0.01)
+        assert time.monotonic() - start >= 0.009
+
+    def test_another_threads_lock_seen_while_acquiring(
+        self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A lock this process holds for another thread, met while acquiring
+        (that thread created it meanwhile): refused, naming the thread."""
+        mine = {"pid": os.getpid(), **_here(), "uuid": "theirs"}
+        monkeypatch.setitem(
+            staging._HELD,
+            "elsewhere.lock",
+            staging._Held(holder=mine, pid=os.getpid(), thread=-1, thread_name="T2"),
+        )
+        lock_path(tiny_metacooler).write_text(json.dumps(mine))
+        with (
+            pytest.raises(
+                MapLockedError, match=r"another thread of this process \(T2\)"
+            ),
+            lock(tiny_metacooler),
+        ):
+            pass
+
+    def test_foreign_staging_beside_a_missing_directory(self, tmp_path: Path):
+        staging._remove_foreign_staging(tmp_path / "missing" / "m.metacool", "x")
+
+    def test_extended_attributes_that_cannot_be_listed_or_set(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "copy"
+        target.write_text("x")
+        monkeypatch.setattr(
+            staging.os,
+            "listxattr",
+            lambda path: (_ for _ in ()).throw(OSError(95, "Not supported")),
+        )
+        staging._copy_xattrs(tiny_metacooler, target)  # nothing to copy
+        set_names: list[str] = []
+        monkeypatch.setattr(
+            staging.os, "listxattr", lambda path: ["security.selinux", "user.a"]
+        )
+        monkeypatch.setattr(staging.os, "getxattr", lambda path, name: b"v")
+        monkeypatch.setattr(
+            staging.os, "setxattr", lambda path, name, value: set_names.append(name)
+        )
+        staging._copy_xattrs(tiny_metacooler, target)
+        assert set_names == ["user.a"]  # the SELinux label is the policy's

@@ -74,7 +74,7 @@ def cmd_stack(
     if len(input_files) < 2:
         raise click.UsageError("At least 2 input files required.")
 
-    check_output(output, force, inputs=input_files)
+    check_output(output, force, inputs=input_files, defer_removal=True)
 
     # (file path, group path) for every input. A group path other than "/" used
     # to be discarded, silently copying the whole collection in as one entry.
@@ -132,9 +132,21 @@ def cmd_stack(
             sub_entries.append((file_path, src_entry, name))
             logger.debug(f"Entry {name!r}: {file_path}::{group_path.lstrip('/')}")
 
-    create_mmetacool(output, whole_files, force=True)
-    for src_path, src_entry, name in sub_entries:
-        copy_entry_cross_file(src_path, src_entry, output, name, overwrite=True)
+    from metacooler.io.create import _staged_output
+    from metacooler.io.staging import _writing_directly
+    from metacooler.schema import validate_mmetacooler
+
+    # Built in one staged file, which only this run knows of: each entry
+    # pulled in is written to it directly, and it is validated once, then
+    # renamed onto the output.
+    with (
+        _staged_output(Path(output), keep_partial=False, inputs=input_files) as staged,
+        _writing_directly(staged),
+    ):
+        create_mmetacool(staged, whole_files, force=True)
+        for src_path, src_entry, name in sub_entries:
+            copy_entry_cross_file(src_path, src_entry, staged, name, overwrite=True)
+        validate_mmetacooler(staged)
 
     n_entries = len(whole_files) + len(sub_entries)
     click.echo(f"Created {output} with {n_entries} entries")

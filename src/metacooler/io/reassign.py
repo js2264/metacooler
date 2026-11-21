@@ -881,10 +881,12 @@ def _not_carried_by_regroup(mc: MetaCooler) -> list[str]:
 
     :func:`_rewrite_regrouped` writes the map anew from its tables: the
     columns of ``/genomes``, ``/contigs`` and ``/bins`` (the weights with their
-    attributes), the counts of ``/pixels``, the clustering rounds and the
-    ``metadata``.  Anything else the map holds -- another group or dataset at
-    its root, a root attribute, another pixel column or index, an attribute of
-    a table or of one of its columns (but a weight's) -- is not written.
+    attributes), the counts of ``/pixels``, the clustering rounds (rebuilt
+    from their rounds, table and members) and the ``metadata``.  Anything else
+    the map holds -- another group or dataset at its root, a root attribute,
+    another pixel column or index, an attribute of a table or of one of its
+    columns (but a weight's), anything else in ``/clusters`` -- is not
+    written.
     """
     from metacooler.io.weights import weight_columns
 
@@ -922,7 +924,55 @@ def _not_carried_by_regroup(mc: MetaCooler) -> list[str]:
                         f"the attributes of /{table}/{key} "
                         f"({', '.join(sorted(column.attrs))})"
                     )
+        dropped += _clusters_not_carried(grp)
     return dropped
+
+
+def _clusters_not_carried(grp: h5py.Group) -> list[str]:
+    """What a re-grouping would not carry of the map's ``/clusters``.
+
+    The group is rebuilt from its rounds, table and members
+    (:func:`metacooler.io.clusters.copy_clusters`), so anything else it holds
+    -- another dataset or group, an attribute of the group or of one of its
+    datasets -- is lost: it is found by rebuilding the group in memory and
+    comparing the two.
+    """
+    import uuid
+
+    from metacooler.io.clusters import _read_group, _write_group
+
+    if CLUSTERS_GROUP not in grp:
+        return []
+    source = grp[CLUSTERS_GROUP]
+    with h5py.File(
+        f"metacooler-probe-{uuid.uuid4().hex}.h5",
+        "w",
+        driver="core",
+        backing_store=False,
+    ) as probe:
+        rebuilt = probe.create_group(CLUSTERS_GROUP)
+        _write_group(rebuilt, _read_group(source))
+        return _not_in(source, rebuilt, f"/{CLUSTERS_GROUP}")
+
+
+def _not_in(node: h5py.Group | h5py.Dataset, rebuilt, prefix: str) -> list[str]:
+    """What *node* holds that *rebuilt* does not: members and attributes, each
+    named by its path under *prefix*."""
+    lost = [
+        f"the attribute {name!r} of {prefix}"
+        for name in node.attrs
+        if name not in rebuilt.attrs
+    ]
+    if isinstance(node, h5py.Group):
+        for name in node:
+            child = f"{prefix}/{name}"
+            if name not in rebuilt or isinstance(node[name], h5py.Group) != isinstance(
+                rebuilt[name], h5py.Group
+            ):
+                lost.append(child)
+            else:
+                lost += _not_in(node[name], rebuilt[name], child)
+    return lost
 
 
 def _rewrite_regrouped(
