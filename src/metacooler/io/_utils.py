@@ -717,21 +717,40 @@ def check_output_path(
             that fails does not also destroy the previous result.
 
     An output that an edit session of this thread edits, copies out or
-    writes is refused (its staged map is not), and an existing output is
-    removed under its lock (:func:`metacooler.io.staging.writing_output`), so
-    that a file another writer is writing is not removed under it.
+    writes is refused (its staged map is not), and so is one whose lock is
+    held (:func:`metacooler.io.staging.check_output_lock`): a writer of an
+    output takes no lock, it only checks.  A symbolic link at *path*,
+    dangling or not, is an existing output: with *force* it is removed now,
+    whatever *defer_removal* says, so that nothing writes through it (its
+    target is left as it is); without, it is refused.
 
     Raises:
         ValueError: If *path* is the same file as one of *inputs*, or the map
             or the output of an edit session of this thread.
-        FileExistsError: If *path* exists and *force* is False.
+        FileExistsError: If *path* exists (a symbolic link included) and
+            *force* is False.
         IsADirectoryError: If *path* exists and is a directory.
+        MapLockedError: If the lock of *path* is held.
     """
-    from metacooler.io.staging import lock, refuse_a_session_output
+    from metacooler.io.staging import (
+        check_output_lock,
+        refuse_a_session_output,
+        remove_an_output_link,
+    )
 
     path = Path(path)
     _refuse_input_as_output(path, inputs)
     refuse_a_session_output(path)
+    check_output_lock(path)
+    if os.path.islink(path):
+        if not force:
+            raise FileExistsError(
+                f"Output file {str(path)!r} already exists (a symbolic link to "
+                f"{os.readlink(path)!r}). Use --force to replace the link; its "
+                "target is left as it is."
+            )
+        remove_an_output_link(path, force=True)
+        return
     if not path.exists():
         return
     if path.is_dir():
@@ -741,8 +760,7 @@ def check_output_path(
             f"Output file {str(path)!r} already exists. Use --force to overwrite."
         )
     if not defer_removal:
-        with lock(path, follow_symlinks=False):
-            path.unlink()
+        path.unlink()
 
 
 def _refuse_input_as_output(path: Path, inputs: Iterable[str | Path | None]) -> None:

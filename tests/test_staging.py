@@ -1772,7 +1772,7 @@ class TestWhatKilledWritersLeft:
             _store(tiny_metacooler)
         message = str(caught.value)
         assert str(lock_path(tiny_metacooler)) in message
-        assert f".tiny.metacool.{DEAD_RUN}.*.d/" in message
+        assert str(left) in message  # what it left there, by name
         assert "another host, machine or PID namespace" in message
         os.unlink(caught.value.lock_file)
         with caplog.at_level("WARNING", logger="metacooler"):
@@ -1796,10 +1796,19 @@ class TestWhatKilledWritersLeft:
         assert "delete it by hand" in caplog.text
 
     def test_a_live_holder_names_what_it_stages(self, tiny_metacooler: Path, holder):
+        """The refusal names the files there are: the holder only holds the
+        lock, so the lock file alone; once it stages a copy, that copy too."""
         with pytest.raises(MapLockedError) as caught:
             _store(tiny_metacooler)
         run = caught.value.holder["uuid"]
-        assert f".tiny.metacool.{run}.*.d/" in str(caught.value)
+        assert str(lock_path(tiny_metacooler)) in str(caught.value)
+        assert f".tiny.metacool.{run}." not in str(caught.value)
+        staged = tiny_metacooler.with_name(f".tiny.metacool.{run}.1.d")
+        staged.mkdir()
+        with pytest.raises(MapLockedError) as caught:
+            _store(tiny_metacooler)
+        assert f"what it staged beside it ({staged})" in str(caught.value)
+        staged.rmdir()
 
 
 class TestLostUpdates:

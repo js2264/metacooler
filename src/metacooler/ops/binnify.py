@@ -86,10 +86,12 @@ def binnify(
     from metacooler.io.staging import writing_output
 
     output = Path(output)
+    check_output_path(output, force=force, inputs=[uri])
     if binsize <= 0:
         raise ValueError(f"binsize must be a positive integer, got {binsize}.")
-    with writing_output(output):
-        check_output_path(output, force=force, inputs=[uri])
+    # Checked before the write begins: a refusal fails no edit session whose
+    # staged map is the output.
+    with writing_output(output, force=force):
         mc = MetaCooler(uri)
         _binnify(
             mc,

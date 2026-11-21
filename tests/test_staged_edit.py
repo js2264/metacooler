@@ -762,6 +762,8 @@ class TestOutputSessionLock:
         out = tmp_path / "out" / "edited.metacool"
         out.parent.mkdir()
         _write_lock(out, 4321, host="node12", run=DEAD_RUN)
+        left = out.parent / f".edited.metacool.{DEAD_RUN}.1.d"
+        left.mkdir()
         with (
             pytest.raises(MapLockedError) as caught,
             staged_edit(tiny_metacooler, output=out),
@@ -769,7 +771,7 @@ class TestOutputSessionLock:
             pass
         message = str(caught.value)
         assert str(lock_path(out)) in message
-        assert str(out.parent / f".edited.metacool.{DEAD_RUN}.*.d/") in message
+        assert f"what it staged beside it ({left})" in message
 
     def test_a_missing_output_directory_is_named(
         self, tiny_metacooler: Path, tmp_path: Path
@@ -1726,6 +1728,94 @@ class TestWhatAWeightDependsOn:
             written.bins()[:]["hit"], 1.0 / _by_contig(written, "coverage")
         )
         assert [r["name"] for r in written.cluster_rounds] == ["r1"]
+
+    def test_two_weights_from_one_read_of_the_staged_map(self, tiny_metacooler: Path):
+        """A write that changed none of what a weight depends on leaves a read
+        of the staged map before it current: several weights may be computed
+        from one read and stored one after the other."""
+        with staged_edit(tiny_metacooler) as staged:
+            mc = MetaCooler(staged)
+            n = mc.shape[0]
+            _store_from(staged, "a", np.ones(n), ["pixels"], mc)
+            write_clusters(staged, *_rounds(staged))
+            _store_from(staged, "b", np.full(n, 2.0), ["pixels"], mc)
+        assert {"a", "b"} <= set(MetaCooler(tiny_metacooler).bins()[:].columns)
+
+    def test_a_read_of_the_staged_map_before_a_write(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        _annotate(tiny_metacooler, tmp_path, 2.5)
+        with staged_edit(tiny_metacooler) as staged:
+            mc = MetaCooler(staged)
+            weights = 1.0 / _by_contig(mc, "coverage")
+            _annotate(staged, tmp_path, 3.5)  # replaces the column
+            with pytest.raises(MapChangedError, match="changed contigs/coverage"):
+                _store_from(staged, "c", weights, ["contigs/coverage"], mc)
+            _store_from(staged, "p", weights, ["pixels"], mc)
+            reassign(staged, {"contig_A": "MAG_2"}, inplace=True)  # re-groups
+            with pytest.raises(MapChangedError, match="its bins included"):
+                _store_from(staged, "q", weights, ["pixels"], mc)
+        assert "p" in MetaCooler(tiny_metacooler).bins()[:].columns
+
+    def test_the_map_copied_out_written_since(
+        self, tiny_metacooler: Path, tmp_path: Path
+    ):
+        """None of an output session's writes is ever in the map it copied,
+        whatever was written to that map since, and whenever it was read."""
+        _annotate(tiny_metacooler, tmp_path, 2.5)
+        out = tmp_path / "out.metacool"
+        with staged_edit(tiny_metacooler, output=out) as staged:
+            _annotate(staged, tmp_path, 3.5)
+            with h5py.File(tiny_metacooler, "r+") as f:  # another program
+                f.attrs["note"] = "written since"
+            later = MetaCooler(tiny_metacooler)
+            weights = 1.0 / _by_contig(later, "coverage")
+            with pytest.raises(MapChangedError, match="changed contigs/coverage"):
+                _store_from(staged, "c", weights, ["contigs/coverage"], later)
+            _store_from(staged, "p", weights, ["pixels"], later)
+        assert "p" in MetaCooler(out).bins()[:].columns
+
+    def test_a_write_of_another_entry(self, tiny_mmetacool: Path, tmp_path: Path):
+        """In a session on a collection, a weight of one entry is judged by the
+        writes of that entry alone."""
+        names = MetaCooler(f"{tiny_mmetacool}::entries/entry1").contigs["name"]
+        table = tmp_path / "coverage.tsv"
+        table.write_text(
+            "contig_name\tcoverage\n" + "".join(f"{n}\t3.5\n" for n in names)
+        )
+        metacooler.annotate(tiny_mmetacool, contigs_table=table, inplace=True)
+        table.write_text(
+            "contig_name\tcoverage\n" + "".join(f"{n}\t7.5\n" for n in names)
+        )
+        with staged_edit(tiny_mmetacool) as staged:
+            metacooler.annotate(
+                f"{staged}::entries/entry1",
+                contigs_table=table,
+                inplace=True,
+                replace=True,
+            )
+            for entry, refused in (("entry2", False), ("entry1", True)):
+                source = MetaCooler(f"{tiny_mmetacool}::entries/{entry}")
+                weights = 1.0 / _by_contig(source, "coverage")
+
+                def store(entry=entry, weights=weights, source=source) -> None:
+                    _store_from(
+                        f"{staged}::entries/{entry}",
+                        "c",
+                        weights,
+                        ["contigs/coverage"],
+                        source,
+                    )
+
+                if refused:
+                    with pytest.raises(
+                        MapChangedError, match="changed contigs/coverage"
+                    ):
+                        store()
+                else:
+                    store()
+        columns = MetaCooler(f"{tiny_mmetacool}::entries/entry2").bins()[:].columns
+        assert "c" in columns
 
     def test_an_open_for_writing_changes_anything(self, tiny_metacooler: Path):
         before = MetaCooler(tiny_metacooler)

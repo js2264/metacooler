@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import rich_click as click
@@ -100,14 +101,24 @@ def cmd_cp(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
     else:
         # Only now that the source is known good may we touch the destination —
         # creating it first left a stray empty .mmetacool behind on a typo.
-        if not dst_path.exists():
+        if not os.path.lexists(dst_path):
             import h5py
 
             from metacooler.io.staging import writing_output
 
-            with writing_output(dst_path), h5py.File(dst_path, "w") as f:
-                init_mmetacool_attrs(f)
-            click.echo(f"Initialised new mmetacool file: {dst_path}")
+            # Created exclusively: a collection another writer created
+            # meanwhile -- another cp, an entry copied into it -- is copied
+            # into, never truncated.
+            try:
+                with (
+                    writing_output(dst_path, force=False),
+                    h5py.File(dst_path, "w-") as f,
+                ):
+                    init_mmetacool_attrs(f)
+            except FileExistsError:
+                pass
+            else:
+                click.echo(f"Initialised new mmetacool file: {dst_path}")
         dst_entries = list_entries(dst_path)
 
     # Answering "y" must actually overwrite: the old code fell through with

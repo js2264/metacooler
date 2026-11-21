@@ -1405,7 +1405,10 @@ class MetaCooler:
         with lock(self._store):
             self._check_unchanged()
             try:
-                with _session_write(self._store), h5py.File(self._store, mode) as f:
+                with (
+                    _session_write(self._store, key),
+                    h5py.File(self._store, mode) as f,
+                ):
                     yield f[key] if key else f
             finally:
                 self._state = file_state(self._store)

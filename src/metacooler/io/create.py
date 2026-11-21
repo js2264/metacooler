@@ -2857,9 +2857,20 @@ def _refuse_staging_an_input(
         inputs: What the run reads, as paths or URIs.
         companions: Files staged beside *final* (see :func:`_staged_output`).
 
+    It also checks *final* itself as :func:`_staged_output` will: an output
+    that an edit session of this thread edits, copies out or replaces, or
+    whose lock is held, is refused now rather than after the run.
+
     Raises:
-        ValueError: If ``<final>.partial`` (or a companion's) is an input.
+        ValueError: If ``<final>.partial`` (or a companion's) is an input, or
+            *final* is the map, or the output, of an edit session of this
+            thread.
+        MapLockedError: If the lock of *final* is held.
     """
+    from metacooler.io.staging import check_output_lock, refuse_a_session_output
+
+    refuse_a_session_output(final)
+    check_output_lock(final)
     for path in (Path(final), *companions):
         check_output_path(
             _partial_path(path), force=True, inputs=inputs, defer_removal=True
@@ -2995,8 +3006,11 @@ def _staged_output(
             On failure their partial files are kept or removed like
             *final*'s.
 
-    The output's lock is held throughout
-    (:func:`metacooler.io.staging.writing_output`).
+    The output is checked before anything is written, and its lock again
+    right before the rename (:func:`metacooler.io.staging.writing_output`,
+    :func:`metacooler.io.staging.check_output_lock`): an output whose lock is
+    held -- an edit session writing there, a run holding it -- is not
+    replaced.  No lock is taken.
 
     Yields:
         The temporary path to write to.
@@ -3004,47 +3018,38 @@ def _staged_output(
     Raises:
         ValueError: If a temp path is one of *inputs*, or *final* is the map,
             or the output, of an edit session of this thread.
-        MapLockedError: If another writer holds the output's lock.
+        MapLockedError: If the output's lock is held.
     """
-    from metacooler.io.staging import writing_output
+    from metacooler.io.staging import check_output_lock, writing_output
 
     with writing_output(final):
-        yield from _staged_output_locked(final, keep_partial, inputs, companions)
-
-
-def _staged_output_locked(
-    final: Path,
-    keep_partial: bool,
-    inputs: Iterable[str | Path | None],
-    companions: Sequence[Path],
-) -> Generator[Path, None, None]:
-    """:func:`_staged_output`, under the output's lock."""
-    tmp = _partial_path(final)
-    staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
-    for partial, _ in staged:
-        check_output_path(partial, force=True, inputs=inputs)
-    try:
-        yield tmp
-        _move_into_place(staged[1:], tmp, final)
-    except BaseException as error:
-        left = [(partial, path) for partial, path in staged if partial.exists()]
-        for partial, path in left:
-            if not keep_partial:
-                partial.unlink()
-                logger.info(
-                    "Creation failed; the partial file %s was removed and %s "
-                    "was not written.",
-                    partial,
-                    path,
-                )
-            elif isinstance(error, Exception):
-                logger.error(
-                    "Creation failed. The partial file was left at %s for "
-                    "inspection; %s was not written.",
-                    partial,
-                    path,
-                )
-        raise
+        tmp = _partial_path(final)
+        staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
+        for partial, _ in staged:
+            check_output_path(partial, force=True, inputs=inputs)
+        try:
+            yield tmp
+            check_output_lock(final)
+            _move_into_place(staged[1:], tmp, final)
+        except BaseException as error:
+            left = [(partial, path) for partial, path in staged if partial.exists()]
+            for partial, path in left:
+                if not keep_partial:
+                    partial.unlink()
+                    logger.info(
+                        "Creation failed; the partial file %s was removed and %s "
+                        "was not written.",
+                        partial,
+                        path,
+                    )
+                elif isinstance(error, Exception):
+                    logger.error(
+                        "Creation failed. The partial file was left at %s for "
+                        "inspection; %s was not written.",
+                        partial,
+                        path,
+                    )
+            raise
 
 
 def _remap_bins(

@@ -757,7 +757,7 @@ def merge(
 
 
 def _merge_into(inputs: list[str], output: str | Path) -> None:
-    """:func:`merge`, under the output's lock."""
+    """:func:`merge`, its output checked (:func:`writing_output`)."""
     # cooler writes the output in "w" mode; refuse to truncate an input with it.
     check_output_path(output, force=True, inputs=inputs, defer_removal=True)
     # The inputs are read by path, by cooler too: checked unchanged at the end.
