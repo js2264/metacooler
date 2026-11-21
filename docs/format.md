@@ -517,7 +517,10 @@ staged copy beside it:
   replaced, never written through. With `--force` (and from a writer that
   has no such option, which replaces its output anyway: `flatten`,
   `aggregate`, `extract`, `merge`, `to_cooler`) the link is removed before
-  anything writes there, its target left as it is; without, it is refused.
+  anything writes there, its target left as it is — or, by a writer that
+  renames its output into place (`create`, `collect`, `reassign -o`,
+  `annotate -o`, `zoomify`, `stack`), replaced by that rename, so that a run
+  that fails leaves it as it was; without `--force`, it is refused.
   A new collection (`cp` into one, `create_mmetacool` without `force`) is
   created exclusively: one another writer created meanwhile is never
   truncated.

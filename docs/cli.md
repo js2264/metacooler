@@ -618,8 +618,10 @@ writes there, or a pipeline that holds it for its run (metaTOR does) —, and
 checks that again right before it renames its output into place. Two
 commands writing one output at once are not kept apart: give them two
 paths. An output that is a symbolic link is replaced, never written
-through: `--force` removes the link (its target is left as it is), and
-without `--force` a link, even a dangling one, is an existing output. A
+through: with `--force` the link is replaced by the new file (its target is
+left as it is; a command that stages its output replaces it only once the
+output is complete), and without `--force` a link, even a dangling one, is
+an existing output. A
 command that reads a map while it is replaced, or a `MetaCooler`
 opened before, stops with an error rather than mixing two versions of the map:
 open it again. See [In-place writes](format.md#in-place-writes).

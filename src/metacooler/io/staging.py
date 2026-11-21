@@ -1409,7 +1409,7 @@ def check_output_lock(path: str | Path) -> None:
 
 @contextlib.contextmanager
 def writing_output(
-    path: str | Path, *, force: bool = True
+    path: str | Path, *, force: bool = True, renamed: bool = False
 ) -> Generator[Path, None, None]:
     """Let a writer write a whole new map at the output *path*: the one place
     every such writer -- ``create``, ``collect``, ``reassign`` and ``annotate``
@@ -1423,9 +1423,11 @@ def writing_output(
     its output into place checks that again right before the rename.  A
     symbolic link at *path*, dangling or not, is an existing output: with
     *force* it is removed before anything writes there, so that no writer
-    follows it (cooler and h5py open what a link points to), and without it,
-    refused.  The staged map of an edit session of this thread is written as
-    any output, and the write fails the session if it raises.
+    follows it (cooler and h5py open what a link points to) -- unless the
+    writer *renamed* its output into place, which replaces the link (left
+    as it is if the write fails) --, and without it, refused.  The staged
+    map of an edit session of this thread is written as any output, and the
+    write fails the session if it raises.
 
     Two writers of one new path are not serialized: both write it, and,
     where each renames its output into place, the last rename wins.
@@ -1457,7 +1459,11 @@ def writing_output(
             yield Path(path)
         _note_write(session, None)
         return
-    remove_an_output_link(named, force=force)
+    if renamed:
+        if not force and os.path.islink(named):
+            remove_an_output_link(named, force=False)  # refused
+    else:
+        remove_an_output_link(named, force=force)
     yield Path(path)
 
 
@@ -1475,6 +1481,18 @@ def remove_an_output_link(path: str | Path, *, force: bool) -> bool:
     if not os.path.islink(path):
         return False
     target = os.readlink(path)
+    if os.path.isdir(path):
+        raise IsADirectoryError(
+            errno.EISDIR,
+            f"{path} is a directory (a symbolic link to {os.path.realpath(path)}).",
+        )
+    if os.path.exists(path) and not os.path.isfile(path):
+        raise FileExistsError(
+            errno.EEXIST,
+            f"{path} is a symbolic link to {os.path.realpath(path)}, which is not "
+            "a regular file (a device, a FIFO): give the path of a "
+            "file.",
+        )
     if not force:
         raise FileExistsError(
             errno.EEXIST,

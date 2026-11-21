@@ -252,6 +252,12 @@ LINKED_WRITERS = {
         lambda src, out: metacooler.binnify(src, out, 200, force=True),
     ),
     "extract --split": ("out_MAG_1.cool", lambda src, out: _split(src, out)),
+    "reassign -o, renamed into place": (
+        "out.metacool",
+        lambda src, out: metacooler.reassign(
+            src, {"contig_D": "MAG_2"}, output=out, layout="keep", force=True
+        ),
+    ),
 }
 
 
@@ -311,6 +317,52 @@ class TestOutputLinks:
                 split=True,
             )
         assert link.is_symlink() and split.is_symlink() and not gone.exists()
+
+    def test_a_failed_run_leaves_a_link_it_would_have_replaced(
+        self, tiny_metacooler: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A writer that renames its output into place replaces a link there
+        with its rename: a run that fails leaves the link as it was, as it
+        leaves a previous output."""
+        import metacooler.io.create as create_module
+        from metacooler.io._utils import check_output_path
+
+        target = tmp_path / "dated.metacool"
+        shutil.copy(tiny_metacooler, target)
+        link = tmp_path / "latest.metacool"
+        link.symlink_to(target)
+        check_output_path(link, True, defer_removal=True)
+        assert link.is_symlink()
+        with pytest.raises(FileExistsError, match="symbolic link"):
+            check_output_path(link, False, defer_removal=True)
+
+        def fails(*args, **kwargs):
+            raise RuntimeError("the run failed")
+
+        monkeypatch.setattr(create_module, "_move_into_place", fails)
+        with pytest.raises(RuntimeError, match="the run failed"):
+            metacooler.reassign(
+                tiny_metacooler, {"contig_D": "MAG_2"}, output=link, force=True
+            )
+        assert link.is_symlink() and link.resolve() == target
+        assert target.read_bytes() == tiny_metacooler.read_bytes()
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+    def test_a_special_file_is_never_removed(self, tmp_path: Path):
+        """``-o /dev/stdout --force`` removed the system's /dev/stdout (a link
+        to a descriptor): a device, a FIFO, or a link to one, is never
+        removed, with or without force."""
+        from metacooler.io._utils import check_output_path
+
+        fifo = tmp_path / "fifo"
+        os.mkfifo(fifo)
+        link = tmp_path / "stdout"
+        link.symlink_to(fifo)
+        for path in (fifo, link):
+            for force in (False, True):
+                with pytest.raises(FileExistsError, match="regular file"):
+                    check_output_path(path, force)
+        assert link.is_symlink() and fifo.exists()
 
     @pytest.mark.parametrize("cmd", [["flatten"], ["binnify", "--binsize", "200"]])
     def test_the_cli_with_a_dangling_link(

@@ -3022,7 +3022,7 @@ def _staged_output(
     """
     from metacooler.io.staging import check_output_lock, writing_output
 
-    with writing_output(final):
+    with writing_output(final, renamed=True):
         tmp = _partial_path(final)
         staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
         for partial, _ in staged:
