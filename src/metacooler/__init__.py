@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from metacooler.io.create import from_cool, from_pairs
     from metacooler.io.dump import dump_table
     from metacooler.io.extract import extract
+    from metacooler.io.fasta import write_fasta
     from metacooler.io.flatten import flatten
     from metacooler.io.merge import merge
     from metacooler.io.mmetacool import (
@@ -88,6 +89,7 @@ __all__ = [
     "write_clusters",
     "drop_clusters",
     "extract",
+    "write_fasta",
     "flatten",
     "merge",
     "binnify",
@@ -183,6 +185,10 @@ def __getattr__(name: str) -> object:
         from metacooler.io.extract import extract as _extract
 
         return _extract
+    if name == "write_fasta":
+        from metacooler.io.fasta import write_fasta as _write_fasta
+
+        return _write_fasta
     if name == "flatten":
         from metacooler.io.flatten import flatten as _flatten
 

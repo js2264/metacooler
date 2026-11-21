@@ -70,6 +70,7 @@ class TestInit:
             "write_clusters",
             "drop_clusters",
             "extract",
+            "write_fasta",
             "flatten",
             "merge",
             "binnify",

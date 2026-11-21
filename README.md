@@ -241,6 +241,7 @@ assembly:
 - **Export P(s)**: contact probability vs genomic distance, pooled or per MAG, as a table and a log-log plot (`ps`). `create pairs` writes the per-MAG curve at base-pair resolution beside the output as `<output>.ps.tsv`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
 - **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
+- **Export sequences**: `fasta` writes the contigs of each genome, or of each cluster of a clustering round, from the assembly: each record as it is, or stitched into one sequence per genome
 - **Unassigned contigs**: default to `__unbinned__` genome
 - **Re-attributable bins**: `reassign` swaps in a new contig-to-genome table on an existing file — the `/genomes` table and the contig layout are rebuilt, the contacts are not recomputed
 - **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection
