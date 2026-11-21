@@ -8,7 +8,7 @@ import rich_click as click
 
 from metacooler.cli._options import (
     check_output,
-    cluster_filter_option,
+    filter_option,
     option_given,
     parse_comma_list,
     quiet_option,
@@ -28,9 +28,9 @@ from metacooler.cli.main import MetaCoolURI, cli
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
     help=(
-        "The assembly the map was made from: FASTA, plain or gzip-compressed. "
-        "Every contig written must be in it, with the map's length. Nothing is "
-        "written next to it."
+        "The assembly the map was made from: FASTA, plain or gzip-compressed, "
+        "or a pipe ([cyan]<(zcat ...)[/cyan]). Every contig written must be in "
+        "it, once, with the map's length. Nothing is written next to it."
     ),
 )
 @click.option(
@@ -40,8 +40,8 @@ from metacooler.cli.main import MetaCoolURI, cli
     required=True,
     help=(
         "Directory to write one [cyan]<name>.fa[/cyan] per genome or cluster "
-        "into, created if missing; with [cyan]--single-file[/cyan], the FASTA "
-        "file to write."
+        "into; with [cyan]--single-file[/cyan], the FASTA file to write. "
+        "Created if missing."
     ),
 )
 @click.option(
@@ -55,7 +55,7 @@ from metacooler.cli.main import MetaCoolURI, cli
         "genome but __unbinned__, or every cluster of the round."
     ),
 )
-@cluster_filter_option
+@filter_option(tables=("genomes", "contigs", "clusters"))
 @click.option(
     "--round",
     "round_name",
@@ -81,8 +81,8 @@ from metacooler.cli.main import MetaCoolURI, cli
     is_flag=True,
     help=(
         "Write each genome or cluster as one record named after it: its "
-        "contigs in map order, joined by [cyan]--spacer[/cyan] N, wrapped at "
-        "80 columns."
+        "contigs longest first (ties in map order), joined by "
+        "[cyan]--spacer[/cyan] N, wrapped at 80 columns."
     ),
 )
 @click.option(
@@ -99,6 +99,15 @@ from metacooler.cli.main import MetaCoolURI, cli
         "Write every record to one FASTA file, [cyan]-o[/cyan]: a contig "
         "record's header becomes [cyan]<genome>|<header>[/cyan]; a stitched "
         "record is named after its genome or cluster."
+    ),
+)
+@click.option(
+    "--temp-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Directory for the plain copy of a gzip-compressed or piped assembly "
+        "(default: the system temporary directory), created if missing."
     ),
 )
 @click.option(
@@ -120,6 +129,7 @@ def cmd_fasta(
     stitch: bool,
     spacer: int,
     single_file: bool,
+    temp_dir: Path | None,
     force: bool,
     verbose: bool,
     quiet: bool,
@@ -150,7 +160,8 @@ def cmd_fasta(
         round=round_name,
         unbinned=unbinned,
         stitch=stitch,
-        spacer=spacer,
+        spacer=spacer if stitch else None,
         single_file=single_file,
         force=force,
+        temp_dir=temp_dir,
     )

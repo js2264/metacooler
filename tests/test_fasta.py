@@ -7,9 +7,12 @@ metaTOR's ``final_clusters/*.fa`` -- gets the same bytes from here.
 
 from __future__ import annotations
 
+import errno
+import functools
 import gzip
 import logging
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -474,6 +477,279 @@ def test_an_entry_of_a_collection(mapped, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# What --unbinned does not stand in for (review finding 1)
+# ---------------------------------------------------------------------------
+
+
+def test_unbinned_alone_cannot_hide_an_empty_selection(mapped, tmp_path):
+    """Names or genome filters that keep no genome are refused, --unbinned or
+    not: writing __unbinned__.fa alone would pass for a selection."""
+    path, assembly = mapped
+    with pytest.raises(FilterError, match="genomes.length > 1Gb  ->  0 of"):
+        write_fasta(
+            path,
+            assembly,
+            tmp_path / "a",
+            filters=["genomes.length > 1Gb"],
+            unbinned=True,
+        )
+    with pytest.raises(FilterError, match="1 genome\\(s\\) named by --genomes"):
+        write_fasta(
+            path,
+            assembly,
+            tmp_path / "b",
+            genomes=["MAG_B"],
+            filters=["contigs.length > 3kb"],
+            unbinned=True,
+        )
+    assert not (tmp_path / "a").exists() and not (tmp_path / "b").exists()
+
+
+def test_unbinned_alone_cannot_hide_an_empty_round(clustered, tmp_path):
+    path, assembly = clustered
+    with pytest.raises(FilterError, match="1 cluster\\(s\\) named by --genomes"):
+        write_fasta(
+            path,
+            assembly,
+            tmp_path / "a",
+            round="final",
+            genomes=["F2"],
+            filters=["contigs.length >= 2500"],
+            unbinned=True,
+        )
+    with pytest.raises(FilterError, match="clusters.completeness > 99"):
+        write_fasta(
+            path,
+            assembly,
+            tmp_path / "b",
+            round="final",
+            filters=["clusters.completeness > 99"],
+            unbinned=True,
+        )
+
+
+def test_the_unbinned_genome_is_asked_for_with_unbinned(mapped, tmp_path, caplog):
+    path, assembly = mapped
+    alone = ["genomes.genome == __unbinned__"]
+    with pytest.raises(FilterError, match="write its contigs with --unbinned"):
+        write_fasta(path, assembly, tmp_path / "a", filters=alone)
+    with caplog.at_level(logging.INFO, logger="metacooler"):
+        written = write_fasta(
+            path, assembly, tmp_path / "b", filters=alone, unbinned=True
+        )
+    assert list(written) == ["__unbinned__"]
+    assert "0 genome(s) and __unbinned__" in caplog.text
+    with pytest.raises(FilterError, match="keeps nothing"):
+        write_fasta(
+            path,
+            assembly,
+            tmp_path / "c",
+            filters=[*alone, "contigs.length > 1Gb"],
+            unbinned=True,
+        )
+
+
+def test_only_contig_filters_may_leave_the_unbinned_contigs_alone(mapped, tmp_path):
+    path, assembly = mapped
+    written = write_fasta(
+        path, assembly, tmp_path / "a", filters=["contigs.length < 600"], unbinned=True
+    )
+    assert list(written) == ["__unbinned__"]
+    assert written["__unbinned__"].read_text() == RAW["c5"]
+
+
+def test_contig_filters_that_keep_nothing_of_a_round(clustered, tmp_path):
+    path, assembly = clustered
+    written = write_fasta(
+        path,
+        assembly,
+        tmp_path / "a",
+        round="final",
+        filters=["contigs.length < 1500"],
+        unbinned=True,
+    )
+    assert list(written) == ["__unbinned__"]
+    with pytest.raises(FilterError, match="keeps nothing"):
+        write_fasta(
+            path,
+            assembly,
+            tmp_path / "b",
+            round="final",
+            filters=["contigs.length > 1Gb"],
+            unbinned=True,
+        )
+
+
+def test_the_summary_counts_the_unbinned_contigs_apart(mapped, tmp_path, caplog):
+    path, assembly = mapped
+    with caplog.at_level(logging.INFO, logger="metacooler"):
+        write_fasta(path, assembly, tmp_path / "out", unbinned=True)
+    assert "3 FASTA file(s)" in caplog.text
+    assert "2 genome(s) and __unbinned__, 5 record(s)" in caplog.text
+
+
+def test_a_cluster_that_holds_no_contig_is_named(mapped, tmp_path, caplog):
+    path, assembly = mapped
+    clusters = pd.DataFrame({"round": ["r", "r"], "name": ["empty", "full"]})
+    members = pd.DataFrame({"round": ["r"], "cluster": ["full"], "contig": ["c1"]})
+    write_clusters(path, ["r"], clusters, members)
+    with caplog.at_level(logging.INFO, logger="metacooler"):
+        write_fasta(path, assembly, tmp_path / "a", round="r")
+    assert "1 cluster(s) of round 'r' hold no contig: no file for them (empty)" in (
+        caplog.text
+    )
+    assert "after --filter" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The order of a stitched record (review finding 2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_stitched_cluster_comes_longest_first(mapped, tmp_path):
+    """A cluster across genomes (metaTOR's mge): the map holds c4 (in no
+    genome) first, then c1 and c3; stitched, c1, c3, c4; as they are, in map
+    order."""
+    path, assembly = mapped
+    clusters = pd.DataFrame({"round": ["mge"], "name": ["MGE_1"]})
+    members = pd.DataFrame(
+        {"round": "mge", "cluster": "MGE_1", "contig": ["c3", "c4", "c1"]}
+    )
+    write_clusters(path, ["mge"], clusters, members)
+    stitched = write_fasta(
+        path, assembly, tmp_path / "s", round="mge", stitch=True, spacer=3
+    )
+    assert stitched["MGE_1"].read_text() == _wrapped(
+        ">MGE_1", "NNN".join(_bases("c1", "c3", "c4"))
+    )
+    raw = write_fasta(path, assembly, tmp_path / "r", round="mge")
+    assert raw["MGE_1"].read_text() == RAW["c4"] + RAW["c1"] + RAW["c3"]
+    # A group keeps the order given, stitched too.
+    given = write_fasta(
+        path, assembly, tmp_path / "g", groups={"g": ["c4", "c3"]}, stitch=True
+    )
+    assert given["g"].read_text() == _wrapped(
+        ">g", ("N" * 100).join(_bases("c4", "c3"))
+    )
+
+
+def test_stitched_contigs_of_one_length_keep_map_order(tmp_path):
+    """In a map laid out genome-then-alpha (a, b, c, d), stitched: b and c
+    (3 kb each, in map order), d, a; as they are: a, b, c, d."""
+    lengths = {"a": 1000, "b": 3000, "c": 3000, "d": 2000}
+    rng = np.random.default_rng(3)
+    sequences = {
+        n: "".join(rng.choice(list("ACGT"), size=k)) for n, k in lengths.items()
+    }
+    assembly = tmp_path / "abcd.fa"
+    assembly.write_text("".join(f">{n}\n{q}\n" for n, q in sequences.items()))
+    pairs = tmp_path / "abcd.pairs"
+    pairs.write_text(
+        "## pairs format v1.0\n"
+        + "".join(f"#chromsize: {c} {n}\n" for c, n in lengths.items())
+        + "#columns: readID chrom1 pos1 chrom2 pos2\nr0\ta\t1\tb\t1\n"
+    )
+    bins = pd.DataFrame(
+        {"chrom": list(lengths), "start": 0, "end": list(lengths.values())}
+    )
+    path = tmp_path / "abcd.metacool"
+    from_pairs(
+        path,
+        bins=bins,
+        pairs=pairs,
+        contig_genome_map=dict.fromkeys(lengths, "G"),
+        contig_ordering="genome-then-alpha",
+        ps=False,
+    )
+    stitched = write_fasta(path, assembly, tmp_path / "s", stitch=True, spacer=0)
+    order = "".join(sequences[n] for n in "bcda")
+    assert stitched["G"].read_text() == _wrapped(">G", order)
+    raw = write_fasta(path, assembly, tmp_path / "r")
+    assert raw["G"].read_text() == "".join(f">{n}\n{sequences[n]}\n" for n in "abcd")
+
+
+# ---------------------------------------------------------------------------
+# Names and lengths as the map's creator reads them (review finding 3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_space_after_the_header_mark(mapped, tmp_path):
+    path, _ = mapped
+    text = "".join(raw for key, raw in RAW.items() if key != "c3")
+    text += "> c3 spaced\n" + RAW["c3"].split("\n", 1)[1]
+    assembly = _write_assembly(tmp_path / "spaced.fa", text)
+    written = write_fasta(path, assembly, tmp_path / "out", genomes=["MAG_B"])
+    assert written["MAG_B"].read_text().startswith("> c3 spaced\n")
+
+
+@pytest.mark.parametrize("counted", ["with", "without"])
+def test_trailing_spaces_count_as_create_counted_them(tmp_path, counted):
+    """pyfaidx (create --fasta) counts a trailing space as a base: a map made
+    so holds the longer length; one made from the bases alone, the shorter.
+    Either is the map's contig; stitched, the bases alone."""
+    bases = "ACGT" * 25  # 100 bp, in 4 lines of 25 and a space each
+    text = ">s1\n" + "".join(bases[i : i + 25] + " \n" for i in range(0, 100, 25))
+    assembly = tmp_path / "spaces.fa"
+    assembly.write_text(text)
+    length = 104 if counted == "with" else 100
+    pairs = tmp_path / "s.pairs"
+    pairs.write_text(
+        f"## pairs format v1.0\n#chromsize: s1 {length}\n"
+        "#columns: readID chrom1 pos1 chrom2 pos2\nr0\ts1\t1\ts1\t50\n"
+    )
+    path = tmp_path / "s.metacool"
+    bins = pd.DataFrame({"chrom": ["s1"], "start": [0], "end": [length]})
+    from_pairs(path, bins=bins, pairs=pairs, contig_genome_map={"s1": "G"}, ps=False)
+    assert write_fasta(path, assembly, tmp_path / "raw")["G"].read_text() == text
+    stitched = write_fasta(path, assembly, tmp_path / "st", stitch=True)
+    assert stitched["G"].read_text() == _wrapped(">G", bases)
+
+
+# ---------------------------------------------------------------------------
+# Compressed and piped assemblies (review finding 6)
+# ---------------------------------------------------------------------------
+
+
+def _fifo(path: Path, data: bytes) -> threading.Thread:
+    os.mkfifo(path)
+
+    def feed():
+        with open(path, "wb") as handle:
+            handle.write(data)
+
+    thread = threading.Thread(target=feed, daemon=True)
+    thread.start()
+    return thread
+
+
+@pytest.mark.parametrize("compressed", [False, True], ids=["plain", "gzip"])
+def test_a_piped_assembly(mapped, tmp_path, compressed):
+    path, assembly = mapped
+    data = assembly.read_bytes()
+    feeder = _fifo(tmp_path / "pipe", gzip.compress(data) if compressed else data)
+    scratch = tmp_path / "scratch"
+    written = write_fasta(path, tmp_path / "pipe", tmp_path / "out", temp_dir=scratch)
+    feeder.join(timeout=10)
+    assert written["MAG_A"].read_text() == RAW["c1"] + RAW["c2"]
+    assert scratch.is_dir() and not list(scratch.iterdir())  # created, then emptied
+
+
+def test_a_copy_that_cannot_be_written_names_where(mapped, tmp_path, monkeypatch):
+    path, assembly = mapped
+    packed = tmp_path / "assembly.fa.gz"
+    packed.write_bytes(gzip.compress(assembly.read_bytes()))
+
+    def full(source, target, length=0):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(fasta_module.shutil, "copyfileobj", full)
+    with pytest.raises(OSError, match="its plain copy .*No space left") as error:
+        write_fasta(path, packed, tmp_path / "out", temp_dir=tmp_path / "scratch")
+    assert error.value.errno == errno.ENOSPC
+    assert str(tmp_path / "scratch") in str(error.value)
+
+
+# ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
 
@@ -605,8 +881,10 @@ def test_a_failed_write_leaves_no_file(mapped, tmp_path, monkeypatch):
         ({"a b": ["c1"]}, {"stitch": True}, ValueError, "first whitespace"),
         ({"__unbinned__": ["c1"]}, {"unbinned": True}, ValueError, "rename it"),
         ({"g": ["c1"]}, {"genomes": ["MAG_A"]}, ValueError, "cannot be combined"),
-        ({"g": ["c1"]}, {"spacer": -1}, ValueError, "0 or more"),
-        ({"g": ["c1"]}, {"spacer": True}, ValueError, "a number of N"),
+        ({"g": ["c1"]}, {"spacer": -1, "stitch": True}, ValueError, "0 or more"),
+        ({"g": ["c1"]}, {"spacer": True, "stitch": True}, ValueError, "number of N"),
+        ({"g": ["c1"]}, {"spacer": 7}, ValueError, "give stitch=True too"),
+        ({"Bin": ["c1"], "bin": ["c2"]}, {}, ValueError, "where case is ignored"),
     ],
 )
 def test_groups_and_arguments_that_are_refused(
@@ -697,16 +975,101 @@ def test_other_commands_refuse_a_clusters_filter(mapped):
     assert "only 'fasta --round' reads" in flat(result.output)
 
 
-def test_the_staged_file_is_named_after_the_process(mapped, tmp_path, monkeypatch):
-    """A file is written through ``.<name>.<pid>.tmp`` beside it, then renamed."""
+def test_every_file_is_written_before_any_is_renamed(mapped, tmp_path, monkeypatch):
+    """Each file is staged as a short ``.fasta-*.tmp`` beside it; the renames
+    come once every file is written."""
     path, assembly = mapped
+    out = tmp_path / "out"
     seen = []
     replace = os.replace
 
     def spy(src, dst):
-        seen.append(Path(src).name)
+        if not seen:  # every staged file exists at the first rename
+            seen.extend(sorted(p.name for p in out.iterdir()))
         replace(src, dst)
 
     monkeypatch.setattr(fasta_module.os, "replace", spy)
-    write_fasta(path, assembly, tmp_path / "out", genomes=["MAG_B"])
-    assert seen == [f".MAG_B.fa.{os.getpid()}.tmp"]
+    write_fasta(path, assembly, out, unbinned=True)
+    assert len(seen) == 3
+    assert all(name.startswith(".fasta-") and name.endswith(".tmp") for name in seen)
+    assert sorted(p.name for p in out.iterdir()) == [
+        "MAG_A.fa",
+        "MAG_B.fa",
+        "__unbinned__.fa",
+    ]
+    mode = (out / "MAG_A.fa").stat().st_mode & 0o777
+    mask = os.umask(0)
+    os.umask(mask)
+    assert mode == 0o666 & ~mask
+
+
+def test_a_failure_in_the_second_file_writes_none(mapped, tmp_path, monkeypatch):
+    path, assembly = mapped
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "MAG_B.fa").write_text("old\n")
+    write = fasta_module._Writer.write
+    calls = []
+
+    def second_fails(self, handle, group, prefix=None):
+        calls.append(group.name)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        write(self, handle, group, prefix)
+
+    monkeypatch.setattr(fasta_module._Writer, "write", second_fails)
+    with pytest.raises(OSError, match="No space left"):
+        write_fasta(path, assembly, out, force=True)
+    # MAG_A was written, but not renamed: no new file, MAG_B as it was.
+    assert sorted(p.name for p in out.iterdir()) == ["MAG_B.fa"]
+    assert (out / "MAG_B.fa").read_text() == "old\n"
+
+
+def test_a_long_name_is_staged_under_a_short_one(mapped, tmp_path):
+    path, assembly = mapped
+    name = "g" * 252  # 255 bytes with .fa: the longest file name
+    written = write_fasta(path, assembly, tmp_path / "out", groups={name: ["c3"]})
+    assert written[name].name == name + ".fa"
+    assert written[name].read_text() == RAW["c3"]
+
+
+def test_names_that_differ_by_case_alone_go_to_one_file(mapped, tmp_path):
+    path, assembly = mapped
+    out = tmp_path / "all.fa"
+    write_fasta(
+        path, assembly, out, groups={"Bin": ["c1"], "bin": ["c2"]}, single_file=True
+    )
+    assert out.read_text() == f">Bin|{RAW['c1'][1:]}>bin|{RAW['c2'][1:]}"
+
+
+def test_one_file_in_a_new_directory(mapped, tmp_path):
+    path, assembly = mapped
+    out = tmp_path / "new" / "dir" / "all.fa"
+    write_fasta(path, assembly, out, single_file=True)
+    assert out.read_text().startswith(">MAG_A|c1 desc one\n")
+
+
+def test_an_output_file_that_is_a_directory(mapped, tmp_path):
+    path, assembly = mapped
+    (tmp_path / "out" / "MAG_A.fa").mkdir(parents=True)
+    with pytest.raises(IsADirectoryError):
+        write_fasta(path, assembly, tmp_path / "out", force=True)
+
+
+def test_the_api_takes_one_genome_or_filter_as_text(mapped, tmp_path):
+    path, assembly = mapped
+    assert list(write_fasta(path, assembly, tmp_path / "a", genomes="MAG_B")) == [
+        "MAG_B"
+    ]
+    one = write_fasta(path, assembly, tmp_path / "b", filters="genomes.length > 6kb")
+    assert list(one) == ["MAG_A"]
+
+
+def test_the_fasta_filter_reads_the_clusters_table():
+    from metacooler.cli.cmd_fasta import cmd_fasta
+    from metacooler.filters import TABLES_WITH_CLUSTERS
+
+    (option,) = [p for p in cmd_fasta.params if p.name == "filters"]
+    callback = option.callback
+    assert isinstance(callback, functools.partial)
+    assert callback.keywords["tables"] == TABLES_WITH_CLUSTERS
