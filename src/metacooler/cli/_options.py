@@ -30,7 +30,7 @@ from metacooler.io.colspec import (
 CONTIGS_FORMAT_HELP = (
     "Which columns of the [cyan]--contigs[/cyan] table hold the contig and the "
     "genome names: [cyan]CONTIG,GENOME[/cyan], each a 1-based position or a "
-    "header name — e.g. [cyan]2,5[/cyan] or [cyan]Name,Final_bin[/cyan] — plus "
+    "header name — e.g. [cyan]2,5[/cyan] or [cyan]Name,Final_cluster[/cyan] — plus "
     "[cyan],noheader[/cyan] when the table has no header line. "
     "[cyan]NA[/cyan] as the genome column ([cyan]1,NA,noheader[/cyan], "
     "[cyan]contig_name,NA[/cyan]) says the table assigns no genome: "
