@@ -88,6 +88,20 @@ class TestNetworkCLITiny:
         for line in tsv_lines:
             assert len(line.split("\t")) == 3
 
+    def test_bin_level_to_stdout(self, runner, tiny_metacooler, tmp_path):
+        """Without -o, --level bin prints what -o writes."""
+        out = tmp_path / "bins.tsv"
+        result = runner.invoke(
+            cli, ["network", str(tiny_metacooler), "--level", "bin", "-q"]
+        )
+        assert result.exit_code == 0, result.output
+        written = runner.invoke(
+            cli,
+            ["network", str(tiny_metacooler), "--level", "bin", "-q", "-o", str(out)],
+        )
+        assert written.exit_code == 0, written.output
+        assert result.output == out.read_text()
+
     def test_verbose_flag(self, runner, tiny_metacooler, tmp_path):
         out = tmp_path / "network_v.tsv"
         result = runner.invoke(
