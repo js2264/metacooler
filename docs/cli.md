@@ -580,12 +580,14 @@ An edit of the map itself — `reassign --inplace`, `annotate --inplace`,
 `cp`, `mv` and `rm` and, from Python, `store_weights`, `write_clusters`,
 `drop_clusters` and the entry functions — never writes the map: under the map's
 lock, taken before it reads the map, it writes a **staged copy** in a private
-directory beside it, validates it in full, and renames it over the map, written
-through a fresh file. So the map is whole whatever stops the edit — an error,
-Ctrl-C, a failed validation — and it does not grow with what each edit replaces
-(HDF5 never reclaims that space). It costs two copies of the file per edit (the
-staged copy, and the fresh file it is written through), in time and in disk
-space beside the map, and a full validation, and needs a writable directory. The map keeps
+directory beside it, validates it in full, and renames it over the map. So the
+map is whole whatever stops the edit — an error, Ctrl-C, a failed validation.
+The staged copy is made object by object, so it leaves behind the space that
+earlier edits left in the map (HDF5 never reclaims what an edit replaces): a
+map holds at most what its last edit replaced, and does not grow from one edit
+to the next. An edit costs one copy of the file, in time and in disk space
+beside the map (the map and its copy, at the peak), and a full validation, and
+needs a writable directory. The map keeps
 its owner and group where the process may set them (a member of a shared
 map's group keeps its group, and a warning names what it cannot keep), its
 mode and its extended attributes, POSIX ACLs included; a map without write
@@ -603,7 +605,12 @@ signal handler — is taken over by the next writer on the same host, with a
 warning. A lock of another host (or of another machine or PID namespace
 under the same host name: a container) is never broken: the error names the
 lock file, and the staging directories, to delete once that process is gone.
-Whoever takes the lock next removes what a killed writer staged, naming it. A command that reads a map while it is replaced, or a `MetaCooler`
+Whoever takes the lock next removes what a killed writer staged, naming it. A
+command that writes a new map — `create`, `collect`, `reassign -o`, `annotate
+-o`, `binnify`, `zoomify`, `aggregate`, `extract`, `merge`, `flatten`, `stack`,
+`cp` into a new collection — holds the lock of its output path the same way,
+`<output>.lock`, while it writes it: a second writer of that output is refused
+by name. A command that reads a map while it is replaced, or a `MetaCooler`
 opened before, stops with an error rather than mixing two versions of the map:
 open it again. See [In-place writes](format.md#in-place-writes).
 
@@ -637,8 +644,11 @@ with metacooler.staged_edit("sample.metacool") as staged:
   the session's thread writes it directly: no copy, no validation, no lock of
   its own. Another thread is refused it, and so is any other process, a
   forked child included (the staged map has a lock file of its own, naming the
-  session's process). A write of the map itself (not of its staged copy) from
-  the session's thread is refused while the session runs.
+  session's process). The session's thread may also write the staged map
+  whole, as an output: `reassign(map, table, output=staged, force=True)`. A
+  write of the map itself (not of its staged copy) from the session's thread
+  is refused while the session runs, and so is an output written over it, or
+  over the session's output.
 - On any failure, `KeyboardInterrupt` and `SystemExit` included, the staged
   copy is removed and the map is left as it was; so is a map that another
   program wrote meanwhile (`MapChangedError`). A writer that fails once it has
@@ -646,17 +656,23 @@ with metacooler.staged_edit("sample.metacool") as staged:
   written when the session ends (`RuntimeError`, from that error), since the
   staged map may hold part of that write. A session whose staged map is as it
   was copied (inode, size, times of modification and change) leaves the map as
-  it is, whatever ran; one that did writes the staged map through a fresh file,
-  so the map does not grow, whatever its writers replaced. A writer's history
+  it is, whatever ran; one that did renames the staged map over it, which
+  holds at most what the session's writers replaced: the map does not grow
+  from one session to the next. A writer's history
   (`reassign`'s `source`) names the session's map, never the staged path.
 - `staged_edit(uri, output=PATH)` copies the map to a new file instead, an
   entry of a `.mmetacool` as a standalone `.metacool` (refused if `PATH`
   exists, unless `force=True`; a link at `PATH` is replaced, not followed). It
   holds the lock of `PATH` (`PATH.lock`, the lock `metacooler.lock(PATH,
   follow_symlinks=False)` takes: a link at `PATH` is not followed), stages
-  beside `PATH`, and takes no lock of the map, which it only reads: a holder of the map's lock does not
-  block it, and the map's directory need not be writable. A write of the map
-  or of `PATH` from the session's thread is refused while it runs.
+  beside `PATH`, and takes no lock of the map, which it only reads: a holder
+  of the map's lock does not block it, and the map's directory need not be
+  writable. What was read from the map as the session copied it stays
+  current, whatever is written to the map since; a map written between the
+  check of `planned` and the copy is refused. A write of the map or of `PATH`
+  from the session's thread is refused while it runs; without `force`, a file
+  created at `PATH` meanwhile is kept, and the session fails
+  (`FileExistsError`).
 - `planned=mc` refuses a session on a map that changed since `mc` was opened;
   `command=` names the session in the lock it takes. A session in place takes
   the map's lock unless its thread holds it already (`metacooler.lock`), and a
@@ -666,7 +682,26 @@ with metacooler.staged_edit("sample.metacool") as staged:
   `planned=mc` of a nested session — must still have the staged map's bins
   (the same contig name, start and end, bin by bin): after a re-grouping in
   the session it does not, and the write is refused (`MapChangedError`).
-  Compute from the staged map instead.
+  Nor may a weight computed from it depend on what a write of the session
+  changed: after a relabelling, `depends_on=["genome_id"]` is refused; after
+  `annotate` replaced `coverage`, `depends_on=["contigs/coverage"]` is — `mc`
+  opened on the map holds the map as the session found it, whenever it was
+  opened. `store_weights`, `write_clusters`, `drop_clusters` and `metadata`
+  change nothing a weight depends on; a re-grouping, a new map written over
+  the staged map or a raw `h5py` write, anything. Compute from the staged map
+  instead, opened after the last write that changed what the weight depends
+  on:
+
+  ```python
+  with metacooler.staged_edit("sample.metacool") as staged:
+      metacooler.reassign("sample.metacool", "bins.tsv", output=staged, force=True)
+      metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
+      mc = metacooler.MetaCooler(staged)  # after both
+      metacooler.store_weights(
+          staged, "hit", weights_from(mc), method="tool",
+          depends_on=["pixels", "contigs/depth"], source=mc,
+      )
+  ```
 - A `MetaCooler` of the staged map, opened before a write of the session,
   stops reading after it (`MapChangedError`), what it keeps (`contigs`,
   `bins()`, ...) included: open it again.

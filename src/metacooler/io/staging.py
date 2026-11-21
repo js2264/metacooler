@@ -26,13 +26,13 @@ it: the map is only read).  What that guarantees:
   lock.  A writer that fails with an edit session's staged map in hand fails
   the session, which then writes nothing, even if the error was caught.
 - **The map does not grow.**  HDF5 never reclaims the space of what an edit
-  replaces, so a map edited in place grew with every edit.  The staged map is
-  written through a fresh file -- every object copied as stored -- when it is
-  installed, whatever wrote it (several writers of an edit session, a
-  relabelling that copied its source byte for byte), so the map holds no
-  space that no object holds.  A writer that records a map (``reassign``'s
-  history, ``binnify``'s) names the map an edit session edits, or copies out,
-  never its staged path (:func:`recorded_uri`).
+  replaces, so a map edited in place grew with every edit.  Every staged map
+  starts as a fresh copy -- every object copied as stored (:func:`copy_fresh`)
+  -- which leaves that space behind, and is renamed over the map as its
+  writers left it: a map holds at most what its last edit, or session,
+  replaced.  A writer that records a map (``reassign``'s history,
+  ``binnify``'s) names the map an edit session edits, or copies out, never
+  its staged path (:func:`recorded_uri`).
 - **One writer at a time.**  The lock, ``<map>.lock``, names its holder.  A
   live holder is refused by name; the lock of a process of this host that is
   gone is taken over, under a guard file, so that one process exactly takes
@@ -41,8 +41,11 @@ it: the map is only read).  What that guarantees:
   re-entrant for the thread that holds it, so a caller that holds a map's lock
   for a whole run (metaTOR does) calls the writers, which take it unless their
   caller holds it; another thread is refused.  The staged map of an edit
-  session has a lock of its own, naming the session's process, so that no
-  other process -- a forked child included -- writes it.  A lock or a
+  session has a lock of its own, naming the session's process and held by
+  its thread, so that no other process -- a forked child included -- or
+  thread writes it.  A writer of a new map at a path holds the lock of that
+  path itself while it writes it (:func:`writing_output`), so that two
+  writers of one output are not run at once.  A lock or a
   takeover guard is removed by whatever stops its holder as soon as it is
   created, ``KeyboardInterrupt`` included; only an interrupt in the few
   bytecodes between a lock's creation and the start of its block leaves it
@@ -52,7 +55,9 @@ it: the map is only read).  What that guarantees:
   :class:`metacooler.MetaCooler` to :func:`staged_inplace`, which refuses to
   copy a file that changed since it was read -- and, for a map read that is
   not the map written (``store_weights``' ``source``), one whose bins are not
-  the bins written.  A copy torn by a program that writes the map without
+  the bins written, or, in an edit session, that holds what a write of the
+  session changed of what the weight depends on (:func:`check_source_depends`).
+  A copy torn by a program that writes the map without
   metacooler's lock (``cooler balance``, say) is refused as soon as it is
   made, and the map is checked once more just before the rename: such a write
   while its copy is edited makes the edit fail (:class:`MapChangedError`)
@@ -1070,8 +1075,8 @@ def _changed_since(
 def check_source_depends(
     uri: str | Path, source: MetaCooler | None, depends_on: Iterable[str]
 ) -> None:
-    """Refuse, in an edit session, a weight computed from a map read before a
-    write of the session changed what the weight depends on.
+    """Refuse, in an edit session, a weight computed from a map that holds
+    what a write of the session changed of what the weight depends on.
 
     A *source* opened on the staged map itself is held by its own state (a
     write of the staged map since it was opened refuses it).  One opened on
@@ -1389,12 +1394,16 @@ def staged_edit(
     under the lock of *output* itself (``lock(output, follow_symlinks=False)``,
     taken unless this thread holds it) -- never the map's: the map is only
     read --, the map alone is copied (an entry of a ``.mmetacool`` becomes a
-    standalone ``.metacool``), destined for that path; a copy torn by a write
-    of the map is refused.  A symbolic link at *output* is replaced, wherever
-    it points, the map included (which is left as it is); *output* that is
-    the map's own file -- the same name, or a hard link to it -- is refused.  The copy lies in a
+    standalone ``.metacool``), destined for that path: its state is taken
+    before *planned* is checked, and a copy that is not of that state (torn,
+    or of a map written meanwhile) is refused; a map opened on it as it was
+    copied stays current for the session, whatever is written to it since.
+    A symbolic link at *output* is replaced, wherever it points, the map
+    included (which is left as it is); *output* that is the map's own file --
+    the same name, or a hard link to it -- is refused.  The copy lies in a
     private directory beside the file it replaces, and has a lock file of its
-    own, which names this process: the staged map is this thread's alone.
+    own, which names this process and is held by this thread: the staged map
+    is this thread's alone.
     The block gets the staged map's path (a URI into it for an entry edited
     in place).  Every metacooler writer given that path by this thread --
     ``annotate(inplace=True)``, ``reassign(inplace=True)``, ``store_weights``,
@@ -1408,8 +1417,9 @@ def staged_edit(
     it keeps pointing at it) or onto *output* (a link there is replaced, not
     followed).  A session in place whose staged map is as it was copied --
     its inode, size, and times of modification and change -- leaves the map
-    as it is, whatever ran: nothing was written.  On any failure, ``KeyboardInterrupt`` and ``SystemExit`` included,
-    the staged copy is removed and the map (or *output*) is left as it was;
+    as it is, whatever ran: nothing was written.  On any failure,
+    ``KeyboardInterrupt`` and ``SystemExit`` included, the staged copy is
+    removed and the map (or *output*) is left as it was;
     and once a writer has failed with the staged map in hand, the session
     writes nothing even if its error was caught (``RuntimeError``), since the
     staged map may hold part of that write.  As for any staged write, a map
@@ -1420,12 +1430,16 @@ def staged_edit(
     (the inner ``with`` gets the same staged map, and the outer one writes it);
     any other nesting on one map is refused.  While a session is open, a write
     of its map -- the one it edits, copies out or replaces -- rather than of
-    its staged map is refused from this thread; another thread, or process,
-    is refused the staged map.  A map read for the edit that is not the map
+    its staged map is refused from this thread, and so is an output written
+    over it (:func:`refuse_a_session_output`); the staged map itself may be
+    written whole, as an output (``reassign(map, table, output=staged,
+    force=True)``), by this thread only: another thread, or process, is
+    refused the staged map.  A map read for the edit that is not the map
     written (``store_weights``' ``source``: the map as it was before the
     session, say) must still have its bins -- the same contig name, start and
     end, bin by bin --, or the write is refused: a re-grouping in the session
-    reorders them.
+    reorders them; and a weight computed from it must not depend on what a
+    write of the session changed (:func:`check_source_depends`).
 
     Args:
         uri: The map: a ``.metacool`` path, an ``.mmetacool`` entry URI, or a
@@ -1449,14 +1463,16 @@ def staged_edit(
         MapChangedError: If a map of *planned* changed since it was opened,
             the map was written meanwhile by another program, or the map
             changed while it was copied to *output*.
-        FileExistsError: If *output* exists and *force* is not set.
+        FileExistsError: If *output* exists, or was created while the session
+            ran, and *force* is not set.
         FileNotFoundError: If the map, or the directory of *output*, does not
             exist.
         PermissionError: In place, if the map is read-only.
         RuntimeError: If a write of the session failed and its error was
             caught: nothing is written.
         ValueError: If *output* is *uri*'s file (the same name, or a hard
-            link), or for a nesting refused.
+            link), or the map or the output of another session of this
+            thread, or for a nesting refused.
     """
     from metacooler.uri import parse_uri
 
