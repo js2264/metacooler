@@ -132,7 +132,7 @@ is stored in the `/contigs` table. Aliases cover the tables of common binners
     `contig_data_final.txt` (the `metator` alias says the same):
 
     ```bash
-    --contigs contig_data_final.txt --contigs-format Name,Final_bin
+    --contigs contig_data_final.txt --contigs-format Name,Final_cluster
     ```
 
 === "By position"

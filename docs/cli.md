@@ -277,8 +277,8 @@ contig and the genome names, in that order:
 ```
 
 Each column is a **1-based position** (digits only) or a **header name**
-(anything else), and the two can be mixed: `2,5`, `Name,Final_bin`,
-`1,Final_bin`. Add `,noheader` when the table has no header line; only
+(anything else), and the two can be mixed: `2,5`, `Name,Final_cluster`,
+`1,Final_cluster`. Add `,noheader` when the table has no header line; only
 positions work then. Names are looked up wherever they are in the header, and
 every other column of the table is stored in `/contigs` (named `col3`, `col4`,
 … in a table without a header). A column whose name metacooler uses itself is
@@ -305,7 +305,7 @@ write:
 |-------|---------|-------|
 | `contigs` | `contig_name,genome_name` | metacooler's own layout (the default). |
 | `contig_genome` | `1,2,noheader` | Two columns, contig then genome, no header. |
-| `metator` | `Name,Final_bin` | MetaTOR's `contig_data_final.txt`. |
+| `metator` | `Name,Final_cluster` | MetaTOR's `contig_data_final.txt`, as `metator dump` writes it. A table without `Final_cluster` but with `Final_bin`, as MetaTOR 1.x wrote it, is read through `Final_bin` (and logged); a spec spelled out, `Name,Final_cluster`, is read as written. |
 | `dastool` | `1,2,noheader` | DAS Tool's `*_DASTool_contigs2bin.tsv`, and the tables its `Fasta_to_Contigs2Bin.sh` builds from FASTA bins (MetaBAT2, MaxBin2, …). |
 | `binette` | `1,2,noheader` | Binette's `final_contig_to_bin.tsv`. |
 | `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |

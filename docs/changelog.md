@@ -76,6 +76,13 @@
 
 ### Changed
 
+- **The `metator` alias of `--contigs-format` reads `Name,Final_cluster`**,
+  MetaTOR 2.0's column for a contig's final cluster in `contig_data_final.txt`
+  (as `metator dump` writes it), so that a dumped table feeds `create` and
+  `reassign`. A table with `Final_bin`, MetaTOR 1.x's name, and no
+  `Final_cluster` is read through `Final_bin`, which the log says; an error
+  for a table with neither names both. Only the alias falls back: a spec
+  spelled out (`Name,Final_cluster`) is read as written.
 - **`metacooler.network(...)` returns the edges** when it is given no `out`, as
   a DataFrame (`node1`, `node2`, `value`), where it printed them to stdout:
   a tool that reads a map's contig network (MetaTOR does) sums no pixel

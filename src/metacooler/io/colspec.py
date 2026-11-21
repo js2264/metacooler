@@ -45,7 +45,9 @@ NO_GENOME = "NA"
 #: binner writes, taken from the tool's own writer rather than from memory --
 #: an alias that names the wrong columns would misread a table without error.
 #:
-#: - ``metator``: MetaTOR's ``contig_data_final.txt``.
+#: - ``metator``: MetaTOR's ``contig_data_final.txt``, whose final clusters are
+#:   ``Final_cluster`` from MetaTOR 2.0 (``metator dump`` writes it) and
+#:   ``Final_bin`` before: the alias falls back to it (:data:`ALIAS_FALLBACKS`).
 #: - ``dastool``: DAS Tool's ``*_DASTool_contigs2bin.tsv``, and the tables its
 #:   ``Fasta_to_Contigs2Bin.sh`` builds from FASTA bins (MetaBAT2, MaxBin2, ...).
 #: - ``binette``: Binette's ``final_contig_to_bin.tsv`` (same headerless layout).
@@ -58,11 +60,18 @@ NO_GENOME = "NA"
 CONTIGS_FORMAT_ALIASES: dict[str, str] = {
     "contigs": "contig_name,genome_name",
     "contig_genome": "1,2,noheader",
-    "metator": "Name,Final_bin",
+    "metator": "Name,Final_cluster",
     "dastool": "1,2,noheader",
     "binette": "1,2,noheader",
     "semibin": "contig,bin",
     "vamb": "contigname,clustername",
+}
+
+#: Header names an alias reads in place of one it names, when a table has the
+#: former and not the latter: the same column under a tool's earlier name.
+#: Only an alias falls back; a column spelled out is read as written.
+ALIAS_FALLBACKS: dict[str, dict[str, str]] = {
+    "metator": {"Final_cluster": "Final_bin"},
 }
 
 #: Default ``--contigs-format`` of an assignment table (``create``, ``reassign``).
@@ -130,6 +139,9 @@ class ColumnSpec:
     header: bool
     text: str
     option: str
+    #: ``(name, fallback)`` pairs: the header name read when a table lacks
+    #: *name* and has *fallback* (an alias's :data:`ALIAS_FALLBACKS`).
+    fallbacks: tuple[tuple[str, str], ...] = ()
 
     @property
     def no_genome(self) -> bool:
@@ -215,7 +227,16 @@ def parse_column_spec(
     named = [column for column in columns if column is not None]
     if len(set(named)) < len(named):
         raise ValueError(_same_column_message(text, named, keys, option))
-    return ColumnSpec(columns=tuple(columns), header=header, text=text, option=option)
+    fallbacks = ALIAS_FALLBACKS.get(raw, {}) if raw in aliases else {}
+    return ColumnSpec(
+        columns=tuple(columns),
+        header=header,
+        text=text,
+        option=option,
+        fallbacks=tuple(
+            (name, fallback) for name, fallback in fallbacks.items() if name in named
+        ),
+    )
 
 
 def _no_genome_misplaced(text: str, keys: Sequence[str], option: str) -> str:
@@ -314,6 +335,41 @@ def _as_dumped(
     )
 
 
+def _with_fallbacks(
+    spec: ColumnSpec, names: Sequence[str], *, kind: str, path: str | Path
+) -> ColumnSpec:
+    """*spec*, reading a fallback column where the table lacks the one named.
+
+    Only where the table has the fallback and not the name: a table with both
+    is read through the name, and one with neither is refused by name.
+    """
+    swaps = {
+        name: fallback
+        for name, fallback in spec.fallbacks
+        if name not in names and fallback in names
+    }
+    if not swaps:
+        return spec
+    for name, fallback in swaps.items():
+        logger.info(
+            "%s %s has no column %r but %r, its earlier name: reading that (%s %s).",
+            kind,
+            path,
+            name,
+            fallback,
+            spec.option,
+            spec.text,
+        )
+    columns = tuple(
+        swaps.get(column, column) if isinstance(column, str) else column
+        for column in spec.columns
+    )
+    read = ", ".join(repr(fallback) for fallback in swaps.values())
+    return dataclasses.replace(
+        spec, columns=columns, text=f"{spec.text}, read as {read}"
+    )
+
+
 def resolve_column_spec(
     spec: ColumnSpec,
     labels: Sequence[object],
@@ -345,6 +401,7 @@ def resolve_column_spec(
     """
     names = [str(label) for label in labels]
     spec = _as_dumped(spec, names, kind=kind, path=path)
+    spec = _with_fallbacks(spec, names, kind=kind, path=path)
     wanted = sum(column is not None for column in spec.columns)
     if len(names) < wanted:
         what = " and the ".join(keys[:wanted])
@@ -369,8 +426,13 @@ def resolve_column_spec(
         if column not in names:
             quoted = ", ".join(names[:_MAX_QUOTED_COLUMNS])
             more = " ..." if len(names) > _MAX_QUOTED_COLUMNS else ""
+            nor = "".join(
+                f" (nor {fallback!r})"
+                for name, fallback in spec.fallbacks
+                if name == column
+            )
             raise ValueError(
-                f"{kind} has no column named {column!r}, which {spec.option} "
+                f"{kind} has no column named {column!r}{nor}, which {spec.option} "
                 f"{spec.text!r} asks for: {path}\n"
                 f"  Its header is: {quoted}{more}\n"
                 f"  Pass {spec.option} to say which column holds the {key} "
