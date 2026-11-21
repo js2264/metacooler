@@ -163,6 +163,11 @@
     as it was; without, a link — even a dangling one — is an existing
     output (`FileExistsError`). A workflow that wrote through a `latest.cool`
     link now replaces the link;
+  - an output that is a directory, a device or a FIFO — or a link to one —
+    is refused by every writer, with `--force` or without, and never
+    removed: `-o /dev/stdout --force` removed the system's `/dev/stdout` (a
+    link to a descriptor), and `flatten`, `aggregate`, `extract` and
+    `to_cooler`, from Python, replaced a FIFO at their output;
   - from an edit session's thread, an output written over the map the
     session edits or copies out, or over its output, is refused
     (`ValueError`);

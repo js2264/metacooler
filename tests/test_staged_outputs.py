@@ -13,6 +13,7 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import stat
 import threading
 from pathlib import Path
 
@@ -317,6 +318,38 @@ def test_an_output_link_is_replaced(
         assert target.read_text() == "another file, which the link points to"
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+@pytest.mark.parametrize("kind", ["a FIFO", "a link to a FIFO", "a directory"])
+@pytest.mark.parametrize("writer", list(LINKED_WRITERS))
+def test_no_writer_removes_what_is_not_a_file(
+    writer: str, kind: str, tiny_metacooler: Path, tmp_path: Path
+):
+    """A FIFO (or a device), a link to one, or a directory at the output is
+    refused by every writer, with force or without, before it writes: cooler
+    0.12 renames its output over the path, which replaced a FIFO there
+    (``flatten``, ``aggregate``, ``to_cooler``, ``extract``, from Python)."""
+    name, write = LINKED_WRITERS[writer]
+    out = tmp_path / "out" / name
+    out.parent.mkdir()
+    if kind == "a directory":
+        out.mkdir()
+        (out / "kept").write_text("kept")
+        error, match = IsADirectoryError, "is a directory"
+    else:
+        fifo = out if kind == "a FIFO" else tmp_path / "fifo"
+        os.mkfifo(fifo)
+        if kind == "a link to a FIFO":
+            out.symlink_to(fifo)
+        error, match = FileExistsError, "not a regular file"
+    with pytest.raises(error, match=match):
+        write(tiny_metacooler, out)
+    if kind == "a directory":
+        assert (out / "kept").read_text() == "kept"
+    else:
+        assert stat.S_ISFIFO(os.stat(out).st_mode)
+        assert out.is_symlink() == (kind == "a link to a FIFO")
+
+
 class TestOutputLinks:
     def test_without_force_a_link_is_an_existing_output(
         self, tiny_metacooler: Path, tmp_path: Path
@@ -397,6 +430,9 @@ class TestOutputLinks:
             for force in (False, True):
                 with pytest.raises(FileExistsError, match="regular file"):
                     check_output_path(path, force)
+        with pytest.raises(FileExistsError, match="regular file"):
+            staging.remove_an_output_link(link, force=True)
+        assert not staging.remove_an_output_link(fifo, force=True)  # no link
         assert link.is_symlink() and fifo.exists()
 
     @pytest.mark.parametrize("cmd", [["flatten"], ["binnify", "--binsize", "200"]])

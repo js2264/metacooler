@@ -521,6 +521,9 @@ staged copy beside it:
   renames its output into place (`create`, `collect`, `reassign -o`,
   `annotate -o`, `zoomify`, `stack`), replaced by that rename, so that a run
   that fails leaves it as it was; without `--force`, it is refused.
+  An output that is a directory, a device or a FIFO — or a link to one, such
+  as `/dev/stdout` — is refused by every writer, with `--force` or without:
+  it is never removed.
   A new collection (`cp` into one, `create_mmetacool` without `force`) is
   created exclusively: one another writer created meanwhile is never
   truncated.

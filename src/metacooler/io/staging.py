@@ -1425,8 +1425,11 @@ def writing_output(
     *force* it is removed before anything writes there, so that no writer
     follows it (cooler and h5py open what a link points to) -- unless the
     writer *renamed* its output into place, which replaces the link (left
-    as it is if the write fails) --, and without it, refused.  The staged
-    map of an edit session of this thread is written as any output, and the
+    as it is if the write fails) --, and without it, refused.  A directory,
+    a device or a FIFO at *path*, or a link to one, is refused, with *force*
+    or without: it is never removed (cooler renames its output over *path*,
+    so ``-o /dev/stdout`` would have replaced the system's).  The staged map
+    of an edit session of this thread is written as any output, and the
     write fails the session if it raises.
 
     Two writers of one new path are not serialized: both write it, and,
@@ -1439,7 +1442,9 @@ def writing_output(
         ValueError: For the map, or the output, of an edit session of this
             thread.
         FileNotFoundError: If the directory of *path* does not exist.
-        FileExistsError: If *path* is a symbolic link and *force* is not set.
+        FileExistsError: If *path* is a symbolic link and *force* is not set,
+            or a device or a FIFO.
+        IsADirectoryError: If *path* is a directory.
         MapLockedError: If the lock of *path* is held (see
             :func:`check_output_lock`).
     """
@@ -1459,9 +1464,37 @@ def writing_output(
             yield Path(path)
         _note_write(session, None)
         return
-    if not renamed:  # a rename replaces a link (see check_output_path)
+    if os.path.islink(named) and not renamed:  # a rename replaces a link
         remove_an_output_link(named, force=force)
+    else:
+        _refuse_what_is_not_a_file(named)
     yield Path(path)
+
+
+def _refuse_what_is_not_a_file(path: str | Path) -> None:
+    """Refuse an output *path* that is a directory, a device or a FIFO, or a
+    symbolic link to one: an output is a file, and such a path is never
+    removed.
+
+    Raises:
+        IsADirectoryError: If *path* is a directory.
+        FileExistsError: If *path* is a device or a FIFO.
+    """
+    link = (
+        f" (a symbolic link to {os.path.realpath(path)})"
+        if os.path.islink(path)
+        else ""
+    )
+    if os.path.isdir(path):
+        raise IsADirectoryError(
+            errno.EISDIR, f"{path} is a directory{link}: give the path of a file."
+        )
+    if os.path.exists(path) and not os.path.isfile(path):
+        raise FileExistsError(
+            errno.EEXIST,
+            f"{path} is not a regular file{link} (a device, a FIFO): give the "
+            "path of a file. It is never removed.",
+        )
 
 
 def remove_an_output_link(path: str | Path, *, force: bool) -> bool:

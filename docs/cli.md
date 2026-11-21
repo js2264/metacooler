@@ -621,7 +621,8 @@ paths. An output that is a symbolic link is replaced, never written
 through: with `--force` the link is replaced by the new file (its target is
 left as it is; a command that stages its output replaces it only once the
 output is complete), and without `--force` a link, even a dangling one, is
-an existing output. A
+an existing output. An output that is a directory, a device or a FIFO
+(`-o /dev/stdout`), or a link to one, is refused, and never removed. A
 command that reads a map while it is replaced, or a `MetaCooler`
 opened before, stops with an error rather than mixing two versions of the map:
 open it again. See [In-place writes](format.md#in-place-writes).
