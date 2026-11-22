@@ -1477,6 +1477,25 @@ metacooler network gut_T0.metacool --level genome -o genome_network.tsv
 metacooler network gut_T0.metacool --balance empirical_hit -o contigs.tsv
 ```
 
+From Python, `metacooler.network` returns the edges as a pandas DataFrame
+(`node1`, `node2`, `value`) when it is given no `out`: at contig level, one row
+per pair of contigs, `node1` before `node2` in the map's order, a contig's
+contacts with itself included once. `out` takes a path, or an open text stream,
+which is written to and left open (the command passes stdout); at bin level the
+returned table holds every pixel, where a path or a stream gets them chunk by
+chunk. Before metacooler 0.4.0, `network` without `out` printed the edges;
+`out=sys.stdout` still does. A map without a pixel gives an empty table with the
+dtypes of any other.
+
+```python
+import metacooler
+
+edges = metacooler.network("gut_T0.metacool", level="contig")
+hits = edges.groupby("node1")["value"].sum().add(
+    edges.groupby("node2")["value"].sum(), fill_value=0
+)  # each contig's contacts, a contact with itself counted twice
+```
+
 ### `aggregate` { #aggregate }
 
 Aggregate contacts to contig or genome level and write a standard `.cool` file

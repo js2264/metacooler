@@ -95,6 +95,8 @@ def cmd_network(
     At --level contig: aggregated by contig pairs.
     At --level genome: aggregated by genome pairs.
     """
+    import sys
+
     from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.network import network
 
@@ -102,11 +104,13 @@ def cmd_network(
 
     check_output(output, force, inputs=[metacool_path])
 
+    # Without -o, the edges go to stdout as they are made (network() would
+    # return them, every pixel in memory at --level bin).
     network(
         uri=metacool_path,
         level=cast(Literal["bin", "contig", "genome"], level),
         weight=weight,
-        out=output,
+        out=output if output is not None else sys.stdout,
         header=header,
         chunksize=chunksize,
         force=force,

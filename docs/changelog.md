@@ -76,6 +76,13 @@
 
 ### Changed
 
+- **Breaking: `metacooler.network(...)` returns the edges** when it is given
+  no `out`, as a DataFrame (`node1`, `node2`, `value`), and prints nothing,
+  where it printed them to stdout as TSV: a tool that reads a map's contig
+  network (MetaTOR does) sums no pixel itself. A Python caller that relied on
+  the printed edges passes `out=sys.stdout`, which gives them as before. `out`
+  takes a path as before, or an open text stream, written to and left open;
+  the `network` command passes stdout, so its output is unchanged.
 - **Breaking: a QC block tallied from pairs splits short and long contacts at
   1001 bp**, where it split them at 10 kb: the default of
   `create pairs --qc-threshold`, and of `metacooler.from_pairs`
