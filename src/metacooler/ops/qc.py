@@ -56,7 +56,10 @@ def qc(
 
     Args:
         uri: ``file.metacool`` path or ``file.mmetacool::entries/name`` URI.
-        distance_threshold: Intra-contig short/long split, in bp.
+        distance_threshold: Intra-contig short/long split, in bp: long-range
+            from this distance on, measured between bin midpoints.  Warns
+            when it is no greater than the bin size, where little but the
+            diagonal is short-range.
         chunksize: Pixels read per iteration.
         store: If ``True``, write the result back into the file —
             ``metadata["qc"]`` plus the per-genome ``qc_*`` columns of
@@ -85,16 +88,12 @@ def qc(
     # both compared with an int and JSON-serialised below.
     binsize = mc.binsize
     binsize = None if binsize is None else int(binsize)
-    if binsize is not None and binsize >= tally.distance_threshold:
-        logger.warning(
-            "Bin size (%d bp) is at least the short/long distance threshold "
-            "(%d bp), so every intra-contig contact except the diagonal is "
-            "reported as long-range. Re-run 'create pairs' (which measures "
-            "distances between read positions) or lower --threshold to split "
-            "the intra-contig signal meaningfully.",
-            binsize,
-            tally.distance_threshold,
-        )
+    tally.warn_if_split_within_bin(
+        binsize,
+        "A useful split needs a --threshold above the bin size, or a map made "
+        "from pairs: 'create pairs' measures the split on read positions, and "
+        "'metacooler metadata get -k qc' prints the block it stored.",
+    )
 
     n_pixels = tally_map(mc, tally, chunksize=chunksize)
 

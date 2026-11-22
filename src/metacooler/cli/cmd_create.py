@@ -15,10 +15,9 @@ from metacooler.cli._options import (
     verbose_option,
 )
 from metacooler.cli.main import cli
-from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD
 
 
-def shared_options(f):
+def shared_options(*, qc_threshold: int, qc_threshold_help: str):
     """Apply options shared by all ``create`` subcommands.
 
     Adds: ``-o/--output``, ``--contigs``, ``--contigs-format``, ``--genomes``,
@@ -28,6 +27,18 @@ def shared_options(f):
     The filter/force/verbose/quiet options come from
     :mod:`metacooler.cli._options` so they stay identical to every other
     command in the CLI.
+
+    Args:
+        qc_threshold: Default of ``--qc-threshold``, in bp.  It depends on
+            what the command measures its distances between: read positions
+            (``create pairs``, :data:`metacooler.qc.PAIRS_DISTANCE_THRESHOLD`)
+            or bin midpoints (``create cool``,
+            :data:`metacooler.qc.DEFAULT_DISTANCE_THRESHOLD`).
+        qc_threshold_help: The rest of ``--qc-threshold``'s help: what the
+            distances are measured between, and what the default means.
+
+    Returns:
+        The decorator.
     """
     decorators = [
         click.option(
@@ -80,20 +91,25 @@ def shared_options(f):
         click.option(
             "--qc-threshold",
             type=str,
-            default=str(DEFAULT_DISTANCE_THRESHOLD),
+            default=str(qc_threshold),
             show_default=True,
             help=(
-                "Distance splitting short- from long-range intra-contig signal. "
-                "Accepts [cyan]bp/kb/Mb/Gb[/cyan] suffixes."
+                "Distance splitting short- from long-range intra-contig "
+                f"contacts, {qc_threshold_help} Accepts [cyan]bp/kb/Mb/Gb[/cyan] "
+                "suffixes."
             ),
         ),
         force_option,
         verbose_option,
         quiet_option,
     ]
-    for dec in reversed(decorators):
-        f = dec(f)
-    return f
+
+    def apply(f):
+        for dec in reversed(decorators):
+            f = dec(f)
+        return f
+
+    return apply
 
 
 @cli.group(name="create", help="Create a metacool file from various sources.")
