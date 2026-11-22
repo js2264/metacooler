@@ -13,6 +13,7 @@ from metacooler.cli._options import (
 )
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
+from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD
 
 
 @create.command(name="cool", help="Create a metacool file from an existing cool file.")
@@ -23,7 +24,13 @@ from metacooler.cli.cmd_create import create, shared_options
     required=True,
     help="Input cool file to convert.",
 )
-@shared_options
+@shared_options(
+    qc_threshold=DEFAULT_DISTANCE_THRESHOLD,
+    qc_threshold_help=(
+        "measured between bin midpoints: long-range from this distance on. At "
+        "or below the bin size, little but the diagonal is short-range."
+    ),
+)
 @click.option(
     "--contig-order",
     type=click.Choice(["genome-then-length", "genome-then-alpha", "cool", "alpha"]),

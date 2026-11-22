@@ -60,6 +60,7 @@ from metacooler.ps import (
 )
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
+    PAIRS_DISTANCE_THRESHOLD,
     QC_COLUMN_PREFIX,
     QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
@@ -3130,7 +3131,7 @@ def from_pairs(
     chunksize: int = DEFAULT_CHUNKSIZE,
     sort_in_memory: bool | None = None,
     qc: bool = True,
-    qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
+    qc_distance_threshold: int = PAIRS_DISTANCE_THRESHOLD,
     ps: bool = True,
     ps_bins_per_decade: int = DEFAULT_BINS_PER_DECADE,
     force: bool = False,
@@ -3208,7 +3209,11 @@ def from_pairs(
             because binning discards the sub-bin distances the short/long
             split needs.  The per-contig short/long counts are what lets a
             later :func:`metacooler.io.reassign.reassign` keep that split.
-        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp:
+            long-range from this distance on, measured between read
+            positions.  The default, ``PAIRS_DISTANCE_THRESHOLD`` (1001),
+            makes ``intra_contig_long`` the pairs more than 1 kb apart, which
+            MetaTOR's ``mge`` reads (see :mod:`metacooler.qc`).
         ps: Accumulate a per-genome P(s) curve from the same pass and write it
             beside the output as ``<name>.ps.tsv`` (see :mod:`metacooler.ps`).
             Measured on read positions, so it resolves distances the binned map
@@ -3635,7 +3640,11 @@ def from_cool(
             :mod:`metacooler.qc`).  A cool file has no read positions left, so
             intra-contig distances are measured between bin midpoints and the
             block records ``source="pixels"``.
-        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp:
+            long-range from this distance on, measured between bin
+            midpoints.  The default is ``DEFAULT_DISTANCE_THRESHOLD``
+            (10 kb); at or below the bin size little but the diagonal is
+            short-range, and a warning says so.
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
             a table without a header line.  Defaults to ``genome_name``.
@@ -3805,7 +3814,14 @@ def from_cool(
         if qc
         else None
     )
+    qc_binsize = infer_binsize(bins_remapped) if qc_tally is not None else None
     if qc_tally is not None:
+        qc_tally.warn_if_split_within_bin(
+            qc_binsize,
+            "A useful split needs a --qc-threshold above the bin size, or a map "
+            "made from pairs: 'create pairs' measures the split on read "
+            "positions.",
+        )
         raw_pixels = _tally_pixel_qc(
             raw_pixels, qc_tally, bin_maps(bins_remapped, contigs)
         )
@@ -3859,7 +3875,7 @@ def from_cool(
         if qc_tally is not None:
             store_qc(
                 staged,
-                qc_tally.summary(binsize=infer_binsize(bins_remapped)),
+                qc_tally.summary(binsize=qc_binsize),
                 qc_tally.genome_table(genomes["name"].to_numpy()),
                 qc_tally.contig_table(contigs["name"].to_numpy()),
             )

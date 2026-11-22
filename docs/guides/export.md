@@ -132,8 +132,9 @@ metacooler network sample.metacool --level genome -o genome_network.tsv --force
 ```
 
 The `--level` values are singular: `bin`, `contig`, `genome`. `--chunksize`
-(default `1000000`) controls how many pixels are folded into the running
-aggregate at a time.
+(default `50000000`, as for every command that streams pixels) controls how
+many pixels are read at a time: folded into the running aggregate at contig
+and genome level, written out at bin level.
 
 ## Flattening to a standard cool file (`flatten`)
 

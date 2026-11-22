@@ -185,7 +185,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* anything is binned — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. See [Filtering with `--filter`](#filter). `genomes.n_bins` is not available here. |
 | `--qc / --no-qc` | on | Tally contact-quality statistics while the pairs are binned and store them in `metadata.qc` plus the `qc_*` columns of `/genomes` and `/contigs`. See [`qc`](#qc). Costs a few vectorised operations per chunk, and is the only way to get an *exact* short/long split — binning throws the sub-bin distances away. The per-contig split is what lets a later [`reassign`](#reassign) keep it. |
-| `--qc-threshold` | `1001` | Distance separating short- from long-range intra-contig signal: long-range from this distance on. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--qc-threshold` | `1001` | Distance separating short- from long-range intra-contig contacts, measured between read positions: long-range from this distance on. The default makes `intra_contig_long` the pairs more than 1 kb apart, which MetaTOR's `mge` step reads. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--ps / --no-ps` | on | Accumulate a **per-MAG P(s) curve** from the same pass and write it beside the output as `<output>.ps.tsv`. Measured on read positions, so it resolves distances the binned map cannot. No plot is drawn. See [`ps`](#ps). |
 | `--ps-bins-per-decade` | `10` | Log-grid resolution of the P(s) table. |
 | `--chunksize` | `50000000` | Pairs processed per chunk. This is chunk *granularity*, not read memory (the pyarrow read block is capped separately). Under `external` sorting each chunk becomes a temporary cooler at a fixed per-call cost that scales with contig count, so smaller chunks cost disproportionately more. |
@@ -305,7 +305,7 @@ write:
 |-------|---------|-------|
 | `contigs` | `contig_name,genome_name` | metacooler's own layout (the default). |
 | `contig_genome` | `1,2,noheader` | Two columns, contig then genome, no header. |
-| `metator` | `Name,Final_cluster` | MetaTOR's `contig_data_final.txt`, as `metator dump` writes it. A table without `Final_cluster` but with `Final_bin`, as MetaTOR 1.x wrote it, is read through `Final_bin` (and logged); a spec spelled out, `Name,Final_cluster`, is read as written. |
+| `metator` | `Name,Final_cluster` | metaTOR 2.0's `contig_data_final.txt` (`Name`, `Final_cluster`). A table without `Final_cluster` but with `Final_bin`, as MetaTOR 1.x wrote it, is read through `Final_bin` (and logged); a spec spelled out, `Name,Final_cluster`, is read as written. |
 | `dastool` | `1,2,noheader` | DAS Tool's `*_DASTool_contigs2bin.tsv`, and the tables its `Fasta_to_Contigs2Bin.sh` builds from FASTA bins (MetaBAT2, MaxBin2, …). |
 | `binette` | `1,2,noheader` | Binette's `final_contig_to_bin.tsv`. |
 | `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |
@@ -391,7 +391,7 @@ metacooler create cool --cool IN.cool [--contigs C] -o OUT.metacool [OPTIONS]
 | `--drop-unassigned` | off | Drop unassigned contigs. |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* the bins are remapped. Repeatable. Same semantics and caveats as `create pairs`. |
 | `--qc / --no-qc` | on | Tally contact-quality statistics off the pixel stream being copied, and store them in `metadata.qc` plus the `qc_*` columns of `/genomes` and `/contigs`. A cool file has no read positions left, so intra-contig distances are measured between bin midpoints and the block records `source="pixels"`. See [`qc`](#qc). |
-| `--qc-threshold` | `1001` | Distance separating short- from long-range intra-contig signal: long-range from this distance on. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--qc-threshold` | `10000` | Distance separating short- from long-range intra-contig contacts, measured between bin midpoints: long-range from this distance on. At or below the bin size little but the diagonal is short-range, and a warning says so. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--nproc` | `1` | Parallel reader threads for pixel remapping. |
 | `--sort-strategy` | `auto` | As `create pairs`, but `nnz` is known up front so the 100 M-pixel threshold is compared directly. |
 | `-f, --force` | off | Overwrite the output if it already exists. |
@@ -449,7 +449,7 @@ file stem (`E_coli.cool` → `E_coli`) unless `--names` says otherwise, and
 | `--contig-order` | `cool` | Order of the contigs *within* each genome: `cool` keeps each input's own order, `genome-then-length` puts the longest first, `genome-then-alpha` sorts them by name. Genomes themselves are always laid out alphabetically, in `genome_id` order. |
 | `--assembly-name` | — | Name for the collection, stored as `genome-assembly`. |
 | `--qc / --no-qc` | on | Tally contact-quality statistics off the pixel stream being copied (`source="pixels"`, as in `create cool`). See [`qc`](#qc). |
-| `--qc-threshold` | `1001` | Distance separating short- from long-range intra-contig signal: long-range from this distance on. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--qc-threshold` | `10000` | Distance separating short- from long-range intra-contig contacts, measured between bin midpoints: long-range from this distance on. At or below the bin size little but the diagonal is short-range, and a warning says so. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--sort-strategy` | `auto` | Only matters when `--contig-order` reorders an input's contigs: `auto` (in memory unless one such input exceeds 100 M pixels), `memory` (in RAM, one input at a time), or `external` (cooler's external sort). |
 | `--chunksize` | `50000000` | Pixels read per chunk (peak-memory control), and the smallest chunk handed to cooler. |
 | `-f, --force` | off | Overwrite the output if it already exists. An input is never overwritten. |
@@ -1715,7 +1715,9 @@ per pair of contigs, `node1` before `node2` in the map's order, a contig's
 contacts with itself included once. `out` takes a path, or an open text stream,
 which is written to and left open (the command passes stdout); at bin level the
 returned table holds every pixel, where a path or a stream gets them chunk by
-chunk.
+chunk. Before metacooler 0.4.0, `network` without `out` printed the edges;
+`out=sys.stdout` still does. A map without a pixel gives an empty table with the
+dtypes of any other.
 
 ```python
 import metacooler
@@ -1984,10 +1986,19 @@ Every contact falls in exactly one of four categories:
 | `inter_contig_intra_genome` | Two contigs of the same MAG. |
 | `inter_genome` | Two contigs of different MAGs. |
 
-The default `--threshold`, 1001 bp, makes `intra_contig_long` the contacts more
-than 1 kb apart within a contig, which MetaTOR's `mge` step reads. It was 10 kb
-before metacooler 0.4.0: a block records the threshold it was tallied at
-(`distance_threshold`), and `reassign` and `merge` keep it.
+A contact is long-range from the threshold on: at least `--threshold` apart.
+This command measures between bin midpoints, two neighbouring bins a bin size
+apart, so its default, 10 kb, suits maps binned below it; at or below the bin
+size little but the diagonal is short-range, and it warns. `create pairs`
+measures on read positions, at **1001 bp** by default since metacooler 0.4.0
+(10 kb before), so that its block's `intra_contig_long` is the pairs more than
+1 kb apart within a contig, which MetaTOR's `mge` step reads. That holds for a
+block measured on read positions only (`source="pairs"`): between bin
+midpoints, `--threshold 1001` does not count those pairs. A block records the
+threshold it was tallied at (`distance_threshold`), and `reassign` keeps it.
+`merge` keeps it only when every input records the same one; otherwise the
+merged map has no QC block and no `qc_*` columns, and a warning says why (see
+[its QC block](#merge-qc)).
 
 `__unbinned__` is not a MAG but the absence of one, so each unbinned contig
 counts as a genome of its own: a contact between two *different* unbinned
@@ -2006,7 +2017,7 @@ category. On an empty file the ratios are `null` rather than `0`.
 | `-o, --output` | stdout | Write the JSON summary here. |
 | `--table` | off | Print a rich table instead of JSON. |
 | `--per-genome` | — | Write the per-genome breakdown as a TSV to this path. |
-| `--threshold` | `1001` | Short/long intra-contig split: long-range from this distance on. Accepts `bp/kb/Mb/Gb` suffixes. |
+| `--threshold` | `10000` | Short/long intra-contig split, measured between bin midpoints: long-range from this distance on. Warns at or below the bin size. Accepts `bp/kb/Mb/Gb` suffixes. |
 | `--store` | off | Write the result back into the file: `metadata.qc` plus the `qc_*` columns of `/genomes` and `/contigs`. |
 | `--chunksize` | `50000000` | Pixels processed per chunk. |
 | `-f, --force` | off | Overwrite `-o`/`--per-genome` if they exist. |
@@ -2023,8 +2034,8 @@ The block records which one produced it:
 - **`source="pixels"`** — what this command computes, and what `create cool`
   stores. Intra-contig distances are gaps between bin midpoints, so the
   short/long split is only as fine as the bin size; at `binsize >= threshold`
-  everything but the diagonal is "long", and the command warns. Every other
-  number is identical to the pairs-based one.
+  little but the diagonal is "short", and this command, `create cool` and
+  `collect` warn. Every other number is identical to the pairs-based one.
 
 `--store` on a file created with `create pairs` therefore *replaces* a more
 precise block with a coarser one, and says so.

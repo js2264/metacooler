@@ -368,7 +368,7 @@ alongside the `commands` provenance list:
 |-----|---------|
 | `version` | Block schema version (currently `2`; version 1 counted a contact between two different `__unbinned__` contigs as intra-genome rather than inter-genome). |
 | `source` | `"pairs"` — measured on read positions by `create pairs`, before binning — or `"pixels"`, measured between bin midpoints. |
-| `distance_threshold` | Short/long intra-contig split, in bp: a contact is long-range when its ends are at least this far apart. Default 1001 (more than 1 kb apart, as MetaTOR's `mge` counts the pairs within a contig); 10 000 before metacooler 0.4.0. A block keeps the threshold it was tallied at. |
+| `distance_threshold` | Short/long intra-contig split, in bp: a contact is long-range when its ends are at least this far apart. The default depends on `source`: 1001 for `"pairs"` (more than 1 kb apart, as MetaTOR's `mge` counts the pairs within a contig; 10 000 before metacooler 0.4.0), 10 000 for `"pixels"`: its distances run between bin midpoints, and at or below the bin size little but the diagonal is short-range. A block keeps the threshold it was tallied at. |
 | `n_contacts` | Total contacts classified. |
 | `intra_contig_short`, `intra_contig_long`, `inter_contig_intra_genome`, `inter_genome` | The four mutually exclusive categories; they sum to `n_contacts`. |
 | `intra_contig`, `inter_contig`, `intra_genome` | Convenience sums of the above. |

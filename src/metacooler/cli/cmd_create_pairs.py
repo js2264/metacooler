@@ -15,6 +15,7 @@ from metacooler.cli._options import (
 from metacooler.cli._provenance import load_metadata_file, reconstruct_command
 from metacooler.cli.cmd_create import create, shared_options
 from metacooler.ps import DEFAULT_BINS_PER_DECADE
+from metacooler.qc import PAIRS_DISTANCE_THRESHOLD
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 
@@ -42,7 +43,14 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     help="BED file of bins (without column names), or an integer bin size in bp (e.g. 1000). "
     "If an integer, contig lengths must be available from the pairs header or a --fasta should be provided.",
 )
-@shared_options
+@shared_options(
+    qc_threshold=PAIRS_DISTANCE_THRESHOLD,
+    qc_threshold_help=(
+        "measured between read positions: long-range from this distance on. "
+        "The default counts as long-range the pairs more than 1 kb apart, as "
+        "MetaTOR's mge does."
+    ),
+)
 @click.option(
     "--contig-order",
     type=click.Choice(["genome-then-length", "genome-then-alpha", "fasta", "alpha"]),
