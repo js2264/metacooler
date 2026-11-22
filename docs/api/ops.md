@@ -47,12 +47,16 @@ equivalent.
       heading: "Normalization"
       members:
         - normalize_ice
+        - normalize_normcc
+        - normalize_hiczin
         - Normalization
 
-`normalize_ice` is re-exported at the top level
-(`metacooler.normalize_ice(...)`). Its arithmetic -- cooler's iterative
-correction, for any grouping of the bins -- lives in `metacooler.normalize`;
-reading and writing the weight columns in `metacooler.io.weights`.
+The three functions are re-exported at the top level
+(`metacooler.normalize_ice(...)`). The arithmetic they share -- cooler's
+iterative correction for any grouping of the bins, the negative binomial and
+zero-inflated negative binomial fits -- lives in `metacooler.normalize`;
+reading and writing the weight columns in `metacooler.io.weights`, and the
+restriction-site counts in `metacooler.io.sites`.
 
 ::: metacooler.io.weights
     options:
@@ -63,6 +67,7 @@ reading and writing the weight columns in `metacooler.io.weights`.
         - read_weights
         - describe_weights
         - check_depends_on
+        - spurious_cutoff
 
 `store_weights` and `read_weights` are re-exported at the top level
 (`metacooler.store_weights(...)`): the way any other tool stores its own

@@ -568,7 +568,7 @@ and none re-bins a single contact.
 |---------|-----------------|------|
 | [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places; a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
 | [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds. |
-| [`normalize`](#normalize) | A weight column of `/bins` — ICE, by default genome by genome — and never a pixel. Any other tool's normalization is stored the same way, from Python. | Tens of passes over the pixels, one per iteration. |
+| [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels; tens of passes for `ice`. |
 | [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | Instant. |
 
 `reassign` and `annotate` write either an edited copy (`-o`) or the map itself
@@ -858,14 +858,15 @@ replicate still merges with the others.
 
 ### `normalize` { #normalize }
 
-Balance the map and store the weights as a column of `/bins`, or list the
-weight columns it holds. `normalise` is an alias. **API:**
-`metacooler.normalize_ice` (`metacooler.ops.normalize`); for any other tool's
-normalization, `metacooler.store_weights` and `metacooler.read_weights`
+Compute a normalization of the map and store it as a weight column of
+`/bins`, or list the weight columns it holds. `normalise` is an alias.
+**API:** `metacooler.normalize_ice`, `normalize_normcc` and `normalize_hiczin`
+(`metacooler.ops.normalize`); for any other tool's normalization,
+`metacooler.store_weights` and `metacooler.read_weights`
 (`metacooler.io.weights`).
 
 ```console
-metacooler normalize ice METACOOL_PATH [OPTIONS]
+metacooler normalize ice|normcc|hiczin METACOOL_PATH [OPTIONS]
 metacooler normalize list METACOOL_PATH
 ```
 
@@ -877,10 +878,27 @@ as they read a balancing weight (`cooler.Cooler(path).matrix(balance="weight")`)
 Read them back with [`show`](#show), [`dump`](#dump) or [`network`](#network)
 `--balance NAME`.
 
-metacooler computes one normalization itself, ICE. Any other — a binner's
-network normalization, a regression fitted on the contigs — is computed by the
-tool that defines it and [stored](#normalize-store) in the map the same way, to
-be read back by the same `--balance NAME`.
+metacooler computes three normalizations itself: ICE, and the regressions of
+MetaCC (NormCC) and HiCBin (HiCzin). Any other — a binner's network
+normalization, say — is computed by the tool that defines it and
+[stored](#normalize-store) in the map the same way, to be read back by the same
+`--balance NAME`.
+
+| Method | Normalized contact of contigs (bins, for `ice`) *i* and *j* | Needs | Default column |
+|--------|---------------------------------------------------------------|-------|----------------|
+| `ice` | Iterative correction: every bin's normalized contacts sum to 1, **genome by genome** by default. | — | `weight` |
+| `normcc` | NormCC (MetaCC; Du & Sun, *Nat. Commun.* 2023): raw × max(μ) / √(μ<sub>i</sub> μ<sub>j</sub>), μ a negative binomial fit of each contig's inter-contig contacts on its sites, length and intra-contig contacts. | sites (optional) | `normcc` |
+| `hiczin` | HiCzin (HiCBin; Du et al., *J. Comput. Biol.* 2022): raw / μ<sub>ij</sub>, μ a zero-inflated negative binomial fit of the contacts between contigs of one genome on their sites, lengths and coverages. | a coverage; sites (optional) | `hiczin` |
+
+**To look at a genome's 3D structure** — its contact map, its domains, the
+circularisation signal — use `ice`, per genome. **To weigh contacts between
+contigs or genomes** — binning, linking a phage or a plasmid to its host — use
+a contig-level method, which corrects each contig's biases (abundance, length,
+site density) but keeps the contrast between the contacts inside a genome and
+those between genomes: `normcc` (nothing but the map) or `hiczin` (a coverage).
+Both give every bin of a contig its contig's weight, so a normalized map summed
+back to contigs — `network --level contig --balance NAME` — holds exactly the
+contig-level values the method defines.
 
 #### `normalize ice`
 
@@ -910,6 +928,37 @@ contig a genome of its own it is `cooler balance --cis-only`, and with a single
 genome (and `--mad-max 0`) it is `cooler balance`. That is cooler 0.12's
 `--ignore-diags`, which stops at a contig boundary; before 0.12, cooler also
 dropped the pixel between the last bin of a contig and the first of the next.
+
+#### `normalize normcc` and `normalize hiczin`
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--coverage COLUMN` | *required* (`hiczin`) | `/contigs` column of shotgun coverages. A zero coverage is raised to the smallest positive one, as HiCzin does. |
+| `--sites COLUMN` | — | `/contigs` column holding each contig's restriction-site count, used as is. |
+| `--enzyme` | — | Or count the sites of these enzymes in `--fasta`: names such as `DpnII`, `HinfI`, `Arima`, or IUPAC sites such as `GATC`; comma-separated or repeated. Without sites, the site term is left out, as MetaCC and HiCBin do without an enzyme. |
+| `--fasta` | — | The assembly (plain or `.gz`). Every contig of the map must be in it, with its length. |
+| `--min-length` | `1000` | Shorter contigs are left out (masked). Accepts `bp/kb/Mb` suffixes. |
+| `--min-signal` | `2` | Contigs whose largest contact with another contig is smaller are left out. |
+| `--spurious` | `0.05` | Quantile of the normalized contig-pair contacts stored as the **spurious-contact cutoff**; [`network --drop-spurious`](#network) drops the pairs below it (NormCC) or at most at it (HiCzin). |
+| `--max-pairs` | `1000000` | `hiczin` only: fit on a uniform sample of at most this many pairs (`0`: all of them). |
+| `--seed` | `0` | `hiczin` only: seed of that sample. |
+| `--name`, `-f, --force`, `--chunksize`, `-v` / `-q` | | As for `ice` (the default column is the method's name). |
+
+The sites of all the enzymes are counted as one regular expression, so a
+position two of them cut counts once; MetaCC and HiCBin count with Biopython,
+enzyme by enzyme, and count it once per enzyme. The two agree wherever no two
+of the enzymes' sites overlap.
+
+HiCzin learns which contig pairs are genuine from a taxonomic labelling; a
+metacool file has a better one, its genome assignment, so the regression is
+fitted on the pairs of contigs of one genome, zero contacts included
+(`__unbinned__` contigs excluded). A `reassign` that moves a contig therefore
+drops a HiCzin weight, and an `annotate` that changes its coverage column too.
+With no zero contact among those pairs the zero inflation is not identified,
+and with contacts no more variable than a Poisson's neither is the dispersion:
+the fit then settles on the simpler model (a negative binomial, a Poisson,
+whose mean is what the weights use) and says so, where glmmTMB, which HiCzin
+calls, can fail to converge.
 
 #### `normalize list`
 
@@ -950,16 +999,19 @@ weights, inverting one cooler reads as divisive.
 A contig-level normalization gives every bin of a contig its contig's weight,
 so a map normalized by it and summed back to contigs —
 `network --level contig --balance NAME` — holds exactly the contig-level values
-the normalization defines: with the weights above, MetaTOR's contig network.
+the normalization defines: with the weights above, MetaTOR's contig network. A
+tool that calls some contig pairs spurious stores its cutoff as two
+parameters, `spurious_cutoff` and `spurious_rule` (`<` or `<=`), for
+`network --drop-spurious` to apply.
 
 !!! note "Weights are derived data"
     A weight describes the pixels it was computed from, and possibly the genome
     assignment and named `/contigs` columns; its attributes record which (see
     [Normalization weights](format.md#weights)). An edit that changes one drops
     the weight rather than leave a stale normalization: [`reassign`](#reassign)
-    drops those that depend on `genome_id` — `ice --scope genome` — when a
-    contig moves, and [`annotate`](#annotate) those that depend on a column it
-    changed. `binnify`, `merge`, `collect`, `extract`, `flatten` and the coarser
+    drops those that depend on `genome_id` — `ice --scope genome`, `hiczin` —
+    when a contig moves, and [`annotate`](#annotate) those that depend on a
+    column it changed (a coverage, a site count). `binnify`, `merge`, `collect`, `extract`, `flatten` and the coarser
     levels of `zoomify` keep no weight; the base level of `zoomify`, `cp` and
     `stack` copy them unchanged.
 
@@ -971,6 +1023,13 @@ metacooler show gut_T0.metacool --genomes MAG_01 --level bin \
 
 # cooler's whole-matrix balancing, beside it
 metacooler normalize ice gut_T0.metacool --scope global --name weight_global
+
+# NormCC with counted sites, then the genome network without spurious contacts
+metacooler normalize normcc gut_T0.metacool --enzyme DpnII,HinfI --fasta assembly.fa
+metacooler network gut_T0.metacool --level genome --balance normcc --drop-spurious
+
+# HiCzin on a coverage column of /contigs
+metacooler normalize hiczin gut_T0.metacool --coverage Shotgun_coverage
 
 # The contig network normalized by weights another tool stored
 metacooler network gut_T0.metacool --level contig \
@@ -1405,7 +1464,8 @@ metacooler network METACOOL_PATH --level LEVEL [OPTIONS]
 | `--weight` | `count` | Pixel column used as edge weight. |
 | `-o, --output` | stdout | Output TSV file. |
 | `--header` | off | Write a `node1  node2  value` header line. |
-| `--balance NAME` | — | Normalize the edges with the `/bins/NAME` weights — of [`normalize ice`](#normalize), or [stored](#normalize-store) by another tool: every pixel times the weights of its two bins before it is summed, masked bins left out. At contig level, a contig-level normalization gives its own contig network: MetaTOR's `empirical_hit`, stored as `1 / sqrt(hits)`, gives MetaTOR's. |
+| `--balance NAME` | — | Normalize the edges with the `/bins/NAME` weights — of [`normalize`](#normalize), or [stored](#normalize-store) by another tool: every pixel times the weights of its two bins before it is summed, masked bins left out. At contig level, a contig-level normalization gives its own contig network: MetaTOR's `empirical_hit`, stored as `1 / sqrt(hits)`, gives MetaTOR's. |
+| `--drop-spurious` | off | Drop the contig pairs the `--balance` normalization calls spurious — the cutoff `normalize normcc` and `hiczin` store, or another tool's — before the edges are summed to genomes. Contig or genome level. |
 | `--chunksize` | `50000000` | Pixels processed per chunk (memory control). |
 | `-f, --force` | off | Overwrite `-o/--output` if it already exists (`network` used to clobber it silently). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |

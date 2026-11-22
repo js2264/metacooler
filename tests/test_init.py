@@ -79,6 +79,8 @@ class TestInit:
             "dump_table",
             # normalization
             "normalize_ice",
+            "normalize_normcc",
+            "normalize_hiczin",
             "store_weights",
             "read_weights",
             # quality control

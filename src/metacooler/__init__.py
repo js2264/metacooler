@@ -50,7 +50,11 @@ if TYPE_CHECKING:
     from metacooler.io.weights import read_weights, store_weights
     from metacooler.ops.aggregate import aggregate
     from metacooler.ops.binnify import binnify
-    from metacooler.ops.normalize import normalize_ice
+    from metacooler.ops.normalize import (
+        normalize_hiczin,
+        normalize_ice,
+        normalize_normcc,
+    )
     from metacooler.ops.ps import contact_probability, plot_ps
     from metacooler.ops.qc import qc as contact_qc
     from metacooler.ops.zoomify import zoomify
@@ -86,6 +90,8 @@ __all__ = [
     "dump_table",
     # normalization (weights stored in /bins)
     "normalize_ice",
+    "normalize_normcc",
+    "normalize_hiczin",
     "store_weights",
     "read_weights",
     # quality control
@@ -196,6 +202,14 @@ def __getattr__(name: str) -> object:
         from metacooler.ops.normalize import normalize_ice as _normalize_ice
 
         return _normalize_ice
+    if name == "normalize_normcc":
+        from metacooler.ops.normalize import normalize_normcc as _normalize_normcc
+
+        return _normalize_normcc
+    if name == "normalize_hiczin":
+        from metacooler.ops.normalize import normalize_hiczin as _normalize_hiczin
+
+        return _normalize_hiczin
     if name == "store_weights":
         from metacooler.io.weights import store_weights as _store_weights
 

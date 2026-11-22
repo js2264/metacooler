@@ -76,6 +76,13 @@ DEPENDS_ON_ASSIGNMENT = "genome_id"
 #: read, e.g. ``contigs/Shotgun_coverage``.
 CONTIG_COLUMN_PREFIX = "contigs/"
 
+#: Attributes recording a spurious-contact cutoff (NormCC, HiCzin): contig
+#: pairs whose normalized contact is below it -- or at it, under the ``<=``
+#: rule -- are deemed spurious.  Any tool may store them, as parameters of its
+#: weight column, for ``network --drop-spurious`` to apply.
+SPURIOUS_CUTOFF_ATTR = "spurious_cutoff"
+SPURIOUS_RULE_ATTR = "spurious_rule"
+
 #: Attributes :func:`store_weights` writes itself, which a method's parameters
 #: cannot take over.
 RESERVED_WEIGHT_ATTRS = frozenset(
@@ -475,6 +482,32 @@ def read_weights(source: MetaCooler | str | Path, name: str) -> np.ndarray:
             values = 1.0 / values
     values[~np.isfinite(values)] = np.nan
     return values
+
+
+def spurious_cutoff(
+    source: MetaCooler | str | Path, name: str
+) -> tuple[float, str] | None:
+    """Return the spurious-contact cutoff stored with a weight column, if any.
+
+    Args:
+        source: ``file.metacool``, ``file.mmetacool::entries/<name>``, or an
+            open ``MetaCooler``.
+        name: The ``/bins`` column.
+
+    Returns:
+        ``(cutoff, rule)`` -- a contig pair whose normalized contact is below
+        the cutoff (rule ``"<"``) or at most the cutoff (rule ``"<="``) is
+        spurious -- or ``None`` if the column records no cutoff.
+    """
+    with _open_map(source).open() as grp:
+        node = grp["bins"].get(name)
+        if not isinstance(node, h5py.Dataset):
+            return None
+        cutoff = node.attrs.get(SPURIOUS_CUTOFF_ATTR)
+        rule = _decoded(node.attrs.get(SPURIOUS_RULE_ATTR, "<"))
+    if cutoff is None:
+        return None
+    return float(cutoff), str(rule)
 
 
 def describe_weights(source: MetaCooler | str | Path) -> list[dict[str, object]]:

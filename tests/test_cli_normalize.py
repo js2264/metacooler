@@ -24,7 +24,13 @@ def runner():
 
 @pytest.fixture(scope="module")
 def community(tmp_path_factory) -> MetaHiC:
-    return make_metahic(tmp_path_factory.mktemp("community"), seed=21)
+    # Six contigs per genome, so that HiCzin has pairs of contigs to fit on.
+    return make_metahic(
+        tmp_path_factory.mktemp("community"),
+        contigs_per_genome=6,
+        n_pairs=12_000,
+        seed=21,
+    )
 
 
 @pytest.fixture
@@ -45,13 +51,12 @@ def _columns(path: Path) -> set[str]:
         return set(f["bins"])
 
 
-def test_help_lists_ice_and_list(runner):
+def test_help_lists_every_method(runner):
     from metacooler.cli.cmd_normalize import normalize
 
-    # metacooler computes ICE only; other tools store theirs with store_weights.
-    assert set(normalize.commands) == {"ice", "list"}
+    assert set(normalize.commands) == {"ice", "normcc", "hiczin", "list"}
     result = _ok(runner, ["normalize", "--help"])
-    for name in ("ice", "list", "store_weights"):
+    for name in ("ice", "normcc", "hiczin", "list", "store_weights"):
         assert name in flat(result.output)
 
 
@@ -78,11 +83,44 @@ def test_existing_column_needs_force(runner, mapfile):
     _ok(runner, ["normalize", "ice", str(mapfile), "--scope", "global", "-f", "-q"])
 
 
+def test_normcc_and_hiczin(runner, mapfile, community):
+    _ok(runner, ["normalize", "normcc", str(mapfile), "--sites", "RS", "-q"])
+    _ok(
+        runner,
+        [
+            "normalize",
+            "hiczin",
+            str(mapfile),
+            "--coverage",
+            "cov",
+            "--enzyme",
+            "DpnII",
+            "--fasta",
+            str(community.fasta),
+            "--min-length",
+            "1kb",
+            "--max-pairs",
+            "40",
+            "--seed",
+            "2",
+            "-q",
+        ],
+    )
+    assert {"normcc", "hiczin"} <= _columns(mapfile)
+    with h5py.File(mapfile) as f:
+        assert f["bins/hiczin"].attrs["n_pairs_fitted"] == 40
+    result = runner.invoke(
+        cli, ["normalize", "normcc", str(mapfile), "--min-length", "-5", "--name", "x"]
+    )
+    assert result.exit_code == 2
+
+
 def test_list(runner, mapfile):
     result = _ok(runner, ["normalize", "list", str(mapfile)])
     assert "No weight columns" in result.output
     assert "normalize ice" in flat(result.output)
     _ok(runner, ["normalize", "ice", str(mapfile), "-q"])
+    _ok(runner, ["normalize", "normcc", str(mapfile), "-q"])
     n = len(MetaCooler(mapfile).bins())
     store_weights(
         mapfile,
@@ -106,6 +144,8 @@ def test_list(runner, mapfile):
         "abundance",
         "metator",
         "pixels, contigs/cov",
+        "normcc",
+        "spurious_cutoff=",
         "foreign",
     ):
         assert text in result.output
@@ -113,6 +153,7 @@ def test_list(runner, mapfile):
 
 def test_balance_options_of_the_readers(runner, mapfile, tmp_path):
     _ok(runner, ["normalize", "ice", str(mapfile), "-q"])
+    _ok(runner, ["normalize", "normcc", str(mapfile), "-q"])
     edges = tmp_path / "edges.tsv"
     _ok(
         runner,
@@ -122,13 +163,19 @@ def test_balance_options_of_the_readers(runner, mapfile, tmp_path):
             "--level",
             "genome",
             "--balance",
-            "weight",
+            "normcc",
+            "--drop-spurious",
             "-o",
             str(edges),
             "-q",
         ],
     )
     assert edges.read_text()
+    result = runner.invoke(
+        cli, ["network", str(mapfile), "--balance", "weight", "--drop-spurious"]
+    )
+    assert result.exit_code == 1
+    assert "no spurious-contact cutoff" in flat(result.output)
     pixels = tmp_path / "pixels.tsv"
     _ok(
         runner,
