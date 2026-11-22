@@ -368,7 +368,7 @@ alongside the `commands` provenance list:
 |-----|---------|
 | `version` | Block schema version (currently `2`; version 1 counted a contact between two different `__unbinned__` contigs as intra-genome rather than inter-genome). |
 | `source` | `"pairs"` — measured on read positions by `create pairs`, before binning — or `"pixels"`, measured between bin midpoints. |
-| `distance_threshold` | Short/long intra-contig split, in bp: a contact is long-range when its ends are at least this far apart. Default 1001 (more than 1 kb apart, as MetaTOR's `mge` counts the pairs within a contig); 10 000 before metacooler 0.4.0. A block keeps the threshold it was tallied at. |
+| `distance_threshold` | Short/long intra-contig split, in bp: a contact is long-range when its ends are at least this far apart. The default depends on `source`: 1001 for `"pairs"` (more than 1 kb apart, as MetaTOR's `mge` counts the pairs within a contig; 10 000 before metacooler 0.4.0), 10 000 for `"pixels"`: its distances run between bin midpoints, and at or below the bin size little but the diagonal is short-range. A block keeps the threshold it was tallied at. |
 | `n_contacts` | Total contacts classified. |
 | `intra_contig_short`, `intra_contig_long`, `inter_contig_intra_genome`, `inter_genome` | The four mutually exclusive categories; they sum to `n_contacts`. |
 | `intra_contig`, `inter_contig`, `intra_genome` | Convenience sums of the above. |
@@ -491,17 +491,42 @@ staged copy beside it:
   rename: such a write while the copy is edited makes the edit fail
   (`MapChangedError`), and the map keeps that program's write. Only a write in
   the instant between that check and the rename goes unseen.
-- **Outputs.** Every writer of a new map at a path — `create`, `collect`,
+- **Outputs.** A writer of a new map at a path — `create`, `collect`,
   `reassign -o`, `annotate -o`, `binnify`, `zoomify`, `aggregate`, `extract`,
-  `merge`, `flatten`, `stack`, `cp` into a new collection, and
-  `staged_edit(output=)` — holds the lock of that path itself while it writes
-  it (`PATH.lock`, beside the path: the lock `metacooler.lock(PATH,
-  follow_symlinks=False)` takes, a link there not followed), so two writers of
-  one output are not run at once: the second is refused by name.
+  `merge`, `flatten`, `stack`, `to_cooler`, `cp` into a new collection —
+  takes no lock. It checks the lock of that path, `PATH.lock` beside the path
+  (the lock `metacooler.lock(PATH, follow_symlinks=False)` takes, a link
+  there not followed), before it writes, and again right before it renames
+  its output into place where it stages one: it refuses (`MapLockedError`,
+  naming the holder) a lock that another thread, a live process, or a
+  process this host cannot check (another host, machine or PID namespace)
+  holds — an edit session writing there (`staged_edit(output=PATH)`, which
+  takes that lock), or a run that holds it (as metaTOR holds its
+  `--output-map`'s) —, and writes past a lock whose holder is gone and a
+  file under that name that names no process (another tool's lock file).
+  So a writer killed outright leaves nothing that stops the next one, from
+  any host. Two writers of one new path are not serialized: both write it;
+  where each stages its output (`create`, `collect`, `reassign -o`,
+  `annotate -o`, `zoomify`, `stack`) the last rename wins, and the others,
+  which write their output in place as cooler does, may leave a file mixing
+  both — give two runs two paths, or hold the path's lock around each.
 - **Symbolic links.** An in-place edit through a symbolic link edits its
   target — lock, staging directory and replacement are beside the target —
   and the link keeps pointing at the edited map. An output path (`-o`,
-  `output=`) that is a link is replaced, never written through.
+  `output=`) that is a link — dangling or not — is an existing output:
+  replaced, never written through. With `--force` (and from a writer that
+  has no such option, which replaces its output anyway: `flatten`,
+  `aggregate`, `extract`, `merge`, `to_cooler`) the link is removed before
+  anything writes there, its target left as it is — or, by a writer that
+  renames its output into place (`create`, `collect`, `reassign -o`,
+  `annotate -o`, `zoomify`, `stack`), replaced by that rename, so that a run
+  that fails leaves it as it was; without `--force`, it is refused.
+  An output that is a directory, a device or a FIFO — or a link to one, such
+  as `/dev/stdout` — is refused by every writer, with `--force` or without:
+  it is never removed.
+  A new collection (`cp` into one, `create_mmetacool` without `force`) is
+  created exclusively: one another writer created meanwhile is never
+  truncated.
 - **Hard links.** An in-place edit replaces the map with a new file, so a hard
   link to it is split: the name edited holds the edited map, every other name
   the map as it was. Each name has a lock of its own; give a map one name.
@@ -537,18 +562,21 @@ staged copy beside it:
   the session ran is kept: checked right before the rename, it fails the
   session (`FileExistsError`).
 - **What a weight depends on, in a session.** Each write of a session is
-  logged with what it changed of what a weight may depend on (`depends_on`):
-  `store_weights`, `write_clusters`, `drop_clusters` and `metadata` change
-  none of it; `annotate`, the `/contigs` columns it adds, replaces or drops;
-  `qc --store`, its `qc_*` columns; a relabelling `reassign`, `genome_id` and
+  logged with the entry it wrote (the whole file, for a plain map) and what
+  it changed of what a weight may depend on (`depends_on`): `store_weights`,
+  `write_clusters`, `drop_clusters` and `metadata` change none of it;
+  `annotate`, the `/contigs` columns it adds, replaces or drops; `qc
+  --store`, its `qc_*` columns; a relabelling `reassign`, `genome_id` and
   its `qc_*` columns; anything else — a re-grouping, a new map written over
-  the staged map, a raw `h5py` write — anything. `store_weights(source=mc)`
-  is then refused (`MapChangedError`) when `mc` holds the map as it was
-  before a write that changed what the weight depends on: `mc` opened on the
-  map the session copied, as it copied it, holds what the session started
-  from whenever it was opened, so any such write of the session refuses it;
-  `mc` of another file, a write after it was opened. `mc` opened on the
-  staged map after the last such write is current.
+  the staged map, a raw `h5py` write — anything, in the whole file.
+  `store_weights(source=mc)` is then refused (`MapChangedError`) when `mc`
+  holds the map as it was before a write of the weight's own entry that
+  changed what the weight depends on: `mc` opened on the staged map, a
+  write after it was read (so several weights may be computed from one
+  read, and stored one after the other); `mc` opened on the map the
+  session copied, any write of the session, whenever `mc` was opened and
+  whatever was written to that map since (none of the session's writes is
+  ever in it); `mc` of another file, a write after it was opened.
 - **Reads.** `MetaCooler` records the file it opened (device, inode, size,
   modification time) and checks it before and after every read — each chunk
   cooler reads, cooler's own opens (`balance_cooler`'s chunks), `info`, each

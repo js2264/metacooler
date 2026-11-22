@@ -157,7 +157,7 @@ class TestContigTables:
         assert list(df.columns) == ["ID", "contig_name", "genome_id", "gc"]
 
     def test_metator_alias_reads_final_cluster(self, tmp_path):
-        """metaTOR 2.0's contig_data_final.txt (metator dump writes it)."""
+        """metaTOR 2.0's contig_data_final.txt (Name, Final_cluster)."""
         path = write(tmp_path / "t.tsv", "Name\tSize\tFinal_cluster\nc1\t10\tC_1\n")
         assert (
             parse_contigs_table(path, "metator")[0]

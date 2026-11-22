@@ -60,6 +60,7 @@ from metacooler.ps import (
 )
 from metacooler.qc import (
     DEFAULT_DISTANCE_THRESHOLD,
+    PAIRS_DISTANCE_THRESHOLD,
     QC_COLUMN_PREFIX,
     QC_CONTIG_COLUMNS,
     QC_GENOME_COLUMNS,
@@ -2857,9 +2858,20 @@ def _refuse_staging_an_input(
         inputs: What the run reads, as paths or URIs.
         companions: Files staged beside *final* (see :func:`_staged_output`).
 
+    It also checks *final* itself as :func:`_staged_output` will: an output
+    that an edit session of this thread edits, copies out or replaces, or
+    whose lock is held, is refused now rather than after the run.
+
     Raises:
-        ValueError: If ``<final>.partial`` (or a companion's) is an input.
+        ValueError: If ``<final>.partial`` (or a companion's) is an input, or
+            *final* is the map, or the output, of an edit session of this
+            thread.
+        MapLockedError: If the lock of *final* is held.
     """
+    from metacooler.io.staging import check_output_lock, refuse_a_session_output
+
+    refuse_a_session_output(final)
+    check_output_lock(final)
     for path in (Path(final), *companions):
         check_output_path(
             _partial_path(path), force=True, inputs=inputs, defer_removal=True
@@ -2995,8 +3007,11 @@ def _staged_output(
             On failure their partial files are kept or removed like
             *final*'s.
 
-    The output's lock is held throughout
-    (:func:`metacooler.io.staging.writing_output`).
+    The output is checked before anything is written, and its lock again
+    right before the rename (:func:`metacooler.io.staging.writing_output`,
+    :func:`metacooler.io.staging.check_output_lock`): an output whose lock is
+    held -- an edit session writing there, a run holding it -- is not
+    replaced.  No lock is taken.
 
     Yields:
         The temporary path to write to.
@@ -3004,47 +3019,38 @@ def _staged_output(
     Raises:
         ValueError: If a temp path is one of *inputs*, or *final* is the map,
             or the output, of an edit session of this thread.
-        MapLockedError: If another writer holds the output's lock.
+        MapLockedError: If the output's lock is held.
     """
-    from metacooler.io.staging import writing_output
+    from metacooler.io.staging import check_output_lock, writing_output
 
-    with writing_output(final):
-        yield from _staged_output_locked(final, keep_partial, inputs, companions)
-
-
-def _staged_output_locked(
-    final: Path,
-    keep_partial: bool,
-    inputs: Iterable[str | Path | None],
-    companions: Sequence[Path],
-) -> Generator[Path, None, None]:
-    """:func:`_staged_output`, under the output's lock."""
-    tmp = _partial_path(final)
-    staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
-    for partial, _ in staged:
-        check_output_path(partial, force=True, inputs=inputs)
-    try:
-        yield tmp
-        _move_into_place(staged[1:], tmp, final)
-    except BaseException as error:
-        left = [(partial, path) for partial, path in staged if partial.exists()]
-        for partial, path in left:
-            if not keep_partial:
-                partial.unlink()
-                logger.info(
-                    "Creation failed; the partial file %s was removed and %s "
-                    "was not written.",
-                    partial,
-                    path,
-                )
-            elif isinstance(error, Exception):
-                logger.error(
-                    "Creation failed. The partial file was left at %s for "
-                    "inspection; %s was not written.",
-                    partial,
-                    path,
-                )
-        raise
+    with writing_output(final, renamed=True):
+        tmp = _partial_path(final)
+        staged = [(tmp, final), *((_partial_path(c), c) for c in companions)]
+        for partial, _ in staged:
+            check_output_path(partial, force=True, inputs=inputs)
+        try:
+            yield tmp
+            check_output_lock(final)
+            _move_into_place(staged[1:], tmp, final)
+        except BaseException as error:
+            left = [(partial, path) for partial, path in staged if partial.exists()]
+            for partial, path in left:
+                if not keep_partial:
+                    partial.unlink()
+                    logger.info(
+                        "Creation failed; the partial file %s was removed and %s "
+                        "was not written.",
+                        partial,
+                        path,
+                    )
+                elif isinstance(error, Exception):
+                    logger.error(
+                        "Creation failed. The partial file was left at %s for "
+                        "inspection; %s was not written.",
+                        partial,
+                        path,
+                    )
+            raise
 
 
 def _remap_bins(
@@ -3125,7 +3131,7 @@ def from_pairs(
     chunksize: int = DEFAULT_CHUNKSIZE,
     sort_in_memory: bool | None = None,
     qc: bool = True,
-    qc_distance_threshold: int = DEFAULT_DISTANCE_THRESHOLD,
+    qc_distance_threshold: int = PAIRS_DISTANCE_THRESHOLD,
     ps: bool = True,
     ps_bins_per_decade: int = DEFAULT_BINS_PER_DECADE,
     force: bool = False,
@@ -3203,7 +3209,11 @@ def from_pairs(
             because binning discards the sub-bin distances the short/long
             split needs.  The per-contig short/long counts are what lets a
             later :func:`metacooler.io.reassign.reassign` keep that split.
-        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp:
+            long-range from this distance on, measured between read
+            positions.  The default, ``PAIRS_DISTANCE_THRESHOLD`` (1001),
+            makes ``intra_contig_long`` the pairs more than 1 kb apart, which
+            MetaTOR's ``mge`` reads (see :mod:`metacooler.qc`).
         ps: Accumulate a per-genome P(s) curve from the same pass and write it
             beside the output as ``<name>.ps.tsv`` (see :mod:`metacooler.ps`).
             Measured on read positions, so it resolves distances the binned map
@@ -3630,7 +3640,11 @@ def from_cool(
             :mod:`metacooler.qc`).  A cool file has no read positions left, so
             intra-contig distances are measured between bin midpoints and the
             block records ``source="pixels"``.
-        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp:
+            long-range from this distance on, measured between bin
+            midpoints.  The default is ``DEFAULT_DISTANCE_THRESHOLD``
+            (10 kb); at or below the bin size little but the diagonal is
+            short-range, and a warning says so.
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
             a table without a header line.  Defaults to ``genome_name``.
@@ -3800,7 +3814,14 @@ def from_cool(
         if qc
         else None
     )
+    qc_binsize = infer_binsize(bins_remapped) if qc_tally is not None else None
     if qc_tally is not None:
+        qc_tally.warn_if_split_within_bin(
+            qc_binsize,
+            "A useful split needs a --qc-threshold above the bin size, or a map "
+            "made from pairs: 'create pairs' measures the split on read "
+            "positions.",
+        )
         raw_pixels = _tally_pixel_qc(
             raw_pixels, qc_tally, bin_maps(bins_remapped, contigs)
         )
@@ -3854,7 +3875,7 @@ def from_cool(
         if qc_tally is not None:
             store_qc(
                 staged,
-                qc_tally.summary(binsize=infer_binsize(bins_remapped)),
+                qc_tally.summary(binsize=qc_binsize),
                 qc_tally.genome_table(genomes["name"].to_numpy()),
                 qc_tally.contig_table(contigs["name"].to_numpy()),
             )

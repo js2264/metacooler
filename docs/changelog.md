@@ -26,12 +26,14 @@
   that is gone (`kill -9`, or a scheduler's `SIGTERM`: metacooler sets no
   signal handler) is taken over by one process exactly, under a guard; a lock
   of another host, machine or PID namespace is never broken. Whoever takes a
-  lock removes what killed writers staged beside the map, naming it. Every
+  lock removes what killed writers staged beside the map, naming it. A
   writer of a new map — `create`, `collect`, `reassign -o`, `annotate -o`,
   `binnify`, `zoomify`, `aggregate`, `extract`, `merge`, `flatten`, `stack`,
-  `cp` into a new collection — holds the lock of its output path,
-  `<output>.lock`, while it writes it: a second writer of the same output is
-  refused. Python:
+  `cp` into a new collection — takes no lock, so one killed outright leaves
+  nothing in the way of the next: it refuses an output whose lock,
+  `<output>.lock`, a live process holds (an edit session writing there, a
+  run holding it), before it writes and again before it renames its output
+  into place. Python:
   `metacooler.lock(path)` holds a map's lock for a whole run (re-entrant for
   its thread, so the writers called meanwhile take it on; with
   `follow_symlinks=False`, the lock of a path itself, a link there not
@@ -53,10 +55,12 @@
   the session's map or its output is refused. A session whose staged map is as
   it was copied leaves the map as it is. A writer in a session records the
   session's map in its history (`reassign`'s `source`), never the staged path,
-  and each write is logged with what it changed of what a weight may depend
-  on, so that `store_weights(source=mc)` refuses a weight computed from a map
-  holding what a write of the session changed — the assignment after a
-  relabelling, a column after `annotate`, anything after a re-grouping. With
+  and each write is logged with the entry it wrote and what it changed of what
+  a weight may depend on, so that `store_weights(source=mc)` refuses a weight
+  computed from a map holding what a write of that entry changed — the
+  assignment after a relabelling, a column after `annotate`, anything after a
+  re-grouping — and accepts several weights computed from one read of the
+  staged map, when no write between changed what each depends on. With
   `output=PATH`, the edited map goes to a new file instead, an entry of a
   `.mmetacool` as a standalone `.metacool`, under the lock of `PATH` (the map,
   only read, is not locked: what was read from it as copied stays current).
@@ -167,6 +171,41 @@
 
 ### Changed
 
+- **Breaking, for a metacooler user: what the locks and the staged writes
+  change** (see Added and [In-place writes](format.md#in-place-writes)):
+  - an in-place edit needs a writable directory and room for a copy of the
+    map, and refuses a map without write permission (below);
+  - a `MetaCooler` held across an in-place edit stops reading (below);
+  - a writer — in place or of an output — refuses a map or an output whose
+    lock a live metacooler process, another thread, or a process this host
+    cannot check holds, by name (`MapLockedError`); a lock left by a process
+    of another host, machine or PID namespace (a container) is never broken:
+    delete it once that process is gone. A writer of an output creates no
+    lock, so only edit sessions, in-place edits and `metacooler.lock` leave
+    one when killed outright;
+  - an output that is a symbolic link is replaced, never written through:
+    with `--force` (or `force=True`, and from `flatten`, `aggregate`,
+    `extract`, `merge` and `to_cooler`, which replace their output anyway)
+    the link is removed and a new file written in its place, its target left
+    as it was; without, a link — even a dangling one — is an existing
+    output (`FileExistsError`). A workflow that wrote through a `latest.cool`
+    link now replaces the link;
+  - an output that is a directory, a device or a FIFO — or a link to one —
+    is refused by every writer, with `--force` or without, and never
+    removed: `-o /dev/stdout --force` removed the system's `/dev/stdout` (a
+    link to a descriptor), and `flatten`, `aggregate`, `extract` and
+    `to_cooler`, from Python, replaced a FIFO at their output;
+  - from an edit session's thread, an output written over the map the
+    session edits or copies out, or over its output, is refused
+    (`ValueError`);
+  - `create_mmetacool(force=False)` and `cp` into a new collection create
+    it exclusively: one created meanwhile is refused (`create_mmetacool`)
+    or copied into (`cp`), never truncated;
+  - a lock that cannot be created raises a `MapLockError` that is also a
+    `PermissionError` (an unwritable directory) or a `FileNotFoundError` (a
+    missing one); an output in a missing directory raises
+    `FileNotFoundError` naming it; the command line prints an `OSError`'s
+    message without its `[Errno N]`.
 - **Breaking: a `MetaCooler` held across an in-place edit stops reading.**
   It raises `MapChangedError` at its next read once the map is replaced or
   written by another writer (or another `MetaCooler`) — a read of what it
@@ -194,29 +233,39 @@
   a URI naming a group inside a file (`out.mmetacool::entries/x`) is refused by
   `reassign` and `annotate`; `file::/` is the file.
 - **The `metator` alias of `--contigs-format` reads `Name,Final_cluster`**,
-  MetaTOR 2.0's column for a contig's final cluster in `contig_data_final.txt`
-  (as `metator dump` writes it), so that a dumped table feeds `create` and
+  the columns of metaTOR 2.0's `contig_data_final.txt` that hold a contig's
+  name and its final cluster, so that the table feeds `create` and
   `reassign`. A table with `Final_bin`, MetaTOR 1.x's name, and no
   `Final_cluster` is read through `Final_bin`, which the log says; an error
   for a table with neither names both. Only the alias falls back: a spec
   spelled out (`Name,Final_cluster`) is read as written.
-- **`metacooler.network(...)` returns the edges** when it is given no `out`, as
-  a DataFrame (`node1`, `node2`, `value`), where it printed them to stdout:
-  a tool that reads a map's contig network (MetaTOR does) sums no pixel
-  itself. `out` takes a path as before, or an open text stream, written to and
-  left open; the `network` command passes stdout, so its output is unchanged.
-- **Breaking: the QC block splits short and long contacts at 1001 bp**, where
-  it split them at 10 kb (`DEFAULT_DISTANCE_THRESHOLD`, the default of
-  `create pairs` and `create cool --qc-threshold`, `collect --qc-threshold`,
-  `qc --threshold`, and `reassign`'s for a source block that records none). A
-  contact is long-range when its ends are at least the threshold apart, so
-  `intra_contig_long` now counts the contacts more than 1 kb apart within a
-  contig: the pairs MetaTOR's `mge` step counts, which a map tallied from
-  pairs (as hicstuff writes them) now gives it. At 10 kb, every contig shorter
-  than 10 kb had no long-range contact at all. Every QC report's short/long
-  split moves accordingly. A map written before keeps the threshold its block
-  records (`metadata.qc.distance_threshold`), which `reassign` and `merge`
-  keep; `--qc-threshold 10kb` / `--threshold 10kb` give the former split.
+- **Breaking: `metacooler.network(...)` returns the edges** when it is given
+  no `out`, as a DataFrame (`node1`, `node2`, `value`), and prints nothing,
+  where it printed them to stdout as TSV: a tool that reads a map's contig
+  network (MetaTOR does) sums no pixel itself. A Python caller that relied on
+  the printed edges passes `out=sys.stdout`, which gives them as before. `out`
+  takes a path as before, or an open text stream, written to and left open;
+  the `network` command passes stdout, so its output is unchanged.
+- **Breaking: a QC block tallied from pairs splits short and long contacts at
+  1001 bp**, where it split them at 10 kb: the default of
+  `create pairs --qc-threshold`, and of `metacooler.from_pairs`
+  (`qc_distance_threshold`, `PAIRS_DISTANCE_THRESHOLD`), which hicstuff calls
+  without one. A contact is long-range when its reads are at least the
+  threshold apart, so `intra_contig_long` now counts the pairs more than 1 kb
+  apart within a contig: those MetaTOR's `mge` step counts, which a map
+  tallied from pairs (as hicstuff writes them) now gives it. At 10 kb, every
+  contig shorter than 10 kb had no long-range contact at all.
+  `--qc-threshold 10kb` gives the former split. A block measured between bin
+  midpoints keeps the 10 kb default (`DEFAULT_DISTANCE_THRESHOLD`):
+  `create cool`, `collect`, `qc`, and `reassign` when it recomputes a block
+  that records no threshold. Two neighbouring bins are a bin size apart, so at
+  1001 bp such a split would leave little but the diagonal short-range on any
+  map binned at 1001 bp or more. A map written before keeps the threshold its
+  block records (`metadata.qc.distance_threshold`), and `reassign` keeps it
+  too. `merge` keeps it only when every input records the same one; otherwise
+  it drops the QC block and the `qc_*` columns, with a warning. Merging a map
+  made by `create pairs` before 0.4.0 with one made since therefore drops
+  them, unless the newer one was made with `--qc-threshold 10kb`.
 - **Every dump is keyed by name**, so the dumps join on their key columns.
   `dump -t contigs` prints `contig`, `genome` (the name of the genome the contig
   is in) and `length`, then the other columns; it no longer prints `name`, nor
@@ -246,6 +295,13 @@
 
 ### Fixed
 
+- **`qc`'s warning about a bin size at or above its threshold advised
+  lowering `--threshold`**, which only made it worse. Distances are measured
+  between bin midpoints, two neighbouring bins a bin size apart, so a useful
+  split needs a threshold above the bin size, or a map made from pairs
+  (`create pairs` measures the split on read positions). The warning says so
+  now, and `create cool` and `collect` give it too when they store a block
+  tallied at such a threshold.
 - **`contigs.genome` means one thing.** `dump -t contigs` printed the name of
   each contig's genome in its `genome` column, but a user column called
   `genome` (a taxonomy, say), which `/contigs` stored as given, took its place

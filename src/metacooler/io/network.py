@@ -95,6 +95,51 @@ def _as_edges(pixels: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _bin_edges(
+    pixels, n_pix: int, chunksize: int, weight: str, weights: np.ndarray | None
+) -> pd.DataFrame:
+    """Every pixel as an edge, in one frame: ``network(level="bin")``'s return.
+
+    The three columns are allocated once, the pixel count being known, and
+    filled chunk by chunk; a frame per chunk, concatenated at the end, held
+    every edge twice.  They are allocated once the first chunk is read, so
+    that the read's own peak does not come on top of every edge's.  Their
+    dtypes are a chunk's -- ``int64`` bin ids, and the weight column's own
+    dtype, or ``float64`` when normalized -- and a map without a pixel gets
+    those of a chunk of none.  A pixel of a masked bin is left out, so the
+    columns may end short of the pixel count.
+
+    Args:
+        pixels: The map's pixel selector (``mc._clr.pixels()``).
+        n_pix: Its number of pixels.
+        chunksize: Pixels read per chunk.
+        weight: Pixels column used as the edge weight.
+        weights: Normalization weights of the bins (see :func:`_weighted`).
+
+    Returns:
+        ``node1``, ``node2``, ``value``, one row per pixel kept, in the
+        pixels' order.
+    """
+    columns: list[np.ndarray] = []
+    n = 0
+    for lo in range(0, n_pix, chunksize):
+        chunk = _weighted(
+            cast(pd.DataFrame, pixels[lo : lo + chunksize]), weight, weights
+        )
+        if not columns:
+            columns = [np.empty(n_pix, dtype=values.dtype) for values in chunk]
+        k = len(chunk[0])
+        for column, values in zip(columns, chunk, strict=True):
+            column[n : n + k] = values
+        n += k
+    if not columns:
+        columns = list(_weighted(cast(pd.DataFrame, pixels[0:0]), weight, weights))
+    return pd.DataFrame(
+        dict(zip(_EDGE_COLUMNS, (column[:n] for column in columns), strict=True)),
+        copy=False,
+    )
+
+
 def _aggregate_pairs(
     mc,
     bin_to_node: np.ndarray,
@@ -228,8 +273,9 @@ def network(
         out: Where to write the edges as TSV: a file path, or an open text
             stream (the ``network`` command passes stdout), which is written
             to and left open.  If ``None``, nothing is written: the edges are
-            returned.  At ``bin`` level that holds every pixel in memory,
-            where a path or a stream gets them chunk by chunk.
+            returned (before metacooler 0.4.0 they were printed, as
+            ``out=sys.stdout`` still does).  At ``bin`` level that holds every
+            pixel in memory, where a path or a stream gets them chunk by chunk.
         header: If ``True``, write a ``node1\\tnode2\\tvalue`` header line.
         chunksize: Number of pixels to process per chunk.
         force: Overwrite *out* if it already exists.
@@ -263,7 +309,12 @@ def network(
 
     Returns:
         The edges, when *out* is ``None``; otherwise ``None``.  With *ids*,
-        ``node1`` and ``node2`` are ``int64`` even without an edge.
+        ``node1`` and ``node2`` are ``int64`` even without an edge.  A map
+        without a pixel gives no row, in the dtypes a map with some gives:
+        the names as ``/contigs`` or ``/genomes`` hold them (``int64`` ids
+        with *ids*), or ``int64`` bin ids; and a ``value`` of the weight
+        column's dtype at ``bin`` level, ``int64`` for an integer weight
+        summed at the other two, ``float64`` with *balance*.
     """
     from metacooler.api import MetaCooler
 
@@ -294,6 +345,11 @@ def network(
     n_pix = len(mc._clr.pixels())
 
     if level == "bin":
+        if out is None:
+            edges = _bin_edges(mc._clr.pixels(), n_pix, chunksize, weight, weights)
+            logger.info("Generated %d edges at %s level", len(edges), level)
+            return edges
+
         # Raw pixel edge list, chunk by chunk.
         def chunk_edges(lo: int) -> pd.DataFrame:
             chunk = cast(pd.DataFrame, mc._clr.pixels()[lo : lo + chunksize])
@@ -301,15 +357,6 @@ def network(
             return pd.DataFrame({"node1": b1, "node2": b2, "value": values})
 
         frames = (chunk_edges(lo) for lo in range(0, n_pix, chunksize))
-        if out is None:
-            parts = list(frames)
-            edges = (
-                pd.concat(parts, ignore_index=True)
-                if parts
-                else pd.DataFrame(columns=list(_EDGE_COLUMNS))
-            )
-            logger.info("Generated %d edges at %s level", len(edges), level)
-            return edges
         # Streamed to the file.  A stream the caller gave is left open:
         # closing sys.stdout would break any later output in the process.
         cm = open(path, "w") if path is not None else contextlib.nullcontext(stream)  # noqa: SIM115
@@ -340,14 +387,12 @@ def network(
         )
         if agg is not None and level == "genome":
             agg = _regroup(agg, contig_to_genome)
-    if agg is None and ids:
+    if agg is None:
         # No edge: an empty pixel chunk's, so that the columns keep the types
         # edges would have.
         empty = cast(pd.DataFrame, mc._clr.pixels()[:0])
         agg = _as_edges(_chunk_edges(empty, bin_to_node, weight, weights))
-    if agg is None:
-        edges = pd.DataFrame(columns=list(_EDGE_COLUMNS))
-    elif ids:
+    if ids:
         edges = agg
     else:
         names = (mc.contigs if level == "contig" else mc.genomes)["name"].values

@@ -821,6 +821,38 @@ def test_existing_files_need_force(mapped, tmp_path):
     assert sorted(p.name for p in out.iterdir()) == ["MAG_A.fa", "MAG_B.fa", "keep.txt"]
 
 
+def test_an_output_link_is_an_existing_file(mapped, tmp_path):
+    """A link at an output file, dangling or not, is an existing file: refused
+    without force, and replaced -- never written through -- with it."""
+    path, assembly = mapped
+    out = tmp_path / "out"
+    out.mkdir()
+    mine = tmp_path / "mine.fa"
+    mine.write_text("mine\n")
+    nowhere = tmp_path / "nowhere.fa"
+    (out / "MAG_A.fa").symlink_to(nowhere)
+    (out / "MAG_B.fa").symlink_to(mine)
+    with pytest.raises(FileExistsError, match="2 output file\\(s\\) already exist"):
+        write_fasta(path, assembly, out)
+    assert (out / "MAG_A.fa").is_symlink() and (out / "MAG_B.fa").is_symlink()
+
+    write_fasta(path, assembly, out, force=True)
+    assert not (out / "MAG_A.fa").is_symlink()
+    assert not (out / "MAG_B.fa").is_symlink()
+    assert (out / "MAG_A.fa").read_text() == RAW["c1"] + RAW["c2"]
+    assert mine.read_text() == "mine\n"
+    assert not nowhere.exists()
+
+    one = tmp_path / "all.fa"
+    one.symlink_to(nowhere)
+    with pytest.raises(FileExistsError, match="a symbolic link to"):
+        write_fasta(path, assembly, one, single_file=True)
+    write_fasta(path, assembly, one, single_file=True, force=True)
+    assert not one.is_symlink()
+    assert one.read_text().startswith(">MAG_A|c1")
+    assert not nowhere.exists()
+
+
 def test_one_existing_file_needs_force(mapped, tmp_path):
     path, assembly = mapped
     out = tmp_path / "all.fa"

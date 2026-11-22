@@ -132,6 +132,22 @@ _USER_ERRORS = (
 )
 
 
+def _user_message(exc: BaseException) -> str:
+    """The message of a user error, as the command line prints it.
+
+    A ``KeyError`` stringifies with surrounding quotes: its message is used.
+    An ``OSError`` made with an errno prints ``[Errno N]`` before its message
+    (``FileNotFoundError(errno.ENOENT, "...")``, h5py's own): the message is
+    used, with the file it names.
+    """
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
+    if isinstance(exc, OSError) and exc.errno is not None and exc.strerror:
+        files = [name for name in (exc.filename, exc.filename2) if name is not None]
+        return exc.strerror + (": " + " -> ".join(map(str, files)) if files else "")
+    return str(exc)
+
+
 def _exit_on_broken_pipe() -> NoReturn:
     """Exit quietly after the reader of our stdout went away.
 
@@ -214,11 +230,7 @@ class MetaCoolerGroup(MetaCoolerCommand, click.RichGroup):
         except (click.ClickException, click.Abort):
             raise  # already a clean CLI error / user abort
         except _USER_ERRORS as exc:
-            # KeyError stringifies with surrounding quotes; use its message.
-            message = (
-                str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
-            )
-            raise click.ClickException(message) from exc
+            raise click.ClickException(_user_message(exc)) from exc
 
 
 click.rich_click.TEXT_MARKUP = "rich"

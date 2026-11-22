@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import h5py
@@ -150,11 +151,17 @@ def create_mmetacool(
         entries: Mapping of entry names to ``.metacool`` file paths.
         force: If ``True``, overwrite an existing output file.
 
+    Without *force*, the file is created exclusively: one another writer
+    created meanwhile is refused, never truncated.  A symbolic link at
+    *output* is replaced (with *force*), never written through.
+
     Raises:
-        FileExistsError: If *output* already exists and *force* is ``False``.
+        FileExistsError: If *output* already exists (a symbolic link included)
+            and *force* is ``False``.
         FileNotFoundError: If any source metacool file does not exist.
     """
-    if output.exists() and not force:
+    output = Path(output)
+    if os.path.lexists(output) and not force:
         raise FileExistsError(
             f"Output file already exists: {output}. Pass force=True to overwrite."
         )
@@ -164,7 +171,10 @@ def create_mmetacool(
             raise FileNotFoundError(f"Source file not found for entry {name!r}: {src}")
         _require_metacool_source(str(src))
 
-    with writing_output(output), h5py.File(output, "w") as dst:
+    with (
+        writing_output(output, force=force),
+        h5py.File(output, "w" if force else "w-") as dst,
+    ):
         init_mmetacool_attrs(dst)
         for name, src in entries.items():
             logger.info("Adding entry %r from %s", name, src)

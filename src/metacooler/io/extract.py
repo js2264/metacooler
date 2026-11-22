@@ -93,7 +93,7 @@ def extract(
         for gid, cids in sorted(by_genome.items()):
             g = str(genome_names[gid])
             out_file = output_path.parent / f"{prefix}_{g}.cool"
-            with writing_output(out_file):
+            with writing_output(out_file, force=force):
                 if out_file.exists() and not force:
                     raise FileExistsError(
                         f"Output file already exists: {out_file}. Use --force to "

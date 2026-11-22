@@ -1146,7 +1146,11 @@ def collect(
             them in ``metadata["qc"]`` and the ``qc_*`` columns of ``/genomes``
             and ``/contigs``, as ``create cool`` does (``source="pixels"``).
             The ``inter_genome`` category is 0 by construction.
-        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp.
+        qc_distance_threshold: Intra-contig short/long split for *qc*, in bp:
+            long-range from this distance on, measured between bin midpoints.
+            The default is ``DEFAULT_DISTANCE_THRESHOLD`` (10 kb); at or below
+            the bin size little but the diagonal is short-range, and a warning
+            says so.
         genomes_table_format: Which column of *genomes_table* holds the genome
             names: a 1-based position or a header name, plus ``,noheader`` for
             a table without a header line.  Defaults to ``genome_name``.
@@ -1308,6 +1312,9 @@ def collect(
         else None
     )
     if qc_tally is not None:
+        qc_tally.warn_if_split_within_bin(
+            binsize, "A useful split needs a --qc-threshold above the bin size."
+        )
         pixel_source = _tally_pixel_qc(
             pixel_source, qc_tally, bin_maps(bins_df, contigs_df)
         )

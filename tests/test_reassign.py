@@ -593,8 +593,8 @@ def test_an_empty_table_is_refused(tmp_path: Path, tiny_metacooler: Path):
 
 @pytest.mark.parametrize("column", ["Final_cluster", "Final_bin"])
 def test_metator_format_is_accepted(tmp_path: Path, tiny_metacooler: Path, column):
-    """metaTOR 2.0's contig_data_final.txt (Final_cluster, as metator dump
-    writes it) and 1.x's (Final_bin)."""
+    """metaTOR 2.0's contig_data_final.txt (Final_cluster) and 1.x's
+    (Final_bin)."""
     table = tmp_path / "contig_data_final.txt"
     table.write_text(f"Name\tSize\t{column}\ncontig_C\t400\tMetaTOR_1_0\n")
     out = tmp_path / "out.metacool"

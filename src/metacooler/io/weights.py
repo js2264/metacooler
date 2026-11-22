@@ -380,7 +380,12 @@ def store_weights(
         force: Replace a column of that name if there is one.
         commands: Command lines to append to ``metadata["commands"]``.
         source: The map the weights were computed from, as opened for it:
-            refused (``MapChangedError``) if its file changed since.
+            refused (``MapChangedError``) if its file changed since -- or, in
+            an edit session, if a write of the session changed what the
+            weight depends on (see
+            :func:`metacooler.io.staging.check_source_depends`); one opened
+            on the session's staged map is judged by that alone, so several
+            weights may be computed from one read of it.
 
     Raises:
         ValueError: If *name* cannot hold a weight column, or is taken and
@@ -439,10 +444,12 @@ def store_weights(
                 "weights under another name, or replace that column with "
                 "force=True."
             )
-        # In an edit session: a source read before a write of the session
-        # that changed what the weight depends on is not current.
-        check_source_depends(uri, source, entries)
-        planned = [mc] if source is None else [mc, source]
+        # In an edit session: a source that holds what a write of the session
+        # changed of what the weight depends on is not current.  One on the
+        # staged map is judged by the session's log of its writes alone, as
+        # the writes of the session change its file.
+        judged = check_source_depends(uri, source, entries)
+        planned = [mc] if source is None or judged else [mc, source]
         with (
             staged_inplace(uri, planned=planned, touches=()) as staged,
             h5py.File(staged, "r+") as f,
