@@ -106,6 +106,18 @@ def _given(ctx, name: str) -> bool:
     help="Column name for wide format values.",
 )
 @click.option(
+    "--balance",
+    type=str,
+    default=None,
+    metavar="NAME",
+    help=(
+        "Normalize the pixels with the [cyan]/bins/NAME[/cyan] weights "
+        "([cyan]metacooler normalize[/cyan]): the long format gains a "
+        "[cyan]balanced[/cyan] column, the wide format holds normalized values. "
+        "Applied only when --table pixels."
+    ),
+)
+@click.option(
     "--join",
     is_flag=True,
     default=False,
@@ -151,6 +163,7 @@ def dump(
     prefix: str | None,
     pixels_format: str,
     weight: str,
+    balance: str | None,
     join: bool,
     range1: str | None,
     range2: str | None,
@@ -172,7 +185,11 @@ def dump(
     # it does dump a pixels table (and forwards these options to it).
     ctx = click.get_current_context()
     if table not in ("pixels", "all"):
-        for opt, name in (("--weight", "weight"), ("--join", "join")):
+        for opt, name in (
+            ("--weight", "weight"),
+            ("--balance", "balance"),
+            ("--join", "join"),
+        ):
             if _given(ctx, name):
                 raise click.UsageError(
                     f"{opt} only applies to the pixels table; "
@@ -229,4 +246,5 @@ def dump(
         weight=weight,
         join=join,
         force=force,
+        balance=balance,
     )

@@ -6,7 +6,7 @@ import contextlib
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,7 @@ from metacooler.io._utils import (
     chrom_codes,
     to_upper_triangle,
 )
+from metacooler.io.weights import read_weights
 from metacooler.schema import DEFAULT_CHUNKSIZE
 
 if TYPE_CHECKING:
@@ -46,12 +47,31 @@ def _fold(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return aggregate_pixels(frames)
 
 
+def _weighted(
+    chunk: pd.DataFrame, weight: str, weights: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(bin1, bin2, value)`` of a pixel chunk, normalized when *weights* is set.
+
+    A normalized value is ``value * weights[bin1] * weights[bin2]``; a pixel of
+    a masked bin (``NaN`` weight) is left out.
+    """
+    b1 = chunk["bin1_id"].to_numpy()
+    b2 = chunk["bin2_id"].to_numpy()
+    values = chunk[weight].to_numpy()
+    if weights is None:
+        return b1, b2, values
+    values = values * weights[b1] * weights[b2]
+    ok = np.isfinite(values)
+    return b1[ok], b2[ok], values[ok]
+
+
 def _aggregate_pairs(
     mc,
     bin_to_node: np.ndarray,
     weight: str,
     n_pix: int,
     chunksize: int,
+    weights: np.ndarray | None = None,
 ) -> pd.DataFrame | None:
     """Sum pixel weights per node pair, folding partial results as we go.
 
@@ -61,6 +81,7 @@ def _aggregate_pairs(
         weight: Pixels column used as the edge weight.
         n_pix: Total number of pixels in the source table.
         chunksize: Number of pixels read per chunk.
+        weights: Normalization weights of the bins (see :func:`_weighted`).
 
     Returns:
         A frame with columns ``node1``/``node2``/``value`` sorted by node pair,
@@ -71,11 +92,8 @@ def _aggregate_pairs(
 
     for lo in range(0, n_pix, chunksize):
         chunk = mc._clr.pixels()[lo : lo + chunksize]
-        n1, n2 = to_upper_triangle(
-            bin_to_node[chunk["bin1_id"].to_numpy()],
-            bin_to_node[chunk["bin2_id"].to_numpy()],
-        )
-        values = chunk[weight].to_numpy()
+        b1, b2, values = _weighted(chunk, weight, weights)
+        n1, n2 = to_upper_triangle(bin_to_node[b1], bin_to_node[b2])
         # A node pair sums every pixel between two contigs or genomes, and
         # aggregate_pixels keeps the dtype it is given: an int32 count column
         # (what create writes) wrapped past 2**31 to a negative edge weight.
@@ -107,6 +125,7 @@ def network(
     header: bool = False,
     chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
+    balance: str | None = None,
 ) -> None:
     """Export a network edge list from a metacool file.
 
@@ -118,10 +137,16 @@ def network(
         header: If ``True``, write a ``node1\\tnode2\\tvalue`` header line.
         chunksize: Number of pixels to process per chunk.
         force: Overwrite *out* if it already exists.
+        balance: Normalize the edges with this weight column of ``/bins``
+            (``metacooler normalize ice``, or any tool's weights stored with
+            :func:`metacooler.io.weights.store_weights`): every pixel is
+            multiplied by the weights of its two bins before it is summed, and
+            pixels of masked bins are left out.
 
     Raises:
         ValueError: If *weight* column does not exist in the pixels table, or
             if *level* is not one of ``bin``/``contig``/``genome``.
+        KeyError: If *balance* names no weight column.
         FileExistsError: If *out* exists and *force* is False.
     """
     from metacooler.api import MetaCooler
@@ -142,6 +167,7 @@ def network(
     if out is not None:
         check_output_path(out, force, inputs=[uri])
 
+    weights = read_weights(mc, balance) if balance is not None else None
     n_pix = len(mc._clr.pixels())
 
     if level == "bin":
@@ -153,14 +179,9 @@ def network(
             if header:
                 fout.write("node1\tnode2\tvalue\n")
             for lo in range(0, n_pix, chunksize):
-                chunk = mc._clr.pixels()[lo : lo + chunksize]
-                df = pd.DataFrame(
-                    {
-                        "node1": chunk["bin1_id"].values,
-                        "node2": chunk["bin2_id"].values,
-                        "value": chunk[weight].values,
-                    }
-                )
+                chunk = cast(pd.DataFrame, mc._clr.pixels()[lo : lo + chunksize])
+                b1, b2, values = _weighted(chunk, weight, weights)
+                df = pd.DataFrame({"node1": b1, "node2": b2, "value": values})
                 fout.write(df.to_csv(sep="\t", index=False, header=False))
         return
 
@@ -174,7 +195,7 @@ def network(
         bin_to_node = contig_to_genome[bin_to_contig]
         node_names = mc.genomes["name"].values
 
-    agg = _aggregate_pairs(mc, bin_to_node, weight, n_pix, chunksize)
+    agg = _aggregate_pairs(mc, bin_to_node, weight, n_pix, chunksize, weights)
     if agg is None:
         edges = pd.DataFrame(columns=["node1", "node2", "value"])
     else:

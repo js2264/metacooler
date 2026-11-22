@@ -49,6 +49,7 @@ from metacooler.io._utils import (
     write_column,
 )
 from metacooler.io.colspec import CONTIG_METADATA_FORMAT_DEFAULT, GENOMES_FORMAT_DEFAULT
+from metacooler.io.weights import drop_stale_weights
 from metacooler.qc import is_qc_column
 from metacooler.schema import (
     MetaCoolerFormatError,
@@ -829,6 +830,16 @@ def _write_map(
             grp.move(f"{_SCRATCH}/{table_edit.table}", table_edit.table)
         if _SCRATCH in grp:
             del grp[_SCRATCH]
+        contig_edit = edit.tables.get("contigs")
+        if contig_edit is not None and contig_edit.changed:
+            # A normalization that read one of these columns (a coverage, a
+            # site count) no longer describes the table.
+            changed = [*contig_edit.added, *contig_edit.replaced, *contig_edit.dropped]
+            drop_stale_weights(
+                grp["bins"],
+                contig_columns=changed,
+                why=f"the /contigs column(s) {', '.join(changed)}",
+            )
         _record(grp, edit, metadata, history)
     _log_edit(edit)
 

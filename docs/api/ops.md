@@ -1,8 +1,8 @@
 # Operations
 
 Computation on already-open metacooler files: aggregation, re-binning,
-multi-resolution generation, visualisation, range parsing, contact QC and
-contact probability P(s). These act on files produced by the
+multi-resolution generation, visualisation, range parsing, normalization,
+contact QC and contact probability P(s). These act on files produced by the
 [I/O functions](io.md).
 
 `aggregate`, `binnify`, and `zoomify` are re-exported at the top level, so
@@ -40,6 +40,33 @@ equivalent.
     options:
       toc_label: "Range resolution"
       heading: "Range resolution"
+
+::: metacooler.ops.normalize
+    options:
+      toc_label: "Normalization"
+      heading: "Normalization"
+      members:
+        - normalize_ice
+        - Normalization
+
+`normalize_ice` is re-exported at the top level
+(`metacooler.normalize_ice(...)`). Its arithmetic -- cooler's iterative
+correction, for any grouping of the bins -- lives in `metacooler.normalize`;
+reading and writing the weight columns in `metacooler.io.weights`.
+
+::: metacooler.io.weights
+    options:
+      toc_label: "Weight columns"
+      heading: "Weight columns"
+      members:
+        - store_weights
+        - read_weights
+        - describe_weights
+        - check_depends_on
+
+`store_weights` and `read_weights` are re-exported at the top level
+(`metacooler.store_weights(...)`): the way any other tool stores its own
+normalization in a map, and reads one back.
 
 ::: metacooler.ops.qc
     options:

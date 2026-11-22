@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`normalize`** (alias `normalise`): normalization weights for metagenomic
+  Hi-C, stored as a column of `/bins` the way `cooler balance` stores one —
+  multiplicative, `NaN` for a masked bin, the pixels untouched — so cooler,
+  cooltools and HiGlass read them too.
+  - `normalize ice`: iterative correction, by default **per genome** (each
+    MAG's block balanced on its own, contacts between genomes out of the fit,
+    the MAD filter's medians taken per genome); `--scope contig|global` are
+    cooler's. Where the groupings coincide the weights are cooler's, bit for
+    bit.
+  - `normalize list`: the weight columns of a map and how they were computed,
+    whoever stored them.
+
+  metacooler computes ICE only. Any other tool stores its own normalization
+  the same way with **`metacooler.store_weights`**, naming what the weights
+  were computed from (`depends_on`: the pixels, the genome assignment,
+  `/contigs` columns), and `metacooler.read_weights` reads a column back.
+  Python: `metacooler.normalize_ice`.
+- **`--balance NAME`** on `show`, `dump` (a `balanced` column, as
+  `cooler dump --balanced`) and `network`, for any weight column.
+- **Normalization weights are dropped when they go stale.** `reassign` drops
+  the weights that depend on the genome assignment when a contig changes genome
+  — and, when it rewrites the map, restores the attributes of the weights it
+  carries, which cooler does not write — and `annotate` drops those that depend
+  on a `/contigs` column it changes. A weight `cooler balance` wrote depends on
+  the pixels alone, and is kept.
 - **Clustering rounds: the `/clusters` group** (see
   [the format](format.md#clusters)). A tool that groups contigs into genomes
   can store the rounds of its latest run in the map, whatever the method: one

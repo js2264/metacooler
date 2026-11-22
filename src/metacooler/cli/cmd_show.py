@@ -104,6 +104,17 @@ from metacooler.cli.main import MetaCoolURI, cli
     help="DPI for output image.",
 )
 @click.option(
+    "--balance",
+    type=str,
+    default=None,
+    metavar="NAME",
+    help=(
+        "Show the map normalized with the [cyan]/bins/NAME[/cyan] weights "
+        "([cyan]metacooler normalize[/cyan]). Normalized values are small: "
+        "[cyan]--transform none[/cyan] draws them on a linear scale."
+    ),
+)
+@click.option(
     "-r",
     "--range",
     "range1",
@@ -136,6 +147,7 @@ def cmd_show(
     separators: bool,
     output: Path | None,
     dpi: int,
+    balance: str | None,
     range1: str | None,
     range2: str | None,
     force: bool = False,
@@ -167,4 +179,5 @@ def cmd_show(
         out=output,
         dpi=dpi,
         force=force,
+        balance=balance,
     )

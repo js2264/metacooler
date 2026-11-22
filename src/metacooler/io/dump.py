@@ -18,10 +18,19 @@ from metacooler.io._utils import (
     genomes_view,
     resolve_contig_selection,
 )
+from metacooler.io.weights import read_weights
 from metacooler.schema import CLUSTER_DUMP_KEYS, DENSE_MATRIX_BIN_LIMIT
 
 if TYPE_CHECKING:
     from typing import Literal
+
+
+def _pixel_weights(chunk: pd.DataFrame, weights: np.ndarray) -> np.ndarray:
+    """The product of the normalization weights of each pixel's two bins."""
+    return (
+        weights[chunk["bin1_id"].to_numpy(dtype=np.int64)]
+        * weights[chunk["bin2_id"].to_numpy(dtype=np.int64)]
+    )
 
 
 def _decode_chrom(series: pd.Series) -> pd.Series:
@@ -114,6 +123,7 @@ def dump_table(
     weight: str = "count",
     join: bool = False,
     force: bool = False,
+    balance: str | None = None,
 ) -> None:
     """Dump a metacooler table to TSV.
 
@@ -141,17 +151,28 @@ def dump_table(
             ``contig:start-end``.  Applied only when ``table="pixels"``.
         force: Overwrite existing output file(s).  With ``table="all"`` every
             ``<prefix>.<table>.tsv`` is guarded.
+        balance: Normalize the pixels with this weight column of ``/bins``
+            (see ``metacooler normalize``).  The long format gains a
+            ``balanced`` column (``count`` times the weights of the two bins,
+            empty for a masked bin), as ``cooler dump --balanced`` writes; the
+            wide format holds the normalized *weight* values, with the rows and
+            columns of masked bins ``NaN``.  Applied only to the pixels table.
 
     Raises:
         FileExistsError: If an output file exists and *force* is False.
         ValueError: If *table* is unknown, if ``table="all"`` is used without
-            *prefix*, or if the wide-format selection is too large to
-            materialise densely.
+            *prefix*, if the wide-format selection is too large to materialise
+            densely, or if *balance* is given for another table than pixels.
+        KeyError: If *balance* names no weight column.
     """
     # Merge single/multi genome/contig filters
     genome_list = list(genomes) if genomes else []
     contig_list = list(contigs) if contigs else []
     filter_list = list(filters) if filters else []
+    if balance is not None and table not in ("pixels", "all"):
+        raise ValueError(
+            f"--balance only applies to the pixels table, not --table {table}."
+        )
     mc = MetaCooler(uri)
 
     if table == "all":
@@ -182,6 +203,7 @@ def dump_table(
                 weight=weight,
                 join=join,
                 force=True,
+                balance=balance if tbl == "pixels" else None,
             )
         return
 
@@ -239,6 +261,7 @@ def dump_table(
                 df = mc._clusters_of(np.unique(cluster_ids))
                 df = df.rename(columns=CLUSTER_DUMP_KEYS)
     elif table == "pixels":
+        weights = read_weights(mc, balance) if balance is not None else None
         # Pre-compute filter parameters that are independent of chunk
         valid_bin_ids: np.ndarray | None = None
         if selected_contig_ids is not None:
@@ -300,8 +323,14 @@ def dump_table(
                     continue
                 b1, b2 = b1[keep], b2[keep]
                 vals = chunk[weight].to_numpy()[keep].astype(np.float64)
+                if weights is not None:
+                    vals = vals * _pixel_weights(chunk, weights)[keep]
                 mat[b1, b2] = vals
                 mat[b2, b1] = vals
+            if weights is not None:
+                masked = np.flatnonzero(np.isnan(weights[selected_bins]))
+                mat[masked, :] = np.nan
+                mat[:, masked] = np.nan
             if join:
                 bdf = mc.bins()[["chrom", "start", "end"]].iloc[selected_bins]
                 chrom = _decode_chrom(bdf["chrom"]).astype(str).to_numpy()
@@ -340,11 +369,16 @@ def dump_table(
                     "start2",
                     "end2",
                     *pixel_cols,
+                    *(["balanced"] if weights is not None else []),
                 ]
             out_stream = open(out, "w") if out else sys.stdout  # noqa: SIM115
             try:
                 first_chunk = True
                 for chunk in _selected_pixels(mc, valid_bin_ids, range_bounds):
+                    if weights is not None:
+                        chunk["balanced"] = chunk["count"].to_numpy() * _pixel_weights(
+                            chunk, weights
+                        )
                     if join:
                         assert ann is not None
                         chunk = cooler.api.annotate(chunk, ann, replace=True).rename(
@@ -364,6 +398,8 @@ def dump_table(
                         if join
                         else mc._empty_pixels()
                     )
+                    if weights is not None and not join:
+                        empty["balanced"] = pd.Series(dtype=np.float64)
                     empty.to_csv(out_stream, sep="\t", index=False, header=True)
             finally:
                 if out:

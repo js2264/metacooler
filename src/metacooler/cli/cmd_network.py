@@ -45,6 +45,17 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     help="Write a header line (node1, node2, value) to the output.",
 )
 @click.option(
+    "--balance",
+    type=str,
+    default=None,
+    metavar="NAME",
+    help=(
+        "Normalize the edges with the [cyan]/bins/NAME[/cyan] weights "
+        "([cyan]metacooler normalize ice[/cyan], or another tool's): each "
+        "pixel times the weights of its two bins, masked bins left out."
+    ),
+)
+@click.option(
     "--chunksize",
     type=int,
     default=DEFAULT_CHUNKSIZE,
@@ -60,6 +71,7 @@ def cmd_network(
     weight: str,
     output: Path | None,
     header: bool,
+    balance: str | None,
     chunksize: int,
     force: bool,
     verbose: bool,
@@ -88,4 +100,5 @@ def cmd_network(
         header=header,
         chunksize=chunksize,
         force=force,
+        balance=balance,
     )

@@ -502,7 +502,7 @@ resolutions), and a cooler stored as a full `square` matrix.
   names.
 - **Contig lengths** come from each input's bins, as in `create cool`.
   Balancing weights (`bins/weight`) are not carried over; re-balance the result
-  with `cooler balance` if you need them.
+  with [`normalize ice`](#normalize) if you need them.
 - **Pixel counts** keep their width: `int32` inputs stay `int32`, and one
   `int64` (or float) input widens the whole column rather than being truncated.
 
@@ -561,17 +561,19 @@ metacooler collect *.cool \
 
 ## Edit an existing map { #edit }
 
-Three commands change a map that already exists, each a different part of it,
+Four commands change a map that already exists, each a different part of it,
 and none re-bins a single contact.
 
 | Command | What it changes | Cost |
 |---------|-----------------|------|
 | [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places; a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
 | [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds. |
+| [`normalize`](#normalize) | A weight column of `/bins` — ICE, by default genome by genome — and never a pixel. Any other tool's normalization is stored the same way, from Python. | Tens of passes over the pixels, one per iteration. |
 | [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | Instant. |
 
 `reassign` and `annotate` write either an edited copy (`-o`) or the map itself
-(`--inplace`); `metadata` always edits the map itself.
+(`--inplace`); `normalize` and `metadata` always edit the map itself, as
+`cooler balance` does.
 
 `reassign` and `annotate` meet in one place: after a reassignment, the metadata
 of the genomes whose contigs changed still describes their old contigs, and
@@ -853,6 +855,130 @@ command line in `commands`, and the tables and the columns added, replaced and
 dropped in `annotate`. A run that changes nothing writes nothing. Since
 [`merge`](#merge) compares only the identity of two maps, an annotated
 replicate still merges with the others.
+
+### `normalize` { #normalize }
+
+Balance the map and store the weights as a column of `/bins`, or list the
+weight columns it holds. `normalise` is an alias. **API:**
+`metacooler.normalize_ice` (`metacooler.ops.normalize`); for any other tool's
+normalization, `metacooler.store_weights` and `metacooler.read_weights`
+(`metacooler.io.weights`).
+
+```console
+metacooler normalize ice METACOOL_PATH [OPTIONS]
+metacooler normalize list METACOOL_PATH
+```
+
+A weight column holds what `cooler balance` stores: one weight per bin, `NaN`
+for a masked bin, and a normalized contact is the raw count times the weights
+of its two bins. The pixels are never rewritten, so several normalizations sit
+side by side under different names, and cooler, cooltools and HiGlass read them
+as they read a balancing weight (`cooler.Cooler(path).matrix(balance="weight")`).
+Read them back with [`show`](#show), [`dump`](#dump) or [`network`](#network)
+`--balance NAME`.
+
+metacooler computes one normalization itself, ICE. Any other — a binner's
+network normalization, a regression fitted on the contigs — is computed by the
+tool that defines it and [stored](#normalize-store) in the map the same way, to
+be read back by the same `--balance NAME`.
+
+#### `normalize ice`
+
+Iterative correction: every bin's normalized contacts sum to 1, **genome by
+genome** by default. Balancing the whole metagenome at once (`--scope global`)
+treats abundance as a bias: it equalises genomes of very different abundance
+and inflates the stray contacts of the rare ones. Balanced per genome, each
+MAG's block of the matrix is what looking at a genome's 3D structure wants —
+its contact map, its domains, the circularisation signal.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--scope` | `genome` | `genome`: each genome's block of the matrix balanced on its own, the contacts between genomes left out of the fit (they are still weighted when the map is read); an `__unbinned__` contig is a genome of its own. `contig`: cooler's `--cis-only`. `global`: cooler's default, the whole matrix at once. |
+| `--ignore-diags` | `2` | Diagonals of each contig left out (cooler's default). |
+| `--mad-max` | `5` | Mask bins whose marginal is this many median absolute deviations below the median — of their **genome**; cooler takes it per contig, where a one-bin contig is never filtered. `0` disables. |
+| `--min-nnz` | `10` | Mask bins with fewer non-zero pixels. |
+| `--min-count` | `0` | Mask bins with a smaller total count. |
+| `--tol` | `1e-5` | Variance of the marginals at which balancing has converged. |
+| `--max-iters` | `200` | Iteration limit; a genome left unconverged is reported. |
+| `--name` | `weight` | The `/bins` column to store the weights as: cooler's own name by default, which `cooler show`, cooltools and HiGlass read without being told. `KR`, `VC` and `VC_SQRT` are refused: cooler reads columns of those names as *divisive*. |
+| `-f, --force` | off | Replace an existing column of that name; without it the command refuses before computing anything. |
+| `--chunksize` | `50000000` | Pixels read per chunk. |
+| `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+Where the groupings coincide, the result is cooler's own, to the bit: with every
+contig a genome of its own it is `cooler balance --cis-only`, and with a single
+genome (and `--mad-max 0`) it is `cooler balance`. That is cooler 0.12's
+`--ignore-diags`, which stops at a contig boundary; before 0.12, cooler also
+dropped the pixel between the last bin of a contig and the first of the next.
+
+#### `normalize list`
+
+`normalize list METACOOL_PATH` prints every weight column — one
+`cooler balance` wrote, or another tool stored, included — with its method,
+its main parameters, how many bins it masks and what it depends on.
+
+#### Storing another tool's normalization { #normalize-store }
+
+Any normalization that factorises — the normalized contact of bins *i* and *j*
+is raw × w<sub>i</sub> × w<sub>j</sub> — is stored from Python with
+`metacooler.store_weights`. MetaTOR's `empirical_hit`, for instance, divides
+the contacts of two contigs by the geometric mean of their Hi-C hits, so it is
+`1 / sqrt(hits)` for every bin of a contig:
+
+```python
+import metacooler
+
+metacooler.store_weights(
+    "gut_T0.metacool",          # or reps.mmetacool::entries/rep1
+    "empirical_hit",            # the /bins column
+    weights,                    # one per bin, NaN for a masked bin
+    method="metator",
+    depends_on=["pixels"],
+    parameters={"mode": "empirical_hit"},
+)
+```
+
+`method` names the normalization and `parameters` are stored as attributes of
+the column, both shown by `normalize list`. `depends_on` says what the weights
+were computed from — `pixels`, `genome_id` (the contig-to-genome assignment, for
+a weight computed per genome) and `contigs/<column>` for each `/contigs` column
+read (a coverage, a site count) — so that the edits that change it drop the
+weight; anything else is refused, as is a column the map does not hold.
+`metacooler.read_weights(uri, name)` reads a column back as multiplicative
+weights, inverting one cooler reads as divisive.
+
+A contig-level normalization gives every bin of a contig its contig's weight,
+so a map normalized by it and summed back to contigs —
+`network --level contig --balance NAME` — holds exactly the contig-level values
+the normalization defines: with the weights above, MetaTOR's contig network.
+
+!!! note "Weights are derived data"
+    A weight describes the pixels it was computed from, and possibly the genome
+    assignment and named `/contigs` columns; its attributes record which (see
+    [Normalization weights](format.md#weights)). An edit that changes one drops
+    the weight rather than leave a stale normalization: [`reassign`](#reassign)
+    drops those that depend on `genome_id` — `ice --scope genome` — when a
+    contig moves, and [`annotate`](#annotate) those that depend on a column it
+    changed. `binnify`, `merge`, `collect`, `extract`, `flatten` and the coarser
+    levels of `zoomify` keep no weight; the base level of `zoomify`, `cp` and
+    `stack` copy them unchanged.
+
+```bash
+# Per-genome balancing, for viewing (stored as /bins/weight)
+metacooler normalize ice gut_T0.metacool
+metacooler show gut_T0.metacool --genomes MAG_01 --level bin \
+    --balance weight --transform none -o MAG_01.png
+
+# cooler's whole-matrix balancing, beside it
+metacooler normalize ice gut_T0.metacool --scope global --name weight_global
+
+# The contig network normalized by weights another tool stored
+metacooler network gut_T0.metacool --level contig \
+    --balance empirical_hit -o contigs.tsv
+
+# What the map now holds
+metacooler normalize list gut_T0.metacool
+```
 
 ### `metadata` { #metadata }
 
@@ -1190,6 +1316,7 @@ metacooler dump METACOOL_PATH -t TABLE [OPTIONS]
 | `--prefix` | — | Filename prefix; **required** with `-t all`, and rejected with any other table. |
 | `--pixels-format` | `long` | `long` (row per pixel) or `wide` (2-D matrix). |
 | `--weight` | `count` | Value column for `wide` format (pixels only). |
+| `--balance NAME` | — | Normalize the pixels with the `/bins/NAME` weights of [`normalize`](#normalize) (pixels only). The long format gains a `balanced` column — `count` times the weights of both bins, empty for a masked bin — as `cooler dump --balanced` writes it; the wide format holds normalized values, the rows and columns of masked bins `NaN`. |
 | `--join` | off | Annotate pixels with contig names + coordinates (pixels only). |
 | `-r, --range` | — | Row range (pixels only): genome name, contig name, or `contig:start-end`. |
 | `-r2, --range2` | — | Column range (pixels only); defaults to `--range`. |
@@ -1223,7 +1350,7 @@ is omitted because it duplicates `contigs`.
 
     | Combination | Why it fails |
     |-------------|--------------|
-    | `--weight` / `--join` with `-t bins/chroms/contigs/genomes/indexes/clusters/members` | Only the pixels table has a value column or coordinates to join. |
+    | `--weight` / `--balance` / `--join` with `-t bins/chroms/contigs/genomes/indexes/clusters/members` | Only the pixels table has a value column to weigh or coordinates to join. |
     | `--genomes` / `--contigs` / `--filter` with `-t indexes` | The indexes table has no genome or contig dimension. |
     | `-o/--output` with `-t all` | `all` writes one file per table — use `--prefix`. |
     | `--prefix` with any table other than `all` | Single-table dumps go to `-o/--output`. |
@@ -1258,6 +1385,9 @@ metacooler dump gut_T0.metacool -t pixels -o pixels.tsv --force
 
 # Every table at once → gut_T0.{genomes,contigs,bins,pixels,indexes}.tsv
 metacooler dump gut_T0.metacool -t all --prefix gut_T0
+
+# Pixels with their normalized value (see `normalize`)
+metacooler dump gut_T0.metacool -t pixels --balance weight -H
 ```
 
 ### `network` { #network }
@@ -1275,12 +1405,16 @@ metacooler network METACOOL_PATH --level LEVEL [OPTIONS]
 | `--weight` | `count` | Pixel column used as edge weight. |
 | `-o, --output` | stdout | Output TSV file. |
 | `--header` | off | Write a `node1  node2  value` header line. |
+| `--balance NAME` | — | Normalize the edges with the `/bins/NAME` weights — of [`normalize ice`](#normalize), or [stored](#normalize-store) by another tool: every pixel times the weights of its two bins before it is summed, masked bins left out. At contig level, a contig-level normalization gives its own contig network: MetaTOR's `empirical_hit`, stored as `1 / sqrt(hits)`, gives MetaTOR's. |
 | `--chunksize` | `50000000` | Pixels processed per chunk (memory control). |
 | `-f, --force` | off | Overwrite `-o/--output` if it already exists (`network` used to clobber it silently). |
 | `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
 
 ```bash
 metacooler network gut_T0.metacool --level genome -o genome_network.tsv
+
+# The contig network normalized by stored weights (see 'normalize')
+metacooler network gut_T0.metacool --balance empirical_hit -o contigs.tsv
 ```
 
 ### `aggregate` { #aggregate }
@@ -1426,6 +1560,7 @@ metacooler show METACOOL_PATH -o heatmap.png [OPTIONS]
 | `--vmax` | — | Upper colormap bound (default: 99th percentile of the non-zero values). |
 | `--separators / --no-separators` | on | Draw lines at genome/contig boundaries. |
 | `--dpi` | `500` | Output image resolution. |
+| `--balance NAME` | — | Show the map normalized with the `/bins/NAME` weights of [`normalize`](#normalize): masked bins are blank at bin level and left out of the sums at contig and genome level. Normalized values are small, so `--transform none` draws them on a linear scale. |
 | `-r, --range` | — | Row range (implies `--level bin`): genome, contig, or `contig:start-end`. |
 | `-r2, --range2` | — | Column range; defaults to `--range`. |
 | `-f, --force` | off | Overwrite the output image if it already exists (`show` used to clobber it silently). |
