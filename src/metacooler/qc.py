@@ -81,17 +81,33 @@ UNBINNED_GENOME = "__unbinned__"
 # Key the block is stored under inside a file's ``metadata`` attribute.
 QC_METADATA_KEY = "qc"
 
-# Default split between "short-range" and "long-range" intra-contig signal: a
-# contact is long-range when its ends are at least this far apart
-# (``distance >= threshold``).  1001 bp makes ``intra_contig_long`` exactly the
-# pairs MetaTOR's ``mge`` step counts within a contig, those "more than 1 kb"
-# apart (``abs(pos1 - pos2) > 1000``), so a map tallied from pairs serves it as
-# the pairs themselves did.  A wider split (10 kb, the default before 0.4.0)
-# leaves nothing long-range in the short contigs that a metagenome is mostly
-# made of -- the mobile elements MetaTOR clusters among them.  A block records
-# the threshold it was tallied at (``distance_threshold``), which every reader
-# and writer keeps.
-DEFAULT_DISTANCE_THRESHOLD = 1001
+# A contact is long-range when its ends are at least the threshold apart
+# (``distance >= threshold``), and a block records the threshold it was tallied
+# at (``distance_threshold``).  Its default depends on what the distances are
+# measured between, hence two constants.
+#
+# Default split of a tally measured between bin midpoints (``source="pixels"``):
+# ``create cool``, ``collect``, ``qc``, and ``reassign`` when it recomputes a
+# block that records no threshold.  10 kb is the convention in the metaHi-C
+# literature: below it the signal is dominated by the polymer's local contacts
+# (and by undigested/religated fragments), above it by genuine long-range 3D
+# proximity.  Two neighbouring bins are a bin size apart, so such a split only
+# means something above the bin size (see
+# :meth:`ContactQC.warn_if_split_within_bin`).
+DEFAULT_DISTANCE_THRESHOLD = 10_000
+
+# Default split of a tally measured on read positions (``source="pairs"``):
+# ``create pairs``, and :func:`metacooler.io.create.from_pairs` as hicstuff
+# calls it.  1001 bp makes ``intra_contig_long`` exactly the pairs MetaTOR's
+# ``mge`` step counts within a contig, those more than 1 kb apart
+# (``abs(pos1 - pos2) > 1000``), so a map tallied from pairs serves it as the
+# pairs themselves did; 10 kb, this default before 0.4.0, left nothing
+# long-range in the short contigs a metagenome is mostly made of -- the mobile
+# elements MetaTOR clusters among them.  Read positions resolve any distance,
+# so this split holds at every bin size; between bin midpoints, 1001 bp would
+# leave little but the diagonal short-range on a map binned at 1001 bp or more,
+# which is why the pixel tallies keep 10 kb.
+PAIRS_DISTANCE_THRESHOLD = 1001
 
 # The four mutually exclusive categories, in report order.
 QC_CATEGORIES = (
@@ -576,6 +592,41 @@ class ContactQC:
                 np.abs(maps.mid[b2] - maps.mid[b1]),
                 counts[block],
             )
+
+    def warn_if_split_within_bin(self, binsize: int | None, advice: str) -> bool:
+        """Warn when a pixel tally's short/long split is no wider than a bin.
+
+        A pixel tally measures a contact's distance between the midpoints of
+        its two bins, and two neighbouring bins are a bin size apart, so at a
+        threshold no greater than the bin size ``intra_contig_short`` holds
+        little but the contacts within one bin (the diagonal), and the split
+        says next to nothing about a contig's contacts.  A tally on read
+        positions (``source="pairs"``) resolves any distance and never warns.
+
+        Args:
+            binsize: The map's bin size, in bp.  ``None`` (variable bins) is
+                not checked.
+            advice: What gives a useful split, which ends the warning.
+
+        Returns:
+            Whether it warned.
+        """
+        if (
+            self.source != "pixels"
+            or binsize is None
+            or binsize < self.distance_threshold
+        ):
+            return False
+        logger.warning(
+            "Bin size (%d bp) is at least the short/long distance threshold "
+            "(%d bp, long-range from this distance on): measured between bin "
+            "midpoints, little but the contacts within one bin (the diagonal) "
+            "is short-range, so the split says next to nothing. %s",
+            binsize,
+            self.distance_threshold,
+            advice,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Reporting

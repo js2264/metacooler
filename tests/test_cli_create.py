@@ -192,6 +192,17 @@ class TestCreatePairsContigsFormats:
         pd.testing.assert_frame_equal(old.genomes, new.genomes)
         pd.testing.assert_frame_equal(old.contigs, new.contigs)
 
+    def test_contigs_format_help_names_the_metator_fallback(self):
+        """The help's alias list says what each alias reads, and the column
+        the metator alias reads in a table of MetaTOR 1.x."""
+        from metacooler.cli._options import CONTIGS_FORMAT_HELP
+
+        assert (
+            "[yellow]metator[/yellow] (Name,Final_cluster; Final_bin if the table "
+            "has no Final_cluster)"
+        ) in CONTIGS_FORMAT_HELP
+        assert "[yellow]dastool[/yellow] (1,2,noheader)," in CONTIGS_FORMAT_HELP
+
     def test_contigs_format_column_index_with_header(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
     ):
@@ -283,7 +294,8 @@ class TestCreatePairsContigsFormats:
     def test_contigs_format_metator_missing_columns(
         self, runner, tmp_path, tiny_pairs, tiny_bins_bed, tiny_contigs_table
     ):
-        """``metator`` format on a standard contigs table fails (missing Name/Final_bin)."""
+        """``metator`` format on a standard contigs table fails: it has no
+        ``Name``, nor ``Final_cluster`` or ``Final_bin``."""
         out = tmp_path / "out.metacool"
         result = runner.invoke(
             cli,
@@ -780,7 +792,8 @@ class TestCreateCoolContigsFormats:
     def test_contigs_format_metator_wrong_file_fails(
         self, runner, tmp_path, tiny_cool, tiny_contigs_table
     ):
-        """``metator`` format on a standard contigs table fails (missing Name/Final_bin)."""
+        """``metator`` format on a standard contigs table fails: it has no
+        ``Name``, nor ``Final_cluster`` or ``Final_bin``."""
         out = tmp_path / "out.metacool"
         result = runner.invoke(
             cli,
