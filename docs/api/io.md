@@ -25,6 +25,45 @@ are re-exported at the top level, so `metacooler.from_pairs(...)` and
 Note that `network` and `dump_table` name their output parameter `out`, not
 `output`.
 
+## In-place writes { #in-place }
+
+`annotate(inplace=True)`, `reassign(inplace=True)`, `store_weights`,
+`write_clusters`, `drop_clusters`, `contact_qc(store=True)`, the
+`normalize_*` functions and the entry functions edit a file through a staged
+copy, under its lock taken before their first read, and replace it once the
+copy validates (see [In-place writes](../format.md#in-place-writes)). A caller
+that computes from a map and writes it holds the lock from before its read to
+after its last write, and hands the map it read to `store_weights`:
+
+```python
+import metacooler
+
+with metacooler.lock("sample.metacool"):  # MapLockedError if another process or thread writes it
+    mc = metacooler.MetaCooler("sample.metacool")
+    weights = my_weights(mc)
+    metacooler.store_weights(
+        "sample.metacool", "w", weights, method="tool", depends_on="pixels", source=mc
+    )
+    metacooler.annotate("sample.metacool", contigs_table="depth.tsv", inplace=True)
+```
+
+A `MetaCooler` opened before a replacement refuses to read on
+(`metacooler.MapChangedError`): open the map again. Both errors, and
+`MapLockError`, are `OSError`s.
+
+Several edits in a row go through one staged copy, validated and renamed once,
+with `metacooler.staged_edit` (see [Several edits at once](../cli.md#staged-edit)):
+
+```python
+with metacooler.staged_edit("sample.metacool") as staged:
+    metacooler.store_weights(staged, "w", weights, method="tool", depends_on="pixels")
+    metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
+
+# An entry of a collection, edited into a standalone map:
+with metacooler.staged_edit("run.mmetacool::entries/r1", output="r1.metacool") as staged:
+    metacooler.write_clusters(staged, rounds, clusters, members)
+```
+
 ## A failed write { #keep-partial }
 
 `from_pairs`, `from_cool`, `collect`, `reassign` and `annotate` (the last two
@@ -98,6 +137,17 @@ except Exception:
     options:
       heading: "Metacooler collections"
       toc_label: "Metacooler collections"
+
+::: metacooler.io.staging
+    options:
+      heading: "Locks and edit sessions"
+      toc_label: "Locks and edit sessions"
+      members:
+        - lock
+        - staged_edit
+        - MapLockError
+        - MapLockedError
+        - MapChangedError
 
 ::: metacooler.io.extract
     options:

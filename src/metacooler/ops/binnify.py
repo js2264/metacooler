@@ -83,23 +83,25 @@ def binnify(
         FileExistsError: If *output* exists and *force* is False.
     """
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import writing_output
 
     output = Path(output)
     check_output_path(output, force=force, inputs=[uri])
-
     if binsize <= 0:
         raise ValueError(f"binsize must be a positive integer, got {binsize}.")
-
-    mc = MetaCooler(uri)
-    _binnify(
-        mc,
-        output,
-        binsize,
-        level=level,
-        chunksize=chunksize,
-        source_uri=uri,
-        source_metadata=mc.metadata,
-    )
+    # Checked before the write begins: a refusal fails no edit session whose
+    # staged map is the output.
+    with writing_output(output, force=force):
+        mc = MetaCooler(uri)
+        _binnify(
+            mc,
+            output,
+            binsize,
+            level=level,
+            chunksize=chunksize,
+            source_uri=uri,
+            source_metadata=mc.metadata,
+        )
 
 
 def _binnify(
@@ -219,6 +221,9 @@ def _binnify(
         # default never fires; `or` is what actually supplies the fallback.
         contig_ordering=mc.info.get("ordering") or "genome-then-alpha",
     )
+    # The rounds were copied from the source by path, after its pixels were
+    # read: the map read is the map copied (MapChangedError otherwise).
+    mc._check_unchanged()
 
     logger.info(
         "Re-binned %s → %s: binsize=%d, %d bins",
@@ -737,6 +742,7 @@ def _write_rebinned_metacool(
     import h5py
 
     from metacooler.io._utils import _finalize_metacool_file, write_cooler
+    from metacooler.io.staging import recorded_uri
     from metacooler.schema import validate
 
     # Pre-compute index offsets from the bins DataFrame
@@ -761,7 +767,9 @@ def _write_rebinned_metacool(
     # qc_* columns of the tables below, per genome and per contig.
     metadata = strip_qc_metadata(source_metadata)
     history = list(metadata.get("binnify", []))
-    history.append({"source": str(source_uri), "binsize": int(binsize), "level": level})
+    history.append(
+        {"source": recorded_uri(source_uri), "binsize": int(binsize), "level": level}
+    )
     metadata["binnify"] = history
     genomes = strip_qc_columns(genomes)
     contigs = strip_contig_qc_columns(contigs)

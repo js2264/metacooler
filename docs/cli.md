@@ -277,8 +277,8 @@ contig and the genome names, in that order:
 ```
 
 Each column is a **1-based position** (digits only) or a **header name**
-(anything else), and the two can be mixed: `2,5`, `Name,Final_bin`,
-`1,Final_bin`. Add `,noheader` when the table has no header line; only
+(anything else), and the two can be mixed: `2,5`, `Name,Final_cluster`,
+`1,Final_cluster`. Add `,noheader` when the table has no header line; only
 positions work then. Names are looked up wherever they are in the header, and
 every other column of the table is stored in `/contigs` (named `col3`, `col4`,
 … in a table without a header). A column whose name metacooler uses itself is
@@ -305,7 +305,7 @@ write:
 |-------|---------|-------|
 | `contigs` | `contig_name,genome_name` | metacooler's own layout (the default). |
 | `contig_genome` | `1,2,noheader` | Two columns, contig then genome, no header. |
-| `metator` | `Name,Final_bin` | MetaTOR's `contig_data_final.txt`. |
+| `metator` | `Name,Final_cluster` | metaTOR 2.0's `contig_data_final.txt` (`Name`, `Final_cluster`). A table without `Final_cluster` but with `Final_bin`, as MetaTOR 1.x wrote it, is read through `Final_bin` (and logged); a spec spelled out, `Name,Final_cluster`, is read as written. |
 | `dastool` | `1,2,noheader` | DAS Tool's `*_DASTool_contigs2bin.tsv`, and the tables its `Fasta_to_Contigs2Bin.sh` builds from FASTA bins (MetaBAT2, MaxBin2, …). |
 | `binette` | `1,2,noheader` | Binette's `final_contig_to_bin.tsv`. |
 | `semibin` | `contig,bin` | SemiBin2's `contig_bins.tsv`. |
@@ -566,14 +566,66 @@ and none re-bins a single contact.
 
 | Command | What it changes | Cost |
 |---------|-----------------|------|
-| [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places; a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
-| [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds. |
-| [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels; tens of passes for `ice`. |
-| [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | Instant. |
+| [`reassign`](#reassign) | Which genome each contig belongs to — moving contigs, merging or splitting MAGs, renaming a genome, unbinning contigs — and everything that follows from it: the `/genomes` rows and their ids, the per-genome QC counts, and possibly the contig layout. | Seconds when the contigs keep their places (plus a copy of the file, in place or not); a rewrite of every pixel when restoring a genome-grouped layout means moving them ([why](#reassign-layout)). |
+| [`annotate`](#annotate) | The metadata columns of `/genomes` and `/contigs` — completeness, taxonomy, coverage, … — never the assignment or any column derived from it. | Seconds, plus a copy of the file in place. |
+| [`normalize`](#normalize) | A weight column of `/bins` — ICE (by default genome by genome), NormCC or HiCzin — and never a pixel. Any other tool's normalization is stored the same way, from Python. | One pass over the pixels (tens for `ice`), plus a copy of the file and its full validation. |
+| [`metadata`](#metadata) | The free-form `metadata` attribute: sample, enzyme, sequencing run, … | A copy of the file. |
 
 `reassign` and `annotate` write either an edited copy (`-o`) or the map itself
-(`--inplace`); `normalize` and `metadata` always edit the map itself, as
-`cooler balance` does.
+(`--inplace`); `normalize`, `metadata` and `qc --store` always edit the map
+itself, as `cooler balance` does.
+
+An edit of the map itself — `reassign --inplace`, `annotate --inplace`,
+`normalize`, `metadata add|remove|load`, `qc --store`, the collection commands
+`cp`, `mv` and `rm` and, from Python, `store_weights`, `write_clusters`,
+`drop_clusters` and the entry functions — never writes the map: under the map's
+lock, taken before it reads the map, it writes a **staged copy** in a private
+directory beside it, validates it in full, and renames it over the map. So the
+map is whole whatever stops the edit — an error, Ctrl-C, a failed validation.
+The staged copy is made object by object, so it leaves behind the space that
+earlier edits left in the map (HDF5 never reclaims what an edit replaces): a
+map holds at most what its last edit replaced, and does not grow from one edit
+to the next. An edit costs one copy of the file, in time and in disk space
+beside the map (the map and its copy, at the peak), and a full validation, and
+needs a writable directory. The map keeps
+its owner and group where the process may set them (a member of a shared
+map's group keeps its group, and a warning names what it cannot keep), its
+mode and its extended attributes, POSIX ACLs included; a map without write
+permission is refused, as editing it in place was. An edit through a symbolic
+link edits its target, and the link keeps pointing at it; an output (`-o`)
+that is a link is replaced, never written through. A program that writes the
+map without metacooler's lock (`cooler balance`, say) while its copy is
+edited makes the edit fail rather than lose that program's write.
+
+The lock, `<map>.lock`, keeps a second writer out — another process, or
+another thread: it is refused with the pid, host, start and command of the one
+writing. A lock left by a process that is gone — killed outright (`kill -9`),
+or stopped by a scheduler's `SIGTERM` at its time limit: metacooler sets no
+signal handler — is taken over by the next writer on the same host, with a
+warning. A lock of another host (or of another machine or PID namespace
+under the same host name: a container) is never broken: the error names the
+lock file, and what its holder staged there, to delete once that process is
+gone. Whoever takes the lock next removes what a killed writer staged, naming
+it.
+
+A command that writes a new map — `create`, `collect`, `reassign -o`,
+`annotate -o`, `binnify`, `zoomify`, `aggregate`, `extract`, `merge`,
+`flatten`, `stack`, `cp` into a new collection — takes no lock: one killed
+outright leaves nothing that stops it running again, from any host. It
+refuses an output whose lock, `<output>.lock`, a live process (or another
+thread, or a process this host cannot check) holds — an edit session that
+writes there, or a pipeline that holds it for its run (metaTOR does) —, and
+checks that again right before it renames its output into place. Two
+commands writing one output at once are not kept apart: give them two
+paths. An output that is a symbolic link is replaced, never written
+through: with `--force` the link is replaced by the new file (its target is
+left as it is; a command that stages its output replaces it only once the
+output is complete), and without `--force` a link, even a dangling one, is
+an existing output. An output that is a directory, a device or a FIFO
+(`-o /dev/stdout`), or a link to one, is refused, and never removed. A
+command that reads a map while it is replaced, or a `MetaCooler`
+opened before, stops with an error rather than mixing two versions of the map:
+open it again. See [In-place writes](format.md#in-place-writes).
 
 `reassign` and `annotate` meet in one place: after a reassignment, the metadata
 of the genomes whose contigs changed still describes their old contigs, and
@@ -582,6 +634,93 @@ QC run on the new bins.
 
 One option of another command also edits a map: [`qc --store`](#qc) writes the
 contact-quality block and the `qc_*` columns back into the map it measured.
+
+### Several edits at once, from Python { #staged-edit }
+
+Each in-place edit copies and validates the whole map. A pipeline that makes
+several edits in a row opens one **edit session** instead: one staged copy,
+written by every writer it is given to, validated once and renamed once.
+
+```python
+import metacooler
+
+with metacooler.staged_edit("sample.metacool") as staged:
+    metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
+    metacooler.store_weights(staged, "w", weights, method="tool", depends_on="pixels")
+    metacooler.write_clusters(staged, rounds, clusters, members)
+# Here, and only here, sample.metacool is replaced: whole, validated.
+```
+
+- Every writer — `annotate(inplace=True)`, `reassign(inplace=True)`,
+  `store_weights`, `write_clusters`, `drop_clusters`, `contact_qc(store=True)`,
+  the `normalize_*` functions, the entry functions — given the staged map by
+  the session's thread writes it directly: no copy, no validation, no lock of
+  its own. Another thread is refused it, and so is any other process, a
+  forked child included (the staged map has a lock file of its own, naming the
+  session's process). The session's thread may also write the staged map
+  whole, as an output: `reassign(map, table, output=staged, force=True)`. A
+  write of the map itself (not of its staged copy) from the session's thread
+  is refused while the session runs, and so is an output written over it, or
+  over the session's output.
+- On any failure, `KeyboardInterrupt` and `SystemExit` included, the staged
+  copy is removed and the map is left as it was; so is a map that another
+  program wrote meanwhile (`MapChangedError`). A writer that fails once it has
+  the staged map fails the session: even if its error is caught, nothing is
+  written when the session ends (`RuntimeError`, from that error), since the
+  staged map may hold part of that write. A session whose staged map is as it
+  was copied (inode, size, times of modification and change) leaves the map as
+  it is, whatever ran; one that did renames the staged map over it, which
+  holds at most what the session's writers replaced: the map does not grow
+  from one session to the next. A writer's history
+  (`reassign`'s `source`) names the session's map, never the staged path.
+- `staged_edit(uri, output=PATH)` copies the map to a new file instead, an
+  entry of a `.mmetacool` as a standalone `.metacool` (refused if `PATH`
+  exists, unless `force=True`; a link at `PATH` is replaced, not followed). It
+  holds the lock of `PATH` (`PATH.lock`, the lock `metacooler.lock(PATH,
+  follow_symlinks=False)` takes: a link at `PATH` is not followed), stages
+  beside `PATH`, and takes no lock of the map, which it only reads: a holder
+  of the map's lock does not block it, and the map's directory need not be
+  writable. What was read from the map as the session copied it stays
+  current, whatever is written to the map since; a map written between the
+  check of `planned` and the copy is refused. A write of the map or of `PATH`
+  from the session's thread is refused while it runs; without `force`, a file
+  created at `PATH` meanwhile is kept, and the session fails
+  (`FileExistsError`).
+- `planned=mc` refuses a session on a map that changed since `mc` was opened;
+  `command=` names the session in the lock it takes. A session in place takes
+  the map's lock unless its thread holds it already (`metacooler.lock`), and a
+  nested session on the same map joins the open one.
+- A map read for an edit that is not the staged map — `store_weights(staged,
+  ..., source=mc)` with `mc` opened on the map before the session, or
+  `planned=mc` of a nested session — must still have the staged map's bins
+  (the same contig name, start and end, bin by bin): after a re-grouping in
+  the session it does not, and the write is refused (`MapChangedError`).
+  Nor may a weight computed from it depend on what a write of the session
+  changed: after a relabelling, `depends_on=["genome_id"]` is refused; after
+  `annotate` replaced `coverage`, `depends_on=["contigs/coverage"]` is — `mc`
+  opened on the map holds the map as the session found it, whenever it was
+  opened, and whatever was written to it since. `store_weights`,
+  `write_clusters`, `drop_clusters` and `metadata` change nothing a weight
+  depends on; a re-grouping, a new map written over the staged map or a raw
+  `h5py` write, anything. In a session on a collection, only the writes of
+  the weight's own entry count. Compute from the staged map instead, read
+  after the last write that changed what the weight depends on — several
+  weights may come from one read, as long as no write between changes what
+  each depends on:
+
+  ```python
+  with metacooler.staged_edit("sample.metacool") as staged:
+      metacooler.reassign("sample.metacool", "bins.tsv", output=staged, force=True)
+      metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
+      mc = metacooler.MetaCooler(staged)  # after both
+      metacooler.store_weights(
+          staged, "hit", weights_from(mc), method="tool",
+          depends_on=["pixels", "contigs/depth"], source=mc,
+      )
+  ```
+- A `MetaCooler` of the staged map, opened before a write of the session,
+  stops reading after it (`MapChangedError`), what it keeps (`contigs`,
+  `bins()`, ...) included: open it again.
 
 ### `reassign` { #reassign }
 
@@ -604,7 +743,7 @@ metacooler reassign METACOOL_PATH --round NAME -o OUT.metacool [OPTIONS]
 | `--contigs-format` | `contigs` | Same grammar and aliases as `create pairs` — see [Contig and genome columns](#contigs-format). `NA` as the genome column moves every contig the table lists to `__unbinned__`. |
 | `--round` | — | Take the assignment from a clustering round of the map instead of a table — see [A round as the genomes](#reassign-round). |
 | `-o, --output` | *required* | Output `.metacool` path. Required unless `--inplace`. |
-| `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file. Only possible when no contig has to move (see `--layout`). |
+| `--inplace` | off | Rewrite `METACOOL_PATH` itself instead of writing a new file: through a staged copy, which replaces it once it validates, under the map's lock (see [Edit an existing map](#edit)). Refused for an entry of a collection whose contigs have to move (see `--layout`). |
 | `--genomes` | — | Genome metadata table for the *new* genomes. **Replaces** the metadata columns carried over from the source `/genomes` table rather than merging with them. To add or change a few columns without reassigning anything, use [`annotate`](#annotate). |
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names, as in `create pairs`. |
 | `--missing` | `keep` with `--contigs`, `unbinned` with `--round` | What to do with a contig the table (or the round) does not mention. `keep`: leave it in its current genome, so a short table is an incremental edit. `unbinned`: move it to `__unbinned__`, so the table is authoritative. Neither drops a contig. |
@@ -669,8 +808,10 @@ giving up the guarantee:
 
 A re-grouping that turns out to reproduce the order the file already has is
 detected and skipped, so merging two adjacent MAGs, renaming one, or unbinning
-a contig usually costs nothing. `--inplace` is available exactly when no
-re-ordering is needed, and is refused (before writing anything) when one is.
+a contig usually costs nothing. `--inplace` re-orders too: the new map is
+written beside the old one and replaces it once it validates. An entry of a
+collection, which is not a file of its own, can only be relabelled in place: a
+re-ordering is refused there, before anything is written.
 
 Re-grouping folds every remapped pixel into the upper triangle, which is only
 right for a symmetric matrix. A map stored as `storage-mode="square"` does not
@@ -747,7 +888,7 @@ metacooler reassign gut_T0.metacool \
     --genomes mag_quality_v2.tsv \
     -o gut_T0_v2.metacool
 
-# Relabel a 400 GB file without rewriting its pixel table
+# Relabel a 400 GB file without re-sorting its pixels (copied once, as stored)
 metacooler reassign huge.metacool --contigs fixes.tsv --layout keep --inplace
 
 # One entry of a collection; the output is a standalone map
@@ -760,7 +901,8 @@ Add, replace or drop the **metadata columns** of `/genomes` and `/contigs` in a
 map that already exists — completeness and taxonomy from CheckM2 or GTDB-Tk,
 coverage from a depth table, anything that arrives after the map was built.
 Rows are matched by name; the genome assignment, the bins and the pixels are
-never touched, so this costs seconds even on a large map. **API:**
+never touched: with `-o`, the cost is a copy of the map; with `--inplace`, a
+staged copy that replaces it (see [Edit an existing map](#edit)). **API:**
 `metacooler.annotate` (`metacooler.io.annotate.annotate`).
 
 ```console
@@ -846,8 +988,12 @@ Where it writes:
 | `METACOOL_PATH` | With `--inplace` | With `-o OUT` |
 |-----------------|------------------|---------------|
 | `x.metacool` | `x` itself | a copy of `x` |
-| `c.mmetacool::entries/rep1` | that entry, inside `c`; the other entries are untouched | a standalone `.metacool` |
+| `c.mmetacool::entries/rep1` | that entry, inside `c`; the other entries are copied as they are | a standalone `.metacool` |
 | `c.mmetacool` | **every entry** of `c` | a copy of the whole collection |
+
+In place, the whole file is written through a staged copy, under its lock (see
+[Edit an existing map](#edit)), and only when a value changes: a re-run that
+changes nothing writes nothing.
 
 Every table is checked against every map before anything is written, and each
 annotated map is validated. The run is recorded in the map's metadata: the

@@ -67,7 +67,7 @@ class TestParseContigTable:
     def test_metator_missing_columns(self, tmp_path):
         path = tmp_path / "mag.tsv"
         path.write_text("A\tB\nc1\tMAG_1\n")
-        with pytest.raises(ValueError, match="Name.*Final_bin"):
+        with pytest.raises(ValueError, match="'Name'.*Name,Final_cluster"):
             parse_contigs_table(path, fmt="metator")
 
     def test_unknown_format(self, tmp_path):

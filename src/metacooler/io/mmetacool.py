@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import h5py
 
+from metacooler.io.staging import check_unchanged, staged_inplace, writing_output
 from metacooler.schema import (
     MMETACOOLER_FORMAT,
     MMETACOOLER_FORMAT_VERSION,
@@ -149,11 +151,17 @@ def create_mmetacool(
         entries: Mapping of entry names to ``.metacool`` file paths.
         force: If ``True``, overwrite an existing output file.
 
+    Without *force*, the file is created exclusively: one another writer
+    created meanwhile is refused, never truncated.  A symbolic link at
+    *output* is replaced (with *force*), never written through.
+
     Raises:
-        FileExistsError: If *output* already exists and *force* is ``False``.
+        FileExistsError: If *output* already exists (a symbolic link included)
+            and *force* is ``False``.
         FileNotFoundError: If any source metacool file does not exist.
     """
-    if output.exists() and not force:
+    output = Path(output)
+    if os.path.lexists(output) and not force:
         raise FileExistsError(
             f"Output file already exists: {output}. Pass force=True to overwrite."
         )
@@ -163,7 +171,10 @@ def create_mmetacool(
             raise FileNotFoundError(f"Source file not found for entry {name!r}: {src}")
         _require_metacool_source(str(src))
 
-    with h5py.File(output, "w") as dst:
+    with (
+        writing_output(output, force=force),
+        h5py.File(output, "w" if force else "w-") as dst,
+    ):
         init_mmetacool_attrs(dst)
         for name, src in entries.items():
             logger.info("Adding entry %r from %s", name, src)
@@ -192,13 +203,19 @@ def add_entry(
         ValueError: If *mmetacool* is not a valid mmetacool file.
         KeyError: If *name* already exists and *overwrite* is False.
     """
+    from metacooler.api import MetaCooler
+
     _check_entry_name(name)
     if not Path(metacool).exists():
         raise FileNotFoundError(f"Source file not found: {metacool}")
     _require_metacool_source(str(metacool))
     mmetacool = _require_mmetacool(mmetacool)
 
-    with h5py.File(mmetacool, "a") as dst:
+    source = MetaCooler(metacool)
+    with (
+        staged_inplace(mmetacool, validate_groups=[f"entries/{name}"]) as staged,
+        h5py.File(staged, "a") as dst,
+    ):
         grp = dst.require_group("entries")
         if name in grp:
             if not overwrite:
@@ -208,6 +225,8 @@ def add_entry(
             del grp[name]
         with h5py.File(metacool, "r") as src_f:
             _copy_map(src_f["/"], grp, name)
+        # The source copied is the source checked (MapChangedError otherwise).
+        check_unchanged(source)
     logger.info("Added entry %r to %s", name, mmetacool)
 
 
@@ -224,7 +243,13 @@ def remove_entry(mmetacool: Path, name: str) -> None:
         KeyError: If *name* does not exist.
     """
     mmetacool = _require_mmetacool(mmetacool)
-    with h5py.File(mmetacool, "a") as f:
+    if name not in list_entry_names(mmetacool):
+        raise KeyError(f"Entry {name!r} not found in {mmetacool}")
+    # The other entries are copied as they are: nothing to validate anew.
+    with (
+        staged_inplace(mmetacool, validate_groups=[]) as staged,
+        h5py.File(staged, "a") as f,
+    ):
         grp = f.require_group("entries")
         if name not in grp:
             raise KeyError(f"Entry {name!r} not found in {mmetacool}")
@@ -257,7 +282,10 @@ def copy_entry(
         raise ValueError("Source and destination cannot be the same.")
     mmetacool = _require_mmetacool(mmetacool)
 
-    with h5py.File(mmetacool, "a") as f:
+    with (
+        staged_inplace(mmetacool, validate_groups=[f"entries/{dst}"]) as staged,
+        h5py.File(staged, "a") as f,
+    ):
         grp = f.require_group("entries")
         if src not in grp:
             raise KeyError(f"Source entry {src!r} not found.")
@@ -279,11 +307,10 @@ def move_entry(
 ) -> None:
     """Move (rename) an entry within the same ``.mmetacool`` file.
 
-    Implemented as an HDF5 link rename (:meth:`h5py.Group.move`), which is
-    O(1) and rewrites no data.  Copying then deleting instead would need
-    twice the peak disk space and would leave the freed space stranded —
-    HDF5 never returns deleted space to the filesystem, so a rename would
-    permanently grow the file by the size of the entry.
+    An HDF5 link rename (:meth:`h5py.Group.move`) in a staged copy of the
+    collection, which replaces it, under its lock (see
+    :mod:`metacooler.io.staging`): the collection is copied once, fresh, as
+    by every in-place edit, so a failure leaves it as it was.
 
     Args:
         mmetacool: Path to the ``.mmetacool`` file.
@@ -302,7 +329,10 @@ def move_entry(
         raise ValueError("Source and destination cannot be the same.")
     mmetacool = _require_mmetacool(mmetacool)
 
-    with h5py.File(mmetacool, "a") as f:
+    with (
+        staged_inplace(mmetacool, validate_groups=[f"entries/{dst}"]) as staged,
+        h5py.File(staged, "a") as f,
+    ):
         grp = f.require_group("entries")
         if src not in grp:
             raise KeyError(f"Source entry {src!r} not found.")
@@ -364,20 +394,27 @@ def copy_entry_cross_file(
             f"Source and destination are the same file: {src_file}. "
             "Use rename_entry() to rename entries within a file."
         )
+    from metacooler.api import MetaCooler
+
     src_file = _require_mmetacool(src_file)
     dst_file = _require_mmetacool(dst_file)
-    with h5py.File(src_file, "r") as sf:
-        if "entries" not in sf or src_name not in sf["entries"]:
-            raise KeyError(f"Source entry {src_name!r} not found in {src_file}")
-
-        with h5py.File(dst_file, "a") as df:
-            grp = df.require_group("entries")
-            if dst_name in grp:
-                if not overwrite:
-                    raise KeyError(
-                        f"Destination entry {dst_name!r} already exists in {dst_file}."
-                    )
-                del grp[dst_name]
-            _copy_map(sf[f"entries/{src_name}"], grp, dst_name)
+    if src_name not in list_entry_names(src_file):
+        raise KeyError(f"Source entry {src_name!r} not found in {src_file}")
+    source = MetaCooler(f"{src_file}::entries/{src_name}")
+    with (
+        staged_inplace(dst_file, validate_groups=[f"entries/{dst_name}"]) as staged,
+        h5py.File(src_file, "r") as sf,
+        h5py.File(staged, "a") as df,
+    ):
+        grp = df.require_group("entries")
+        if dst_name in grp:
+            if not overwrite:
+                raise KeyError(
+                    f"Destination entry {dst_name!r} already exists in {dst_file}."
+                )
+            del grp[dst_name]
+        _copy_map(sf[f"entries/{src_name}"], grp, dst_name)
+        # The source copied is the source checked (MapChangedError otherwise).
+        check_unchanged(source)
 
     logger.info("Copied %s::%s → %s::%s", src_file, src_name, dst_file, dst_name)

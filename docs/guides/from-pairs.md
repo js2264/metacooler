@@ -129,10 +129,11 @@ is stored in the `/contigs` table. Aliases cover the tables of common binners
 === "By header name"
 
     Any table, by the names of its two columns — here MetaTOR's
-    `contig_data_final.txt` (the `metator` alias says the same):
+    `contig_data_final.txt` (the `metator` alias says the same, and reads
+    `Final_bin` in a table of MetaTOR 1.x, which has no `Final_cluster`):
 
     ```bash
-    --contigs contig_data_final.txt --contigs-format Name,Final_bin
+    --contigs contig_data_final.txt --contigs-format Name,Final_cluster
     ```
 
 === "By position"
@@ -201,9 +202,10 @@ from another library — can be added later with
 
     - A genome named in the contigs table but missing from `--genomes` still
       gets a row, with `length`/`n_contigs`/`n_bins` computed from its contigs
-      and empty metadata columns. This is common with MetaTOR output, where
-      `Final_bin` also holds `MetaTOR_MGE_*` bins that a MAG-only genome table
-      does not list.
+      and empty metadata columns. This is common with MetaTOR output, whose
+      final-cluster column (`Final_cluster`; `Final_bin` in a table of MetaTOR
+      1.x) can also hold `MetaTOR_MGE_*` bins that a MAG-only genome table does
+      not list.
     - A genome listed in `--genomes` with no contigs assigned to it has nothing
       to derive a row from, and is absent from the output.
 

@@ -65,8 +65,9 @@ if TYPE_CHECKING:
     is_flag=True,
     help=(
         "Rewrite [cyan]METACOOL_PATH[/cyan] itself instead of writing a new "
-        "file. Only possible when no contig has to move (see "
-        "[cyan]--layout[/cyan]); keep a backup, since the source is modified."
+        "file: through a copy beside it, which replaces it once it validates, "
+        "under the map's lock. Not for an entry of a collection whose contigs "
+        "have to move (see [cyan]--layout[/cyan])."
     ),
 )
 @click.option(

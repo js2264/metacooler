@@ -127,8 +127,8 @@ if TYPE_CHECKING:
     "--inplace",
     is_flag=True,
     help=(
-        "Edit [cyan]METACOOL_PATH[/cyan] itself. Only /genomes and /contigs "
-        "are rewritten, so this costs seconds even on a large map."
+        "Edit [cyan]METACOOL_PATH[/cyan] itself: through a copy beside it, "
+        "which replaces it once it validates, under the map's lock."
     ),
 )
 @force_option

@@ -80,7 +80,7 @@ def parse_contigs_table(
         fmt: Which columns hold the contig and the genome names, in the grammar
             of :mod:`metacooler.io.colspec`: ``CONTIG,GENOME[,noheader]``, each
             column a 1-based position or a header name -- e.g.
-            ``"Name,Final_bin"``, ``"2,5"`` or ``"1,2,noheader"`` -- or one of
+            ``"Name,Final_cluster"``, ``"2,5"`` or ``"1,2,noheader"`` -- or one of
             :data:`~metacooler.io.colspec.CONTIGS_FORMAT_ALIASES`.  The default,
             ``contigs``, is ``contig_name,genome_name``: looked up by name, so
             a table given without its format is refused rather than misread.

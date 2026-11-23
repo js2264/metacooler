@@ -47,6 +47,13 @@ if TYPE_CHECKING:
     )
     from metacooler.io.network import network
     from metacooler.io.reassign import reassign
+    from metacooler.io.staging import (
+        MapChangedError,
+        MapLockedError,
+        MapLockError,
+        lock,
+        staged_edit,
+    )
     from metacooler.io.weights import read_weights, store_weights
     from metacooler.ops.aggregate import aggregate
     from metacooler.ops.binnify import binnify
@@ -111,6 +118,12 @@ __all__ = [
     "check",
     "CheckResult",
     "parse_uri",
+    # in-place writes
+    "lock",
+    "staged_edit",
+    "MapLockError",
+    "MapLockedError",
+    "MapChangedError",
     # mmetacool collections
     "create_mmetacool",
     "add_entry",
@@ -288,4 +301,24 @@ def __getattr__(name: str) -> object:
         )
 
         return _copy_entry_cross_file
+    if name == "lock":
+        from metacooler.io.staging import lock as _lock
+
+        return _lock
+    if name == "staged_edit":
+        from metacooler.io.staging import staged_edit as _staged_edit
+
+        return _staged_edit
+    if name == "MapLockError":
+        from metacooler.io.staging import MapLockError as _MapLockError
+
+        return _MapLockError
+    if name == "MapLockedError":
+        from metacooler.io.staging import MapLockedError as _MapLockedError
+
+        return _MapLockedError
+    if name == "MapChangedError":
+        from metacooler.io.staging import MapChangedError as _MapChangedError
+
+        return _MapChangedError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

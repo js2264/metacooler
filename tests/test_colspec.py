@@ -54,8 +54,9 @@ class TestGrammar:
 
     def test_aliases_expand_and_show_their_expansion(self):
         spec = assignment("metator")
-        assert spec.columns == ("Name", "Final_bin")
-        assert spec.text == "metator (= Name,Final_bin)"
+        assert spec.columns == ("Name", "Final_cluster")
+        assert spec.text == "metator (= Name,Final_cluster)"
+        assert spec.fallbacks == (("Final_cluster", "Final_bin"),)
         assert assignment("dastool").columns == (1, 2)
         assert not assignment("binette").header
         assert assignment("semibin").columns == ("contig", "bin")
@@ -91,7 +92,7 @@ class TestGrammar:
             "contig_name",
             "genome_name",
         )
-        assert metadata("metator").columns == ("Name", "Final_bin")
+        assert metadata("metator").columns == ("Name", "Final_cluster")
         with pytest.raises(ValueError, match="takes 1 to 2"):
             metadata("1,2,3")
 
@@ -155,13 +156,44 @@ class TestContigTables:
         assert mapping == {"c1": "MAG_1"}
         assert list(df.columns) == ["ID", "contig_name", "genome_id", "gc"]
 
-    def test_metator_alias_is_its_spec(self, tmp_path):
-        path = write(tmp_path / "t.tsv", "ID\tName\tFinal_bin\n1\tc1\tMAG_1\n")
+    def test_metator_alias_reads_final_cluster(self, tmp_path):
+        """metaTOR 2.0's contig_data_final.txt (Name, Final_cluster)."""
+        path = write(tmp_path / "t.tsv", "Name\tSize\tFinal_cluster\nc1\t10\tC_1\n")
         assert (
             parse_contigs_table(path, "metator")[0]
-            == parse_contigs_table(path, "Name,Final_bin")[0]
-            == {"c1": "MAG_1"}
+            == parse_contigs_table(path, "Name,Final_cluster")[0]
+            == {"c1": "C_1"}
         )
+
+    def test_metator_alias_falls_back_to_final_bin(self, tmp_path, caplog):
+        """metaTOR 1.x's table, whose final clusters are Final_bin."""
+        path = write(tmp_path / "t.tsv", "ID\tName\tFinal_bin\n1\tc1\tMAG_1\n")
+        with caplog.at_level("INFO", logger="metacooler"):
+            assert (
+                parse_contigs_table(path, "metator")[0]
+                == parse_contigs_table(path, "Name,Final_bin")[0]
+                == {"c1": "MAG_1"}
+            )
+        assert "no column 'Final_cluster' but 'Final_bin'" in caplog.text
+
+    def test_metator_alias_prefers_final_cluster(self, tmp_path):
+        path = write(
+            tmp_path / "t.tsv", "Name\tFinal_bin\tFinal_cluster\nc1\told\tnew\n"
+        )
+        assert parse_contigs_table(path, "metator")[0] == {"c1": "new"}
+
+    def test_metator_alias_without_either_names_both(self, tmp_path):
+        path = write(tmp_path / "t.tsv", "Name\tbin\nc1\tMAG_1\n")
+        with pytest.raises(
+            ValueError, match="no column named 'Final_cluster' \\(nor 'Final_bin'\\)"
+        ):
+            parse_contigs_table(path, "metator")
+
+    def test_a_spelled_out_spec_does_not_fall_back(self, tmp_path):
+        """Only the alias falls back: a column named is the column read."""
+        path = write(tmp_path / "t.tsv", "Name\tFinal_bin\nc1\tMAG_1\n")
+        with pytest.raises(ValueError, match="no column named 'Final_cluster',"):
+            parse_contigs_table(path, "Name,Final_cluster")
 
     def test_contig_genome_keeps_its_extra_columns(self, tmp_path):
         path = write(tmp_path / "t.tsv", "c1\tMAG_1\t1000\nc2\tMAG_2\t800\n")

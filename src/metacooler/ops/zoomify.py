@@ -238,11 +238,15 @@ def zoomify(
     """
     from metacooler.api import MetaCooler
     from metacooler.io._utils import check_output_path
+    from metacooler.io.create import _staged_output
     from metacooler.io.mmetacool import add_entry, create_mmetacool
+    from metacooler.io.staging import _writing_directly
     from metacooler.ops.binnify import _binnify
+    from metacooler.schema import validate_mmetacooler
 
     output = Path(output)
-    check_output_path(output, force, inputs=[uri])
+    # A previous output is replaced only once the new one is whole.
+    check_output_path(output, force, inputs=[uri], defer_removal=True)
 
     mc = MetaCooler(uri)
     if mc._group_path not in ("/", ""):
@@ -314,22 +318,28 @@ def zoomify(
     if nproc < 1:
         raise ValueError(f"nproc must be at least 1, got {nproc}")
     source_path = Path(mc._store)
-    try:
-        with tempfile.TemporaryDirectory(
+    # The pyramid is built in one staged file, which only this run knows of:
+    # every level is appended to it directly (no copy of the growing file per
+    # level), and it is validated once, then renamed onto the output -- a
+    # failure leaves no half-built pyramid, and a previous output as it was.
+    with (
+        tempfile.TemporaryDirectory(
             dir=None if temp_dir is None else str(temp_dir)
-        ) as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            if nproc > 1 and len(plan) > 2:
-                _build_levels_in_parallel(
-                    plan, source_path, mc.metadata, output, tmpdir_path, nproc, force
-                )
-                logger.info("Written multi-resolution mmetacool to %s", output)
-                return
+        ) as tmpdir,
+        _staged_output(output, keep_partial=False, inputs=[uri]) as staged,
+        _writing_directly(staged),
+    ):
+        tmpdir_path = Path(tmpdir)
+        if nproc > 1 and len(plan) > 2:
+            _build_levels_in_parallel(
+                plan, source_path, mc.metadata, staged, tmpdir_path, nproc, True
+            )
+        else:
             built: list[int] = []
             for res in plan:
                 if res == base_binsize:
                     # Base resolution: stream the source straight into the output.
-                    create_mmetacool(output, {str(res): source_path}, force=force)
+                    create_mmetacool(staged, {str(res): source_path}, force=True)
                     built.append(res)
                     continue
                 # The coarsest level written so far that nests in this one; the
@@ -338,7 +348,7 @@ def zoomify(
                 parent_mc = (
                     mc
                     if parent == base_binsize
-                    else MetaCooler(f"{output}::entries/{parent}")
+                    else MetaCooler(f"{staged}::entries/{parent}")
                 )
                 res_path = tmpdir_path / f"res_{res}.metacool"
                 logger.info("Coarsening %d -> %d", parent, res)
@@ -349,15 +359,11 @@ def zoomify(
                     source_uri=source_path,
                     source_metadata=mc.metadata,
                 )
-                add_entry(output, str(res), res_path)
+                add_entry(staged, str(res), res_path)
                 built.append(res)
                 # Reclaim the space before computing the next level.
                 res_path.unlink(missing_ok=True)
-    except Exception:
-        # Never leave a half-built pyramid behind.
-        if output.exists():
-            output.unlink()
-        raise
+        validate_mmetacooler(staged)
 
     logger.info("Written multi-resolution mmetacool to %s", output)
 

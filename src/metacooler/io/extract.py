@@ -56,6 +56,7 @@ def extract(
             combined with ``contigs``.
     """
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import writing_output
 
     if not genomes and not contigs and not filters:
         raise ValueError(
@@ -92,16 +93,19 @@ def extract(
         for gid, cids in sorted(by_genome.items()):
             g = str(genome_names[gid])
             out_file = output_path.parent / f"{prefix}_{g}.cool"
-            if out_file.exists() and not force:
-                raise FileExistsError(
-                    f"Output file already exists: {out_file}. Use --force to overwrite."
-                )
-            _extract_contig_ids(mc, cids, out_file, assembly=g)
+            with writing_output(out_file, force=force):
+                if out_file.exists() and not force:
+                    raise FileExistsError(
+                        f"Output file already exists: {out_file}. Use --force to "
+                        "overwrite."
+                    )
+                _extract_contig_ids(mc, cids, out_file, assembly=g)
     else:
         # Single output file with all selected contigs
-        _extract_contig_ids(
-            mc, sorted(selected_contig_ids), Path(output), assembly="multi"
-        )
+        with writing_output(output):
+            _extract_contig_ids(
+                mc, sorted(selected_contig_ids), Path(output), assembly="multi"
+            )
 
 
 def _extract_contig_ids(

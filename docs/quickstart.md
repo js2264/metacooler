@@ -33,7 +33,8 @@ metacooler create pairs \
 
 This streams the pairs file in chunks, bins contacts, and writes an HDF5 file
 with the full metacooler schema. The `--contigs-format metator` flag tells
-metacooler to look for `Name` and `Final_bin` columns in the contig table.
+metacooler to look for the `Name` and `Final_cluster` columns of MetaTOR's
+contig table (`Final_bin` in a table of MetaTOR 1.x).
 
 !!! note "No MetaTOR?"
     If your contig table is a simple two-column TSV with no header

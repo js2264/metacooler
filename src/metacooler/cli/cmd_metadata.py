@@ -82,14 +82,9 @@ def metadata_add(
     metacool_path: str, key: str, value: str, verbose: bool, quiet: bool
 ) -> None:
     """Add or update a metadata key-value pair."""
-    import h5py
-
-    from metacooler.cli._provenance import (
-        read_metadata,
-        refuse_reserved_metadata_key,
-    )
+    from metacooler.cli._provenance import refuse_reserved_metadata_key
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.uri import parse_uri
+    from metacooler.io.staging import edit_metadata
 
     setup_logging(verbose, command_name="metacooler metadata add", quiet=quiet)
     refuse_reserved_metadata_key(key, "set")
@@ -100,12 +95,11 @@ def metadata_add(
     except json.JSONDecodeError:
         parsed = value
 
-    file_path, group_path = parse_uri(metacool_path)
-    with h5py.File(file_path, "a") as f:
-        grp = f[group_path] if group_path != "/" else f
-        meta = read_metadata(grp)
+    def change(meta: dict) -> None:
         meta[key] = parsed
-        grp.attrs["metadata"] = json.dumps(meta)
+
+    # Under the map's lock, through a staged copy (see metacooler.io.staging).
+    edit_metadata(metacool_path, change)
 
 
 @metadata.command(name="remove")
@@ -115,28 +109,27 @@ def metadata_add(
 @quiet_option
 def metadata_remove(metacool_path: str, key: str, verbose: bool, quiet: bool) -> None:
     """Remove a metadata key."""
-    import h5py
-
     from metacooler.cli._provenance import (
-        read_metadata,
+        read_metadata_uri,
         refuse_reserved_metadata_key,
     )
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.uri import parse_uri
+    from metacooler.io.staging import edit_metadata
 
     setup_logging(verbose, command_name="metacooler metadata remove", quiet=quiet)
     refuse_reserved_metadata_key(key, "remove")
 
-    file_path, group_path = parse_uri(metacool_path)
-    with h5py.File(file_path, "a") as f:
-        grp = f[group_path] if group_path != "/" else f
-        meta = read_metadata(grp)
-        if key not in meta:
-            raise click.BadParameter(
-                f"Key not found: {key}. Available keys: {list(meta.keys())}"
-            )
-        del meta[key]
-        grp.attrs["metadata"] = json.dumps(meta)
+    meta = read_metadata_uri(metacool_path)
+    if key not in meta:
+        raise click.BadParameter(
+            f"Key not found: {key}. Available keys: {list(meta.keys())}"
+        )
+
+    def change(meta: dict) -> None:
+        meta.pop(key, None)
+
+    # Under the map's lock, through a staged copy (see metacooler.io.staging).
+    edit_metadata(metacool_path, change)
 
 
 @metadata.command(name="load")
@@ -148,11 +141,9 @@ def metadata_load(
     input_file: Path, metacool_path: str, verbose: bool, quiet: bool
 ) -> None:
     """Load metadata from a JSON or YAML file into the 'metadata' attribute."""
-    import h5py
-
-    from metacooler.cli._provenance import load_metadata_file, read_metadata
+    from metacooler.cli._provenance import load_metadata_file
     from metacooler.cli.logging_utils import setup_logging
-    from metacooler.uri import parse_uri
+    from metacooler.io.staging import edit_metadata
 
     setup_logging(verbose, command_name="metacooler metadata load", quiet=quiet)
 
@@ -160,9 +151,5 @@ def metadata_load(
     # reserved 'commands' provenance key.
     meta = load_metadata_file(input_file)
 
-    file_path, group_path = parse_uri(metacool_path)
-    with h5py.File(file_path, "a") as f:
-        grp = f[group_path] if group_path != "/" else f
-        existing = read_metadata(grp)
-        existing.update(meta)
-        grp.attrs["metadata"] = json.dumps(existing)
+    # Under the map's lock, through a staged copy (see metacooler.io.staging).
+    edit_metadata(metacool_path, lambda existing: existing.update(meta))
