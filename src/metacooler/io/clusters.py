@@ -385,10 +385,11 @@ def write_clusters(
     whole. ``/genomes`` and ``/contigs`` are left alone; to make a round the
     map's genomes, reassign the contigs to it
     (``metacooler.reassign(uri, round=...)``).
-    The map is checked in full first, and the new group is built aside,
-    checked, and swapped in once complete, so a failure leaves the map as it
-    was. As every edit of an HDF5 file in place, it leaves the space of the
-    group it replaces in the file, which a copy of the map reclaims.
+    The map is checked in full first, under its lock, and the new group is
+    written to a staged copy of the map, checked, and the copy, validated in
+    full, replaces the map (see :mod:`metacooler.io.staging`): a failure
+    leaves the map as it was, and the map does not grow with the groups it
+    replaces.
 
     Args:
         uri: A ``.metacool`` path, or an entry of an ``.mmetacool``
@@ -411,44 +412,51 @@ def write_clusters(
             metacooler computes (``n_contigs``, ``length``).
     """
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import in_session, lock, staged_inplace
 
-    # The map is checked in full before anything is written, so that the new
-    # group, itself checked before the swap, is the only change, and a
-    # failure leaves the map as it was.
-    try:
-        mc = MetaCooler(uri)
-        validate(uri)
-    except MetaCoolerFormatError as exc:
-        _hint_broken_clusters(uri, exc)
-        raise
-    contigs = mc.contigs
-    contig_lengths = contigs["length"].to_numpy(np.int64)
-    built = _build(
-        rounds,
-        clusters,
-        members,
-        contigs["name"].astype(str).to_numpy(),
-        contig_lengths,
-    )
     path, key = _map_group(uri)
-    with h5py.File(path, "r+") as f:
-        grp = f[key] if key else f
-        if _SCRATCH in grp:
-            del grp[_SCRATCH]
+    with lock(path):
+        # The map is checked in full before anything is written, so that the
+        # new group, itself checked before the swap, is the only change -- but
+        # in an edit session, which validates once, when it ends.
         try:
-            scratch = grp.create_group(_SCRATCH)
-            _write_group(scratch, built)
-            # Checked before it replaces the map's group: a group validate()
-            # would refuse never reaches the map.
-            _check_clusters_structure(scratch, len(contig_lengths))
-            _check_clusters(scratch, len(contig_lengths), contig_lengths)
-        except BaseException:
+            mc = MetaCooler(uri)
+            if not in_session(uri):
+                validate(uri)
+        except MetaCoolerFormatError as exc:
+            _hint_broken_clusters(uri, exc)
+            raise
+        contigs = mc.contigs
+        contig_lengths = contigs["length"].to_numpy(np.int64)
+        built = _build(
+            rounds,
+            clusters,
+            members,
+            contigs["name"].astype(str).to_numpy(),
+            contig_lengths,
+        )
+        with (
+            staged_inplace(uri, planned=mc, touches=()) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
+            grp = f[key] if key else f
             if _SCRATCH in grp:
                 del grp[_SCRATCH]
-            raise
-        if CLUSTERS_GROUP in grp:
-            del grp[CLUSTERS_GROUP]
-        grp.move(_SCRATCH, CLUSTERS_GROUP)
+            try:
+                scratch = grp.create_group(_SCRATCH)
+                _write_group(scratch, built)
+                # Checked before it replaces the map's group, with errors that
+                # name it.
+                _check_clusters_structure(scratch, len(contig_lengths))
+                _check_clusters(scratch, len(contig_lengths), contig_lengths)
+            except BaseException:
+                # A failure leaves no scratch group in the map written.
+                if _SCRATCH in grp:
+                    del grp[_SCRATCH]
+                raise
+            if CLUSTERS_GROUP in grp:
+                del grp[CLUSTERS_GROUP]
+            grp.move(_SCRATCH, CLUSTERS_GROUP)
     logger.info(
         "Wrote %d cluster(s) in %d round(s) to %s",
         len(built.table),
@@ -459,6 +467,9 @@ def write_clusters(
 
 def drop_clusters(uri: str | Path) -> bool:
     """Remove the clustering rounds of a map, in place.
+
+    Through a staged copy of the map, under its lock (see
+    :mod:`metacooler.io.staging`); a map without rounds is not written.
 
     Args:
         uri: A ``.metacool`` path, or an ``.mmetacool`` entry URI.
@@ -472,21 +483,28 @@ def drop_clusters(uri: str | Path) -> bool:
         ValueError: If *uri* is not a ``.metacool`` map (a plain cooler).
     """
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import lock, staged_inplace
 
-    # Resolves the URI without checking the map: drop_clusters is what
-    # removes a /clusters group that keeps it from opening.
-    MetaCooler(uri, validate=False)
-    if not is_metacooler(uri):
-        raise ValueError(
-            f"{uri} is not a .metacool map: its 'clusters' group, if any, is "
-            "not metacooler's, and is left alone."
-        )
     path, key = _map_group(uri)
-    with h5py.File(path, "r+") as f:
-        grp = f[key] if key else f
-        if CLUSTERS_GROUP not in grp:
-            return False
-        del grp[CLUSTERS_GROUP]
+    with lock(path):
+        # Resolves the URI without checking the map: drop_clusters is what
+        # removes a /clusters group that keeps it from opening.
+        mc = MetaCooler(uri, validate=False)
+        if not is_metacooler(uri):
+            raise ValueError(
+                f"{uri} is not a .metacool map: its 'clusters' group, if any, is "
+                "not metacooler's, and is left alone."
+            )
+        with mc.open() as grp:
+            if CLUSTERS_GROUP not in grp:
+                return False
+        # Through a staged copy, validated in full, which replaces the map.
+        with (
+            staged_inplace(uri, planned=mc, touches=()) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
+            grp = f[key] if key else f
+            del grp[CLUSTERS_GROUP]
     return True
 
 

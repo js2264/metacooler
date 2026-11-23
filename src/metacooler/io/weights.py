@@ -343,8 +343,16 @@ def store_weights(
     parameters: Mapping[str, object] | None = None,
     force: bool = False,
     commands: Sequence[str] = (),
+    source: MetaCooler | None = None,
 ) -> None:
     """Store a normalization as a weight column of a map's ``/bins``, in place.
+
+    Through a staged copy of the map, under its lock, which replaces the map
+    once it validates (see :mod:`metacooler.io.staging`).  Weights computed
+    from the map belong to the map as it was read: hold its lock
+    (:func:`metacooler.lock`) from before that read, and pass the map read as
+    *source*, so that a map changed meanwhile is refused rather than given
+    weights that do not line up with its bins.
 
     The way any tool -- a binner, a normalization of its own -- puts a
     normalization in a map: ``show``, ``dump`` and ``network --balance NAME``
@@ -371,6 +379,13 @@ def store_weights(
             stored as attributes of the column; ``None`` values are left out.
         force: Replace a column of that name if there is one.
         commands: Command lines to append to ``metadata["commands"]``.
+        source: The map the weights were computed from, as opened for it:
+            refused (``MapChangedError``) if its file changed since -- or, in
+            an edit session, if a write of the session changed what the
+            weight depends on (see
+            :func:`metacooler.io.staging.check_source_depends`); one opened
+            on the session's staged map is judged by that alone, so several
+            weights may be computed from one read of it.
 
     Raises:
         ValueError: If *name* cannot hold a weight column, or is taken and
@@ -407,35 +422,81 @@ def store_weights(
         )
     values = np.asarray(weights, dtype=np.float64)
     from metacooler.api import MetaCooler
+    from metacooler.io.staging import check_source_depends, lock, staged_inplace
+    from metacooler.uri import parse_uri
 
-    mc = MetaCooler(uri)
-    with mc.open("r+") as grp:
-        entries = check_depends_on(depends_on, grp["contigs"].keys())
-        bins = grp["bins"]
-        n_bins = int(bins["start"].shape[0])
+    file_path, group = parse_uri(str(uri))
+    with lock(file_path):
+        mc = MetaCooler(uri)
+        # Checked on the map before it is copied.
+        with mc.open() as grp:
+            entries = check_depends_on(depends_on, grp["contigs"].keys())
+            n_bins = int(grp["bins"]["start"].shape[0])
+            taken = name in grp["bins"]
         if values.shape != (n_bins,):
             raise ValueError(
                 f"Got {values.size} weight(s) for a map of {n_bins} bin(s); "
                 "refusing to write a column that would not line up."
             )
-        if name in bins:
-            if not force:
-                raise ValueError(
-                    f"/bins/{name} already exists in {mc.uri}: store these "
-                    "weights under another name, or replace that column with "
-                    "force=True."
-                )
-            del bins[name]
-        dataset = write_column(bins, name, values)
+        if taken and not force:
+            raise ValueError(
+                f"/bins/{name} already exists in {mc.uri}: store these "
+                "weights under another name, or replace that column with "
+                "force=True."
+            )
+        # In an edit session: a source that holds what a write of the session
+        # changed of what the weight depends on is not current.  One on the
+        # staged map is judged by the session's log of its writes alone, as
+        # the writes of the session change its file.
+        judged = check_source_depends(uri, source, entries)
+        planned = [mc] if source is None or judged else [mc, source]
+        with (
+            staged_inplace(uri, planned=planned, touches=()) as staged,
+            h5py.File(staged, "r+") as f,
+        ):
+            key = group.strip("/")
+            _store_column(
+                f[key] if key else f, name, values, method, entries, params, commands
+            )
+
+
+def _store_column(
+    grp: h5py.Group,
+    name: str,
+    values: np.ndarray,
+    method: str,
+    entries: list[str],
+    params: dict,
+    commands: Sequence[str],
+) -> None:
+    """Write the weight column *name* of a map's group, and the commands.
+
+    The new column is written whole, under a scratch name, before it takes
+    the place of a column of that name: a write that fails leaves the column
+    it would replace as it was, and no scratch column.
+    """
+    bins = grp["bins"]
+    scratch = f".{name}.new"
+    if scratch in bins:
+        del bins[scratch]
+    try:
+        dataset = write_column(bins, scratch, values)
         for key, value in weight_attributes(method, entries, params).items():
             dataset.attrs[key] = _attr_value(value)
-        if commands:
-            raw = grp.attrs.get("metadata", "{}")
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            metadata = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            metadata["commands"] = [*metadata.get("commands", []), *commands]
-            grp.attrs["metadata"] = json.dumps(metadata)
+    except BaseException:
+        if scratch in bins:
+            del bins[scratch]
+        raise
+    if name in bins:
+        del bins[name]
+    bins.move(scratch, name)
+    if commands:
+        raw = grp.attrs.get("metadata", "{}")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        metadata = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        metadata["commands"] = [*metadata.get("commands", []), *commands]
+        grp.attrs["metadata"] = json.dumps(metadata)
 
 
 def read_weights(source: MetaCooler | str | Path, name: str) -> np.ndarray:

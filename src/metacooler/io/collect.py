@@ -78,6 +78,7 @@ from metacooler.io.create import (
     _total_time_str,
     _type_contig_metadata,
 )
+from metacooler.io.staging import check_inputs_unchanged, input_states
 from metacooler.qc import DEFAULT_DISTANCE_THRESHOLD, ContactQC, bin_maps
 from metacooler.schema import (
     DEFAULT_CHUNKSIZE,
@@ -1195,6 +1196,8 @@ def collect(
     read = [*sources, genomes_table, contigs_table]
     _refuse_staging_an_input(output, read)
     genome_names = _genome_names(sources, names)
+    # The inputs are read by path (cooler, h5py): checked unchanged at the end.
+    states = input_states(sources)
 
     # --- Read every input's bins before a single pixel ---
     inputs_ = [
@@ -1355,6 +1358,7 @@ def collect(
                 qc_tally.contig_table(contigs_df["name"].to_numpy()),
             )
 
+        check_inputs_unchanged(states)
         logger.info("Validating collected metacool file")
         validate(staged)
 

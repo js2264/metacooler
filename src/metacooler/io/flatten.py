@@ -75,13 +75,16 @@ def flatten(
         len(bins),
     )
 
-    write_cooler(
-        output,
-        bins,
-        _pixel_stream(),
-        ordered=True,
-        symmetric_upper=True,
-        dtypes={"count": count_dtype},
-        metadata={"source-file": str(uri), "flattened": True},
-    )
+    from metacooler.io.staging import writing_output
+
+    with writing_output(output):
+        write_cooler(
+            output,
+            bins,
+            _pixel_stream(),
+            ordered=True,
+            symmetric_upper=True,
+            dtypes={"count": count_dtype},
+            metadata={"source-file": str(uri), "flattened": True},
+        )
     logger.info("Written flattened cool to %s", output)

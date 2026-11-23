@@ -217,18 +217,21 @@ def _write_aggregated_cool(
     src_dtype = mc._clr.pixels()[:0][count_col].dtype
     count_dtype = np.int64 if np.issubdtype(src_dtype, np.integer) else np.float64
 
-    write_cooler(
-        output,
-        bins_out,
-        _aggregate_pixel_stream(
-            mc, level=level, chunksize=chunksize, count_col=count_col
-        ),
-        dtypes={"count": count_dtype},
-        ordered=False,
-        symmetric_upper=True,
-        assembly=mc.info.get("assembly"),
-        metadata=mc.metadata if mc.metadata else None,
-    )
+    from metacooler.io.staging import writing_output
+
+    with writing_output(output):
+        write_cooler(
+            output,
+            bins_out,
+            _aggregate_pixel_stream(
+                mc, level=level, chunksize=chunksize, count_col=count_col
+            ),
+            dtypes={"count": count_dtype},
+            ordered=False,
+            symmetric_upper=True,
+            assembly=mc.info.get("assembly"),
+            metadata=mc.metadata if mc.metadata else None,
+        )
 
 
 def aggregate(
