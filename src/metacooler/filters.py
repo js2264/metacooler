@@ -29,6 +29,12 @@ next.
 Missing values never match.  A row whose value is NA fails every
 comparison, including ``!=`` and ``!~`` — a filter selects rows it can
 positively vouch for.
+
+``fasta --round`` reads a third table, ``clusters``: the clusters of one
+clustering round, as ``dump -t clusters`` prints them (see
+:func:`metacooler.io._utils.clusters_filter_frame`).  It is parsed only where a
+caller asks for it (``tables=TABLES_WITH_CLUSTERS``); every other command reads
+no round, and refuses the prefix by name rather than ignore the filter.
 """
 
 from __future__ import annotations
@@ -50,6 +56,10 @@ logger = logging.getLogger("metacooler")
 
 #: Tables a ``--filter`` expression may address.
 TABLES: tuple[str, ...] = ("genomes", "contigs")
+#: The clusters of one clustering round, which ``fasta --round`` filters.
+CLUSTERS_TABLE = "clusters"
+#: :data:`TABLES`, plus the clusters of a round: what ``fasta`` parses.
+TABLES_WITH_CLUSTERS: tuple[str, ...] = (*TABLES, CLUSTERS_TABLE)
 
 # Longest-first at each position, so ">=" is never read as ">" against a
 # value of "=1000", nor "=~" as "=" against "~^NODE".
@@ -92,7 +102,8 @@ class Filter:
     """One parsed ``<table>.<column> <op> <value>`` comparison.
 
     Attributes:
-        table: ``"genomes"`` or ``"contigs"``.
+        table: ``"genomes"`` or ``"contigs"`` (or ``"clusters"``, where the
+            caller parses it: see :data:`TABLES_WITH_CLUSTERS`).
         column: Column name, verbatim — may contain spaces, dashes or dots.
         op: One of ``> >= < <= == != =~ !~`` (a lone ``=`` is normalised to
             ``==``).
@@ -135,13 +146,24 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
-def parse_filter(expr: str) -> Filter:
+def _either(names: Sequence[str]) -> str:
+    """``'a' or 'b'``, ``'a', 'b' or 'c'``: alternatives, for a message."""
+    quoted = [f"'{name}'" for name in names]
+    return " or ".join(
+        [", ".join(quoted[:-1]), quoted[-1]] if len(quoted) > 1 else quoted
+    )
+
+
+def parse_filter(expr: str, *, tables: Sequence[str] = TABLES) -> Filter:
     """Parse one ``--filter`` expression.
 
     Args:
         expr: Expression of the form ``<table>.<column> <op> <value>``, e.g.
             ``"genomes.length > 1Mb"``.  Whitespace around each part is
             optional: ``"contigs.length>=10kb"`` parses identically.
+        tables: The tables the caller reads, :data:`TABLES` by default;
+            :data:`TABLES_WITH_CLUSTERS` for ``fasta``, which can read the
+            clusters of a round.
 
     Returns:
         The parsed :class:`Filter`.
@@ -182,15 +204,22 @@ def parse_filter(expr: str) -> Filter:
     table, sep, column = lhs.partition(".")
     table, column = table.strip(), column.strip()
     if not sep:
+        share = "Both tables have" if len(tables) == 2 else "The tables all have"
         raise FilterError(
             f"Filter {raw!r} must say which table {lhs!r} belongs to: write "
-            f"'genomes.{lhs}' or 'contigs.{lhs}'. Both tables have a 'length' "
-            f"and a 'name', so the prefix is never optional."
+            f"{_either([f'{name}.{lhs}' for name in tables])}. {share} a "
+            "'length' and a 'name', so the prefix is never optional."
         )
-    if table not in TABLES:
+    if table not in tables:
+        hint = ""
+        if table == CLUSTERS_TABLE:
+            hint = (
+                " A 'clusters.' filter selects the clusters of a clustering "
+                "round, which only 'fasta --round' reads."
+            )
         raise FilterError(
             f"Filter {raw!r} addresses an unknown table {table!r}. "
-            f"Expected one of: {', '.join(TABLES)}."
+            f"Expected one of: {', '.join(tables)}.{hint}"
         )
     if not column:
         raise FilterError(f"Filter {raw!r} names a table but no column.")
@@ -206,11 +235,14 @@ def parse_filter(expr: str) -> Filter:
     return Filter(table=table, column=column, op=op, value=value, raw=raw)
 
 
-def parse_filters(exprs: Iterable[str] | None) -> list[Filter]:
+def parse_filters(
+    exprs: Iterable[str] | None, *, tables: Sequence[str] = TABLES
+) -> list[Filter]:
     """Parse every ``--filter`` expression, preserving order.
 
     Args:
         exprs: Raw expressions, or ``None`` when the option was not given.
+        tables: The tables the caller reads (see :func:`parse_filter`).
 
     Returns:
         List of parsed filters (empty when *exprs* is falsy).
@@ -218,7 +250,7 @@ def parse_filters(exprs: Iterable[str] | None) -> list[Filter]:
     Raises:
         FilterError: On the first expression that does not parse.
     """
-    return [parse_filter(e) for e in (exprs or [])]
+    return [parse_filter(e, tables=tables) for e in (exprs or [])]
 
 
 def filters_for(filters: Sequence[Filter], table: str) -> list[Filter]:

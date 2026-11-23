@@ -9,6 +9,7 @@ started wherever its contents put it. ``cli/_help_layout.py`` aligns them.
 from __future__ import annotations
 
 import io
+import re
 
 import pytest
 import rich_click.rich_click as rc
@@ -87,7 +88,8 @@ def test_extract_is_listed_on_one_line(width):
     assert help_text.strip() == (
         "Extract a standard cool file for specific genome(s)/contig(s)."
     )
-    assert lines[row + 1].startswith("│ flatten ")
+    # The next line is the next command's row, not the help wrapped over.
+    assert re.match(r"│ [a-z]", lines[row + 1]), lines[row + 1]
 
 
 # --------------------------------------------------------------------------

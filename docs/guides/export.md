@@ -91,6 +91,27 @@ metacooler extract sample.metacool --contigs contig_0_0,contig_0_1 -o subset.coo
 metacooler extract sample.metacool --genomes MAG_01 --contigs contig_3_0 -o mixed.cool
 ```
 
+## Writing sequences (`fasta`)
+
+Write the contigs of each genome as FASTA, from the assembly the map was made
+from (plain or gzip-compressed). Each contig's record is copied as it is, header
+and line breaks included, one `<genome>.fa` per genome:
+
+```bash
+# One file per MAG
+metacooler fasta sample.metacool --fasta assembly.fa.gz -o mags
+
+# Each MAG as one sequence, its contigs joined by 100 N; the unbinned contigs too
+metacooler fasta sample.metacool --fasta assembly.fa.gz -o mags --stitch --unbinned
+
+# The clusters of a clustering round, every record in one file
+metacooler fasta sample.metacool --fasta assembly.fa.gz -o final.fa \
+    --round final --single-file
+```
+
+See the [`fasta` reference](../cli.md#fasta) for the order of the records and
+the names they take.
+
 ## Exporting a network edge list (`network`)
 
 Write a three-column TSV (`node1`, `node2`, `value`) with no header, suitable
@@ -196,7 +217,7 @@ See the [`check` reference](../cli.md#check) for what each check establishes.
 ## Python API for export
 
 Every export operation is also a top-level function — `metacooler.extract`,
-`.flatten`, `.merge`, `.binnify`, `.zoomify`, `.aggregate`, `.network`,
+`.write_fasta`, `.flatten`, `.merge`, `.binnify`, `.zoomify`, `.aggregate`, `.network`,
 `.dump_table`, `.validate`, `.validate_mmetacooler`, and `.check` are all
 exported from the package root (previously only the creation and collection
 helpers were).
@@ -208,6 +229,7 @@ mc = metacooler.MetaCooler("sample.metacool")
 
 # Same operations as the CLI, straight from Python
 metacooler.extract("sample.metacool", output="MAG_01.cool", genomes=["MAG_01"])
+metacooler.write_fasta("sample.metacool", "assembly.fa.gz", "mags")
 metacooler.flatten("sample.metacool", output="flat.cool")
 metacooler.aggregate("sample.metacool", output="genome_level.cool", level="genome")
 metacooler.network("sample.metacool", out="genome_network.tsv", level="genome")

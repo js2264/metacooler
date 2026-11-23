@@ -21,7 +21,7 @@ A few conventions hold across the whole CLI:
 | `-v, --verbose` | Enable debug logging. Available on every command. |
 | `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
-| `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `collect`, `extract`, `dump`, and `show`. |
+| `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `collect`, `extract`, `fasta`, `dump`, and `show`. |
 
 !!! warning "A bare `.mmetacool` path is rejected"
     A `.mmetacool` file is a *collection*, not a single contact map. Every
@@ -74,7 +74,7 @@ conditions at once.
 
 | Part | Values |
 |------|--------|
-| `<table>` | `genomes` or `contigs`. **Always required** — both tables have a `length` and a `genome`. |
+| `<table>` | `genomes` or `contigs` — and `clusters`, the clusters of a clustering round, for [`fasta --round`](#fasta) only. **Always required** — the tables share column names (`length`, `genome`). |
 | `<column>` | Any column of that table as `dump -H` prints it — `contigs.contig`, `contigs.genome`, `genomes.genome`, `length`, … — including the extra ones your `--contigs`/`--genomes` metadata tables added (run `dump -t genomes -H` to see them). Names with spaces, dashes, or dots need no quoting: `genomes.Present Markers >= 50`. |
 | `<op>` | `>` `>=` `<` `<=` `==` `!=`, plus `=~` / `!~` for a regular-expression match. A lone `=` means `==`. |
 | `<value>` | A number — plain (`1000000`), scientific (`1e6`), underscored (`1_000_000`), or with a size suffix (`10kb`, `2.5Mb`, `1Gb`, case-insensitive) — or, for `==`/`!=`/`=~`, free text. |
@@ -1483,6 +1483,92 @@ metacooler extract gut_T0.metacool --genomes MAG_01,MAG_02 --split -o split
 
 # Every MAG over 1 Mb, one file each — no need to name them
 metacooler extract gut_T0.metacool --filter "genomes.length > 1Mb" --split -o big
+```
+
+### `fasta` { #fasta }
+
+Write the contig sequences of each genome — or of each cluster of a clustering
+round — as FASTA, from the assembly the map was made from. **API:**
+`metacooler.write_fasta` (`metacooler.io.fasta.write_fasta`).
+
+```console
+metacooler fasta METACOOL_PATH --fasta ASSEMBLY -o OUT_DIR [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--fasta` | *required* | The assembly the map was made from: FASTA, plain or compressed with gzip (or bgzip), or a pipe (`<(zcat assembly.fa.gz)`). Every contig written must be in it, once, with the map's length: otherwise nothing is written, and the error names them. Nothing is written next to it. |
+| `-o, --output` | *required* | Directory to write one `<name>.fa` into per genome or cluster; its other files are left alone. With `--single-file`, the FASTA file to write. Created if missing. |
+| `--genomes` | every genome but `__unbinned__` | Genome name(s) to write; with `--round`, cluster name(s) of that round. |
+| `--filter` | — | Narrow the selection (see [Filtering with `--filter`](#filter)): `genomes.<column>` selects genomes, `contigs.<column>` the contigs written; with `--round`, `clusters.<column>` selects clusters, over the round's table as `dump -t clusters` prints it (its tool's columns, `length`, `n_contigs`, `genome`, …). |
+| `--round` | — | Write the clusters of this clustering round of [`/clusters`](format.md#clusters) (metaTOR's `overlapping`, `recursive_<k>`, `final`, `mge`, …) instead of the genomes. |
+| `--unbinned` | off | Also write the contigs in no genome (in no cluster of `--round`) as `__unbinned__`, last, as they are, in map order, even with `--stitch`. Only `contigs.` filters narrow them. |
+| `--stitch` | off | One record per genome or cluster, named after it: its contigs' bases, longest first (contigs of one length in map order), joined by `--spacer` N, wrapped at 80 columns. |
+| `--spacer` | `100` | Number of N between two stitched contigs; only with `--stitch`. |
+| `--single-file` | off | Every record in one FASTA file, `-o`: a contig record's header line becomes `<genome>\|<header line>`; a stitched record keeps its genome's or cluster's name. |
+| `--temp-dir` | system temp (`TMPDIR`) | Where a gzip-compressed or piped assembly is copied, plain, before it is read; created if missing. It needs room for the whole assembly, decompressed. |
+| `-f, --force` | off | Overwrite the output files that exist. The map and the assembly are never outputs, even with `-f`. |
+| `-v, --verbose` / `-q, --quiet` | off | Debug logging / suppress INFO logging. |
+
+**The records.** By default each contig's record is copied byte for byte: its
+header line, description included, and its line breaks, as they are in the
+assembly, so a tool that wrote its FASTA files record by record from the same
+assembly gets the same bytes. A genome's or a cluster's contigs come in map
+order (the rows of `/contigs`); the unbinned contigs come last. A stitched
+record takes them longest first instead, contigs of one length in map order:
+a cluster may span genomes (metaTOR's `mge` round does), and their order in
+the map follows the current assignment. The last record of an assembly that
+ends without a line break gets one.
+
+**Names and lengths.** A record's name is its header up to the first
+whitespace, past any space after the `>` (`> c1 desc` is `c1`), as `create`
+and metaTOR read it. A contig is the map's when the map's length counts its
+sequence as the tool that made the map did: every byte but the line breaks (as
+`create --fasta` counts it, through pyfaidx: a trailing space is a base), or
+its bases alone. A stitched record holds the bases alone.
+
+**What is checked, and when.** The map is read first, to select the genomes or
+clusters. Then the outputs are checked: names that cannot be file names (`..`,
+a `/`) or that would name one file where case is ignored (`Bin` and `bin`, on
+macOS or Windows) ask for `--single-file`; a name with whitespace cannot name
+a record with `--stitch` or `--single-file`; the existing `<name>.fa` files are
+refused without `-f`, all of them at once (the error counts them and names the
+first five) — a symbolic link there, even a dangling one, is one: `-f` replaces
+the link, never its target. Then the assembly is read, and every contig to
+write checked. Nothing is written before all of that passes. Every file is
+then written to a temporary file beside it (`.fasta-*.tmp`), and once all of
+them are written, each is renamed over its destination: a failure while
+writing (a full disk, Ctrl-C) leaves no new file and every existing one as it
+was; only a failure between two renames could leave the set half updated.
+
+Each run reads the whole assembly once, and copies a compressed or piped one
+first: from Python, give every group of a run to one `write_fasta` call.
+
+```bash
+# One file per MAG, the contigs as they are
+metacooler fasta gut_T0.metacool --fasta assembly.fa.gz -o mags
+
+# The MAGs above 90 % completeness, each as one stitched sequence
+metacooler fasta gut_T0.metacool --fasta assembly.fa.gz -o complete \
+    --filter "genomes.Completeness >= 90" --stitch
+
+# metaTOR's final clusters and the contigs left out of them, in one file
+metacooler fasta gut_T0.metacool --fasta assembly.fa.gz -o final.fa \
+    --round final --unbinned --single-file
+```
+
+From Python, `groups` writes groups of contigs that the map does not hold yet,
+each in the order given, stitched too:
+
+```python
+import metacooler
+
+metacooler.write_fasta(
+    "gut_T0.metacool",
+    "assembly.fa.gz",
+    "bins",
+    groups={"bin_1": ["NODE_12", "NODE_3"], "bin_2": ["NODE_7"]},
+)
 ```
 
 ### `flatten` { #flatten }
