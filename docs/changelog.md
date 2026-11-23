@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-11-23
+
 ### Added
 
 - **Locked, staged in-place writes.** Every edit of a map in place — `annotate
