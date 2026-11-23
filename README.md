@@ -37,6 +37,12 @@ metacooler qc output.metacool --table
 metacooler ps output.metacool --pairs contacts.pairs --by genome --plot ps.png
 ```
 
+Already have one `.cool` file per genome? `collect` zips them into a single metacool file, one genome per input:
+
+``` console
+metacooler collect E_coli.cool B_subtilis.cool S_aureus.cool -o species.metacool
+```
+
 Every command takes its input as a positional path (or an `file.mmetacool::entries/<name>` URI), and shares `-o/--output`, `-f/--force`, `-v/--verbose`, and `-q/--quiet`.
 
                                                                                     
@@ -45,37 +51,51 @@ Every command takes its input as a positional path (or an `file.mmetacool::entri
      Create a metacool file from pairs and contig assignments.                      
                                                                                     
     ╭─ Options ────────────────────────────────────────────────────────────────────╮
-    │ *  --pairs                   Pairs file (plain text or gzipped). [required]  │
+    │ *  --pairs                   Pairs file: plain text, or compressed with      │
+    │                              gzip, bgzip, bzip2, zstd or lz4, read from its  │
+    │                              content. Repeat the option to read several      │
+    │                              files — one per Hi-C library of the same        │
+    │                              assembly — in one pass, as if concatenated:     │
+    │                              their contacts are summed, and the QC block,    │
+    │                              the P(s) table and the dropped-pairs report     │
+    │                              cover them all. Not comma-split: a path may     │
+    │                              contain a comma. [required]                     │
     │ *  --bins                    BED file of bins (without column names), or an  │
     │                              integer bin size in bp (e.g. 1000). If an       │
     │                              integer, contig lengths must be available from  │
     │                              the pairs header or a --fasta should be         │
     │                              provided. [required]                            │
     │ *  --output              -o  Output .metacool file path. [required]          │
-    │ *  --contigs                 Contig-to-genome assignment table. The expected │
-    │                              layout depends on --contigs-format. [required]  │
-    │    --contigs-format          Format of the contig assignment table. Four     │
-    │                              formats are supported: [default: contigs]       │
-    │                              - contigs: TSV with a header row. Column 1 must │
-    │                              be named `contig_name` and column 2             │
-    │                              `genome_name`. Additional columns are stored    │
-    │                              verbatim.                                       │
-    │                              - contig_genome: Two-column TSV                 │
-    │                              (`contig<TAB>genome`) with no header. First     │
-    │                              value is contig name, second is genome          │
-    │                              assignment.                                     │
-    │                              - metator: MetaTOR output table (ie             │
-    │                              `contig_data_final.txt`). Expects a header with │
-    │                              columns `Name` (contig) and `Final_bin`         │
-    │                              (genome). Other columns ignored.                │
-    │                              - I,J(,noheader): Column-index spec (1-based).  │
-    │                              Use column `I` for contigs and `J` for genomes. │
-    │                              Header expected by default. Append `,noheader`  │
-    │                              (e.g., `1,5,noheader`) to treat the first row   │
-    │                              as data.                                        │
-    │    --genomes                 Optional genomes metadata table with header.    │
-    │                              First column must be 'genome_name'; any further │
-    │                              columns are stored in the /genomes table.       │
+    │    --contigs                 Contig-to-genome assignment table; which        │
+    │                              columns hold the names is set by                │
+    │                              --contigs-format. Leave it out to build a map   │
+    │                              with no binning yet: every contig in            │
+    │                              __unbinned__, to be binned later with reassign. │
+    │    --contigs-format          Which columns of the --contigs table hold the   │
+    │                              contig and the genome names: CONTIG,GENOME,     │
+    │                              each a 1-based position or a header name — e.g. │
+    │                              2,5 or Name,Final_cluster — plus ,noheader when │
+    │                              the table has no header line. NA as the genome  │
+    │                              column (1,NA,noheader, contig_name,NA) says the │
+    │                              table assigns no genome: create bins nothing    │
+    │                              yet (every contig in __unbinned__), reassign    │
+    │                              unbins the contigs it lists. [default: contigs] │
+    │                              Aliases for the tables of common binners:       │
+    │                              contigs (contig_name,genome_name),              │
+    │                              contig_genome (1,2,noheader), metator           │
+    │                              (Name,Final_cluster; Final_bin if the table has │
+    │                              no Final_cluster), dastool (1,2,noheader),      │
+    │                              binette (1,2,noheader), semibin (contig,bin),   │
+    │                              vamb (contigname,clustername).                  │
+    │    --genomes                 Optional genomes metadata table. Its            │
+    │                              genome-name column (see --genomes-format) is    │
+    │                              matched against the genomes; every other column │
+    │                              is stored in the /genomes table.                │
+    │    --genomes-format          Which column of the --genomes table holds the   │
+    │                              genome names: a 1-based position or a header    │
+    │                              name — e.g. Name (CheckM2) or user_genome       │
+    │                              (GTDB-Tk) — plus ,noheader when the table has   │
+    │                              no header line. [default: genome_name]          │
     │    --filter                  Keep only rows matching <table>.<column> <op>   │
     │                              <value>, where <table> is genomes or contigs —  │
     │                              e.g. --filter 'genomes.length > 1Mb'.           │
@@ -87,11 +107,14 @@ Every command takes its input as a positional path (or an `file.mmetacool::entri
     │                              to ingest into the file.                        │
     │    --qc/--no-qc              Tally contact-quality statistics during         │
     │                              creation and store them in metadata.qc and the  │
-    │                              /genomes qc_* columns. Read them back with      │
-    │                              metacooler qc. [default: qc]                    │
+    │                              qc_* columns of /genomes and /contigs. Read     │
+    │                              them back with metacooler qc. [default: qc]     │
     │    --qc-threshold            Distance splitting short- from long-range       │
-    │                              intra-contig signal. Accepts bp/kb/Mb/Gb        │
-    │                              suffixes. [default: 10000]                      │
+    │                              intra-contig contacts, measured between read    │
+    │                              positions: long-range from this distance on.    │
+    │                              The default counts as long-range the pairs more │
+    │                              than 1 kb apart, as MetaTOR's mge does. Accepts │
+    │                              bp/kb/Mb/Gb suffixes. [default: 1001]           │
     │    --force               -f  Overwrite output file if it already exists.     │
     │    --verbose             -v  Increase verbosity (debug logging).             │
     │    --quiet               -q  Suppress informational logging (warnings and    │
@@ -119,6 +142,11 @@ Every command takes its input as a positional path (or an `file.mmetacool::entri
     │                              scales with contig count, so smaller chunks     │
     │                              cost disproportionately more. [default:         │
     │                              50000000]                                       │
+    │    --nproc                   Threads binning pairs while the file is read    │
+    │                              and decompressed (which stays on one thread).   │
+    │                              The output is identical whatever the value;     │
+    │                              each thread holds one more batch of pairs in    │
+    │                              memory. [default: 1]                            │
     │    --ps/--no-ps              Accumulate a per-MAG P(s) curve from the same   │
     │                              pass over the pairs and write it beside the     │
     │                              output as <output>.ps.tsv. Measured on read     │
@@ -237,10 +265,13 @@ assembly:
 - **Metacool identity**: `metacooler-format="HDF5::MetaCooler"` attribute + `genomes/` group
 - **Implement genomes table**: `name`, `length`, `n_contigs`, `n_bins`, plus optional metadata columns
 - **Support multi-contigs and multi-genomes visualization**: `show` command at `--level bin/contig/genome`
+- **Normalize metagenome-aware**: `normalize ice` (balancing genome by genome), `normcc` (MetaCC) and `hiczin` (HiCzin) store cooler-style weights in `/bins`, beside those any other tool stores with `metacooler.store_weights`; `show`/`dump`/`network --balance` read them, and so does cooler itself
 - **Report contact quality**: the 3D ratio and its intra-contig / intra-MAG / inter-MAG breakdown, tallied at creation time into `metadata.qc` and per-MAG `/genomes` columns, recomputable with `qc`
 - **Export P(s)**: contact probability vs genomic distance, pooled or per MAG, as a table and a log-log plot (`ps`). `create pairs` writes the per-MAG curve at base-pair resolution beside the output as `<output>.ps.tsv`
 - **Cooler compatibility**: soft link `chroms → contigs`, `format="HDF5::Cooler"`, standard `indexes/chrom_offset`
-- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool`)
+- **Canonical contig ordering**: configurable (`genome-then-length`, `genome-then-alpha`, `fasta`, `alpha`; `cool` for `create cool` and `collect`)
+- **Export sequences**: `fasta` writes the contigs of each genome, or of each cluster of a clustering round, from the assembly: each record as it is, or stitched into one sequence per genome
+- **Collect single-genome maps**: `collect` stacks one `.cool` per genome into a metacool file, renaming contigs `<genome>__<contig>` so shared names cannot collide
 - **Unassigned contigs**: default to `__unbinned__` genome
 - **Re-attributable bins**: `reassign` swaps in a new contig-to-genome table on an existing file — the `/genomes` table and the contig layout are rebuilt, the contacts are not recomputed
 - **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection
@@ -254,4 +285,4 @@ uv run bump-my-version bump minor   # or patch / major
 git push --follow-tags
 ```
 
-[`bump-my-version`](https://github.com/callowayproject/bump-my-version) (configured in `pyproject.toml`) promotes `## Unreleased` to a dated `## X.Y.Z - YYYY-MM-DD` section, bumps `__version__` in `src/metacooler/_version.py` — the single source of truth for the package version — and commits and tags the result, all in one step. Pushing the tag triggers [`release.yml`](.github/workflows/release.yml): it builds the sdist/wheel, fails if the tag doesn’t match `__version__`, publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no stored token), and opens a GitHub release with that version’s changelog section and the built artifacts attached. [`docs.yml`](.github/workflows/docs.yml) redeploys the documentation site on the same tag.
+[`bump-my-version`](https://github.com/callowayproject/bump-my-version) (configured in `pyproject.toml`) promotes `## Unreleased` to a dated `## X.Y.Z - YYYY-MM-DD` section, bumps `__version__` in `src/metacooler/_version.py` — the single source of truth for the package version — and commits and tags the result, all in one step. Pushing the tag triggers [`release.yml`](.github/workflows/release.yml): it builds the sdist/wheel, fails if the tag doesn’t match `__version__`, publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no stored token), and opens a GitHub release with that version’s changelog section and the built artifacts attached. The documentation site is redeployed by [`docs.yml`](.github/workflows/docs.yml) from `devel`’s push of the release commit, not from the tag, which the `github-pages` environment refuses.
