@@ -27,6 +27,15 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     help="Aggregation level for the network.",
 )
 @click.option(
+    "--ids",
+    is_flag=True,
+    help=(
+        "Give each contig or genome as its id, its row in "
+        "[cyan]/contigs[/cyan] or [cyan]/genomes[/cyan], instead of its name. "
+        "At [cyan]--level bin[/cyan] the nodes are bin ids already."
+    ),
+)
+@click.option(
     "--weight",
     type=str,
     default="count",
@@ -77,6 +86,7 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
 def cmd_network(
     metacool_path: str,
     level: str,
+    ids: bool,
     weight: str,
     output: Path | None,
     header: bool,
@@ -92,8 +102,8 @@ def cmd_network(
     \b
     Columns: node1, node2, value
     At --level bin: raw pixel pairs.
-    At --level contig: aggregated by contig pairs.
-    At --level genome: aggregated by genome pairs.
+    At --level contig: aggregated by contig pairs (contig ids with --ids).
+    At --level genome: aggregated by genome pairs (genome ids with --ids).
     """
     import sys
 
@@ -116,4 +126,5 @@ def cmd_network(
         force=force,
         balance=balance,
         drop_spurious=drop_spurious,
+        ids=ids,
     )

@@ -8,8 +8,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from _edges import assert_ids_name
 
+from metacooler.api import MetaCooler
 from metacooler.io.network import network
+
+DATA = Path(__file__).parent / "data"
 
 
 class TestNetwork:
@@ -290,3 +294,118 @@ class TestNetwork:
             parts = line.split("\t")
             assert parts[0].isdigit(), f"Expected integer bin ID, got: {parts[0]}"
             assert parts[1].isdigit(), f"Expected integer bin ID, got: {parts[1]}"
+
+
+class TestNetworkIds:
+    """``ids=True``: each contig or genome as its row in ``/contigs`` or
+    ``/genomes``, the rows of the names in their order, summed without a
+    name."""
+
+    @pytest.mark.parametrize("level", ["contig", "genome"])
+    @pytest.mark.parametrize("chunksize", [100, 50_000_000])
+    def test_ids_name_back_to_the_names(self, level, chunksize):
+        """Named through ``/contigs`` or ``/genomes``, the ids are the names:
+        same rows, same order, same values, on a map whose contigs and
+        genomes are not in name order (folds included at 100 pixels a chunk)."""
+        path = DATA / "assembly_1_rep1_1kb.metacool"
+        mc = MetaCooler(path)
+        table = mc.contigs if level == "contig" else mc.genomes
+        assert table["name"].tolist() != sorted(table["name"])
+        by_name = network(path, level=level, chunksize=chunksize)
+        by_id = network(path, level=level, chunksize=chunksize, ids=True)
+        assert by_name is not None and by_id is not None
+        assert len(by_id) > len(table)  # pairs, not only self-contacts
+        assert_ids_name(by_id, by_name, table["name"])
+
+    @pytest.mark.parametrize("level", ["contig", "genome"])
+    def test_ids_on_the_tiny_map(self, tiny_metacooler: Path, level):
+        mc = MetaCooler(tiny_metacooler)
+        table = mc.contigs if level == "contig" else mc.genomes
+        by_id = network(tiny_metacooler, level=level, ids=True)
+        by_name = network(tiny_metacooler, level=level)
+        assert by_id is not None and by_name is not None
+        assert_ids_name(by_id, by_name, table["name"])
+        assert (by_id["node1"] <= by_id["node2"]).all()
+        assert int(by_id["value"].sum()) == int(mc.pixels()["count"].sum())
+
+    def test_ids_change_nothing_at_bin_level(self, tiny_metacooler: Path, tmp_path):
+        """Bin-level nodes are bin ids already: the same frame, the same file."""
+        by_id = network(tiny_metacooler, level="bin", ids=True)
+        by_name = network(tiny_metacooler, level="bin")
+        assert by_id is not None and by_name is not None
+        pd.testing.assert_frame_equal(by_id, by_name)
+        ids_out, names_out = tmp_path / "ids.tsv", tmp_path / "names.tsv"
+        network(tiny_metacooler, level="bin", ids=True, out=ids_out, header=True)
+        network(tiny_metacooler, level="bin", out=names_out, header=True)
+        assert ids_out.read_bytes() == names_out.read_bytes()
+
+    @pytest.mark.parametrize("level", ["contig", "genome"])
+    def test_ids_written_to_a_path_or_a_stream(self, tmp_path: Path, level):
+        """``out=`` gets the ids the call returns, header included, the
+        stream left open."""
+        path = DATA / "assembly_1_rep1_1kb.metacool"
+        by_id = network(path, level=level, ids=True)
+        assert by_id is not None
+        out = tmp_path / "edges.tsv"
+        assert network(path, level=level, ids=True, out=out, header=True) is None
+        written = pd.read_csv(out, sep="\t")
+        pd.testing.assert_frame_equal(written, by_id)
+        stream = io.StringIO()
+        assert network(path, level=level, ids=True, out=stream, header=True) is None
+        assert not stream.closed
+        assert stream.getvalue() == out.read_text()
+        bare = tmp_path / "bare.tsv"
+        network(path, level=level, ids=True, out=bare)
+        assert bare.read_text() == out.read_text().split("\n", 1)[1]
+
+    def test_ids_refuse_what_names_refuse(self, tiny_metacooler: Path):
+        with pytest.raises(ValueError, match="level must be"):
+            network(tiny_metacooler, level="node", ids=True)  # type: ignore
+        with pytest.raises(ValueError, match="not found"):
+            network(tiny_metacooler, weight="nonexistent", ids=True)
+
+    def test_ids_read_no_name(self, tiny_metacooler: Path, monkeypatch):
+        """Without names to give, network reads neither ``/contigs`` nor
+        ``/genomes`` as a table, nor the bin table: a bin's contig comes from
+        ``chrom_offset``, a contig's genome from ``/contigs/genome_id``."""
+        levels = ("contig", "genome")
+        expected = [network(tiny_metacooler, level=level, ids=True) for level in levels]
+
+        def refuse(self, *args, **kwargs):
+            raise AssertionError("network(ids=True) read a table it does not need")
+
+        monkeypatch.setattr(MetaCooler, "contigs", property(refuse))
+        monkeypatch.setattr(MetaCooler, "genomes", property(refuse))
+        monkeypatch.setattr(MetaCooler, "bins", refuse)
+        for level, edges in zip(levels, expected, strict=True):
+            got = network(tiny_metacooler, level=level, ids=True)
+            assert got is not None and edges is not None
+            pd.testing.assert_frame_equal(got, edges)
+        with pytest.raises(AssertionError, match="does not need"):
+            network(tiny_metacooler, level="contig")
+
+    def test_ids_of_an_empty_map(self, tmp_path: Path):
+        """A map without a pixel has no edge, its node columns ``int64``."""
+        from metacooler.io.create import from_pairs
+
+        bins = tmp_path / "bins.bed"
+        bins.write_text("c1\t0\t1000\n")
+        pairs = tmp_path / "empty.pairs"
+        pairs.write_text("#columns: readID chrom1 pos1 chrom2 pos2\n")
+        empty = tmp_path / "empty.metacool"
+        from_pairs(uri=empty, bins=bins, pairs=pairs)
+        for level in ("contig", "genome"):
+            edges = network(empty, level=level, ids=True)
+            assert edges is not None and edges.empty
+            assert edges.dtypes.to_dict() == {
+                "node1": np.int64,
+                "node2": np.int64,
+                "value": np.int64,
+            }
+            out = tmp_path / f"{level}.tsv"
+            network(empty, level=level, ids=True, out=out, header=True)
+            assert out.read_text() == "node1\tnode2\tvalue\n"
+        by_id = network(empty, level="bin", ids=True)
+        by_name = network(empty, level="bin")
+        assert by_id is not None and by_name is not None
+        pd.testing.assert_frame_equal(by_id, by_name)

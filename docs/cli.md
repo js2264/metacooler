@@ -1693,6 +1693,7 @@ metacooler network METACOOL_PATH --level LEVEL [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--level` | `contig` | Aggregation level: `bin`, `contig`, or `genome` (singular — not `bins`/`contigs`/`genomes`). |
+| `--ids` | off | Write each contig or genome as its id instead of its name: its row in `/contigs` or `/genomes`, counted from 0 (the order in which `dump -t contigs` and `dump -t genomes` list them). The same edges, in the same order. An id is a row of this map, which a `reassign` may renumber. At `--level bin` the nodes are bin ids already, and `--ids` changes nothing. |
 | `--weight` | `count` | Pixel column used as edge weight. |
 | `-o, --output` | stdout | Output TSV file. |
 | `--header` | off | Write a `node1  node2  value` header line. |
@@ -1719,6 +1720,13 @@ chunk. Before metacooler 0.4.0, `network` without `out` printed the edges;
 `out=sys.stdout` still does. A map without a pixel gives an empty table with the
 dtypes of any other.
 
+With `ids=True` (`--ids`), `node1` and `node2` are the contigs' or genomes'
+ids instead of their names: their rows in `MetaCooler.contigs` or
+`MetaCooler.genomes`, as `int64` (the type of the bin ids at bin level). The
+rows and their order are those of the names, and the edges are summed by id
+either way: a tool that works in ids, as metaTOR does, gets them without a name
+built for every edge, nor read back to an id.
+
 ```python
 import metacooler
 
@@ -1726,6 +1734,10 @@ edges = metacooler.network("gut_T0.metacool", level="contig")
 hits = edges.groupby("node1")["value"].sum().add(
     edges.groupby("node2")["value"].sum(), fill_value=0
 )  # each contig's contacts, a contact with itself counted twice
+
+by_id = metacooler.network("gut_T0.metacool", level="contig", ids=True)
+names = metacooler.MetaCooler("gut_T0.metacool").contigs["name"].to_numpy()
+names[by_id["node1"]]  # edges["node1"], row for row
 ```
 
 ### `aggregate` { #aggregate }

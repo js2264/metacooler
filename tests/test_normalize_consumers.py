@@ -10,6 +10,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import pytest
+from _edges import assert_ids_name
 from _metahic import MetaHiC, make_metahic
 from numpy.testing import assert_allclose, assert_array_equal
 
@@ -236,6 +237,80 @@ def test_network_with_every_bin_masked(tmp_path: Path, mapfile: Path):
     assert out.read_text() == ""
 
 
+@pytest.mark.parametrize("level", ["contig", "genome"])
+@pytest.mark.parametrize(
+    ("balance", "drop_spurious"),
+    [
+        ("empirical_hit", False),
+        ("abundance", False),
+        ("weight", False),
+        ("normcc", False),
+        ("normcc", True),
+    ],
+)
+def test_network_ids_balanced_are_the_names(
+    mapfile: Path, level, balance, drop_spurious
+):
+    """Normalized, spurious pairs dropped or not, the ids are the names'
+    edges, row for row and bit for bit."""
+    mc = MetaCooler(mapfile)
+    table = mc.contigs if level == "contig" else mc.genomes
+    kwargs = {"level": level, "balance": balance, "drop_spurious": drop_spurious}
+    by_name = network(mapfile, **kwargs)
+    by_id = network(mapfile, ids=True, **kwargs)
+    assert by_id is not None and by_name is not None
+    assert by_id["value"].dtype == np.float64
+    assert len(by_id)
+    assert_ids_name(by_id, by_name, table["name"])
+    if drop_spurious and level == "contig":
+        found = W.spurious_cutoff(mc, balance)
+        assert found is not None
+        inter = by_id[by_id["node1"] != by_id["node2"]]
+        assert (inter["value"] >= found[0]).all()
+        every = network(mapfile, level=level, balance=balance)
+        assert every is not None and len(by_id) < len(every)
+
+
+def test_network_ids_balanced_written(tmp_path: Path, mapfile: Path):
+    """``out=`` gets the normalized edges in ids, as the call returns them."""
+    edges = network(mapfile, balance="normcc", drop_spurious=True, ids=True)
+    out = tmp_path / "edges.tsv"
+    network(
+        mapfile, balance="normcc", drop_spurious=True, ids=True, out=out, header=True
+    )
+    written = _read_tsv(out)
+    assert edges is not None
+    assert_array_equal(written["node1"], edges["node1"])
+    assert_array_equal(written["node2"], edges["node2"])
+    assert_allclose(written["value"], edges["value"])
+
+
+def test_network_ids_with_every_bin_masked(mapfile: Path):
+    """Every pixel left out, there is no edge, its columns typed: ids
+    ``int64``, normalized values ``float64``."""
+    n = len(MetaCooler(mapfile).bins())
+    W.store_weights(
+        mapfile,
+        "masked",
+        np.full(n, np.nan),
+        method="x",
+        depends_on=["pixels"],
+        parameters={"spurious_cutoff": 1.0},
+    )
+    typed = {"node1": np.int64, "node2": np.int64, "value": np.float64}
+    for level in ("contig", "genome"):
+        for drop_spurious in (False, True):
+            edges = network(
+                mapfile,
+                level=level,
+                balance="masked",
+                drop_spurious=drop_spurious,
+                ids=True,
+            )
+            assert edges is not None and edges.empty
+            assert edges.dtypes.to_dict() == typed
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error", "match"),
     [
@@ -251,6 +326,12 @@ def test_network_with_every_bin_masked(tmp_path: Path, mapfile: Path):
             "no spurious-contact cutoff",
         ),
         ({"balance": "nope"}, KeyError, "No weight column"),
+        (
+            {"balance": "normcc", "drop_spurious": True, "level": "bin", "ids": True},
+            ValueError,
+            "contig pairs",
+        ),
+        ({"balance": "nope", "ids": True}, KeyError, "No weight column"),
     ],
 )
 def test_network_refuses(mapfile: Path, kwargs, error, match):
