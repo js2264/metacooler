@@ -81,6 +81,7 @@ def small_batches(monkeypatch):
 
 @pytest.mark.usefixtures("small_batches")
 @pytest.mark.parametrize("sort_in_memory", [True, False])
+@pytest.mark.parametrize("one_bin_per_contig", [False, True])
 def test_create_pairs_nproc_is_invisible(
     tmp_path: Path,
     tiny_bins_bed: Path,
@@ -89,6 +90,7 @@ def test_create_pairs_nproc_is_invisible(
     tiny_pairs: Path,
     caplog,
     sort_in_memory: bool,
+    one_bin_per_contig: bool,
 ):
     # Unknown contigs and out-of-range positions scattered across batches.
     lines = tiny_pairs.read_text().splitlines(keepends=True)
@@ -108,7 +110,7 @@ def test_create_pairs_nproc_is_invisible(
         with caplog.at_level(logging.WARNING, logger="metacooler"):
             from_pairs(
                 uri=out,
-                bins=tiny_bins_bed,
+                bins=None if one_bin_per_contig else tiny_bins_bed,
                 pairs=pairs,
                 contig_genome_map=tiny_contigs_table,
                 contig_table_format="contigs",

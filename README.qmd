@@ -69,6 +69,7 @@ Every command takes its input as a positional path (or an
   - Can be generated from a FASTA assembly with `cooler makebins` to get fixed-size bins
   - Can be generated from a FASTA assembly with `cooler digest` to get restriction fragments.
   - Otherwise an arbitrary resolution can be used by specifying `--bins 1000` for 1kb bins, etc.
+  - Without `--bins`, every contig is one bin: the map of contigs a contig binner such as MetaTOR reads.
 
 ```{python}
 #| echo: false

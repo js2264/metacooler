@@ -6,6 +6,8 @@ Covers:
 - ``--genomes`` validation: valid table, missing ``genome_name`` column, no header
 - ``--assembly-name`` stored in HDF5 attrs
 - ``--chunksize`` / ``--nproc`` do not cause errors (pairs only)
+- ``create pairs`` without ``--bins``: one bin per contig, as ``cooler cload
+  pairs`` bins over a BED of the contigs
 - Bins + pixel correctness: ``create pairs --contig-order fasta`` matches
   ``cooler cload pairs``, for fixed-width and digest (variable-width) bins,
   across every chunking and sort path
@@ -13,17 +15,26 @@ Covers:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
 import h5py
 import pandas as pd
 import pytest
+from _cli_output import flat
 from click.testing import CliRunner
 from numpy.testing import assert_array_equal
 
 from metacooler.api import MetaCooler
 from metacooler.cli.main import cli
+
+# cooler's CLI, next to the interpreter (see tests/test_cooler_compat.py).
+_COOLER = shutil.which("cooler", path=str(Path(sys.executable).parent)) or str(
+    Path(sys.executable).parent / "cooler"
+)
 
 
 @pytest.fixture
@@ -659,6 +670,87 @@ class TestCreatePairsBinsAsInteger:
         )
         assert result.exit_code == 0, result.output
         assert out.exists()
+
+
+class TestCreatePairsOneBinPerContig:
+    """Without ``--bins``, ``create pairs`` makes one bin per contig."""
+
+    DATA = Path("tests/data")
+
+    @pytest.mark.parametrize("nproc", ["1", "2"])
+    def test_matches_cooler_cload_of_contigs(self, runner, tmp_path, nproc):
+        """Bins and pixels equal ``cooler cload pairs`` over one bin per contig.
+
+        The contig lengths come from the pairs header: no ``--fasta``.
+        """
+        sizes = pd.read_csv(
+            self.DATA / "assembly_1.chrom.sizes",
+            sep="\t",
+            header=None,
+            names=["chrom", "end"],
+        )
+        bed = tmp_path / "contigs.bed"
+        sizes.assign(start=0)[["chrom", "start", "end"]].to_csv(
+            bed, sep="\t", header=False, index=False
+        )
+        pairs = self.DATA / "contacts_1_rep1.pairs.gz"
+        reference = tmp_path / "contigs.cool"
+        # cooler's own CLI: a third-party tool, so a subprocess.
+        cload = subprocess.run(
+            [_COOLER, "cload", "pairs", "-c1", "2", "-p1", "3", "-c2", "4", "-p2", "5"]
+            + [str(bed), str(pairs), str(reference)],
+            capture_output=True,
+            text=True,
+        )
+        assert cload.returncode == 0, cload.stderr
+
+        out = tmp_path / "contigs.metacool"
+        result = runner.invoke(
+            cli,
+            ["create", "pairs", "--output", str(out), "--pairs", str(pairs)]
+            + ["--contig-order", "fasta", "--no-ps", "--nproc", nproc],
+        )
+        assert result.exit_code == 0, result.output
+
+        import cooler
+
+        ref, got = cooler.Cooler(str(reference)), cooler.Cooler(str(out))
+        cols = ["chrom", "start", "end"]
+        bins_ref = ref.bins()[:][cols].astype({"chrom": str})
+        bins_got = got.bins()[:][cols].astype({"chrom": str})
+        pd.testing.assert_frame_equal(bins_ref, bins_got)
+        assert len(bins_got) == len(sizes)
+        pix_ref = cast(pd.DataFrame, ref.pixels()[:])
+        pix_got = cast(pd.DataFrame, got.pixels()[:])
+        pd.testing.assert_frame_equal(pix_ref, pix_got)
+        assert pix_got["count"].sum() > 0
+
+    def test_with_contigs_and_fasta(
+        self, runner, tmp_path, tiny_pairs, tiny_fasta, tiny_contigs_table
+    ):
+        out = tmp_path / "out.metacool"
+        result = runner.invoke(
+            cli,
+            ["create", "pairs", "--output", str(out), "--pairs", str(tiny_pairs)]
+            + ["--fasta", str(tiny_fasta), "--contigs", str(tiny_contigs_table)]
+            + ["--no-ps"],
+        )
+        assert result.exit_code == 0, result.output
+        mc = MetaCooler(str(out))
+        assert mc.binsize is None
+        assert len(mc.bins()) == len(mc.contigs) == 4
+        assert mc.genomes["n_bins"].tolist() == mc.genomes["n_contigs"].tolist()
+
+    def test_needs_contig_lengths(self, runner, tmp_path, tiny_pairs):
+        """No ``#chromsize`` lines and no ``--fasta``: nothing to tile."""
+        out = tmp_path / "out.metacool"
+        result = runner.invoke(
+            cli,
+            ["create", "pairs", "--output", str(out), "--pairs", str(tiny_pairs)],
+        )
+        assert result.exit_code != 0
+        assert "Contig lengths required" in flat(result.output)
+        assert not out.exists()
 
 
 # ===========================================================================

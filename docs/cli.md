@@ -161,18 +161,18 @@ genome each ([`collect`](#collect)).
 
 ### `create pairs` { #create-pairs }
 
-Create a `.metacool` file from one or more 4DN pairs files, a set of bins, and
-a contig-to-genome assignment table. **API:** `metacooler.from_pairs`
-(`metacooler.io.create.from_pairs`).
+Create a `.metacool` file from one or more 4DN pairs files, a set of bins (one
+per contig by default), and a contig-to-genome assignment table. **API:**
+`metacooler.from_pairs` (`metacooler.io.create.from_pairs`).
 
 ```console
-metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT.metacool [OPTIONS]
+metacooler create pairs --pairs P [--pairs P2 ...] [--bins B] [--contigs C] -o OUT.metacool [OPTIONS]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--pairs` | *required* | Pairs file, plain text or compressed with gzip, bgzip, bzip2, zstd or lz4: the compression is read from the file's first bytes, whatever its name (a zip archive, an xz file or a legacy LZ4 file is refused). A blank line inside the `#` header is allowed, and so are header lines below it, such as those of pairs files concatenated with `cat`, whose `#chromsize` lines must agree with the top header's (see [the guide](guides/from-pairs.md)). **Repeatable**: give one `--pairs` per Hi-C library of the same assembly and they are read back to back, in the given order, in one pass — see [Several libraries](#create-pairs-libraries). Not comma-split, since a path may contain a comma. A pair with an end on an unknown contig, with an empty position, or at or past its contig's end is dropped and counted, and a summary is logged; `metadata.qc.n_pairs_discarded` records the total. |
-| `--bins` | *required* | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. For an integer, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
+| `--bins` | one bin per contig | BED file of bins (no header), **or** an integer bin size in bp (e.g. `1000`) — one or the other. Left out, every contig is one bin, from 0 to its length: the map of contigs a contig binner such as MetaTOR reads. For an integer, or without `--bins`, contig lengths must come from the pairs `#chromsize:` header(s) or `--fasta`. |
 | `-o, --output` | *required* | Output `.metacool` path. |
 | `--contigs` | — | Contig-to-genome table; which columns hold the contig and the genome names is set by `--contigs-format`, and its other columns land in `/contigs`. It need not list every contig, but must name at least one contig of the assembly — see [The contig table](#create-contig-table). Leave it out to build a map with no binning yet. |
 | `--contigs-format` | `contigs` | `CONTIG,GENOME[,noheader]`, each a 1-based position or a header name, or an alias for a binner's table — see [Contig and genome columns](#contigs-format) below. |
@@ -180,7 +180,7 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
 | `--genomes-format` | `genome_name` | Which column of `--genomes` holds the genome names: a 1-based position or a header name, plus `,noheader` when the table has no header line — e.g. `Name` for CheckM2's `quality_report.tsv`, `user_genome` for GTDB-Tk's summary. The default also reads a `genome` column, as `dump -t genomes -H` names it, in a table without `genome_name`; in a table `dump` wrote, the columns it computed (`length`, `n_contigs`, `n_bins`, the QC columns) are left out. |
 | `--metadata` | — | JSON or YAML file of free-form metadata to embed. May **not** contain a key metacooler writes itself: `commands` (the provenance record), `qc` (the contact-quality block), `reassign` or `annotate` (those commands' histories). |
 | `--contig-order` | `genome-then-length` | `genome-then-length`, `genome-then-alpha`, `fasta`, or `alpha`. See [Contig ordering](concepts.md#contig-ordering). |
-| `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer and the pairs headers have no `#chromsize:` lines. |
+| `--fasta` | — | Assembly FASTA, used for contig lengths when `--bins` is an integer or left out and the pairs headers have no `#chromsize:` lines. |
 | `--assembly-name` | — | Name for this assembly / metagenome. Stored in the standard cooler `genome-assembly` attribute (reported as `assembly` by `info`). |
 | `--drop-unassigned` | off | Drop contigs absent from the contig table instead of collecting them under `__unbinned__`. |
 | `--filter` | — | Keep only the genomes/contigs matching an expression, *before* anything is binned — e.g. `--filter "contigs.length >= 5kb"`. Repeatable. See [Filtering with `--filter`](#filter). `genomes.n_bins` is not available here. |
@@ -203,6 +203,10 @@ metacooler create pairs --pairs P [--pairs P2 ...] --bins B [--contigs C] -o OUT
     layouts claimed the same ordering and `merge` would scramble them.
 
 ```bash
+# One bin per contig, no binning yet: the map a MetaTOR run starts from, the
+# contig lengths read from the pairs header
+metacooler create pairs --pairs contacts.pairs.gz -o gut_T0.metacool
+
 # No binning yet: every contig in __unbinned__, to be binned with reassign later
 metacooler create pairs --pairs contacts.pairs.gz --bins 2000 --fasta assembly.fa \
     -o gut_T0.metacool
@@ -354,7 +358,7 @@ metacooler create pairs \
   header, or with only some of the contigs, is fine; one contig given two
   different lengths is an error naming both files, since the libraries were
   then aligned to different assemblies. The headers are read only where they
-  are needed: for the contig lengths (integer `--bins` without `--fasta`) or
+  are needed: for the contig lengths (integer or no `--bins`, without `--fasta`) or
   for the order (`--contig-order fasta` without `--fasta`).
 - **Refused up front:** the same file given twice (its contacts would count
   twice), and a missing file — before any file is read, rather than after the
