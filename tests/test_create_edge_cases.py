@@ -14,11 +14,14 @@ import pandas as pd
 import pytest
 
 from metacooler.io.create import (
+    _bin_decoded,
     _build_bins,
     _build_contig_order,
     _build_contigs_table,
     _build_genomes_table,
     _drop_nonpositive_contigs,
+    _folded_bin_keys,
+    _one_bin_per_contig,
     _parse_pairs_header,
     _read_contig_lengths,
     _stream_pairs,
@@ -598,20 +601,6 @@ class TestFromPairsValidation:
                 contig_genome_map=tiny_contigs_table,
             )
 
-    def test_binsize_required_when_bins_none(
-        self, tmp_path, tiny_fasta, tiny_pairs, tiny_contigs_table
-    ):
-        """When bins=None and binsize=None, from_pairs should raise."""
-        with pytest.raises(ValueError, match="binsize required"):
-            from_pairs(
-                uri=tmp_path / "out.metacool",
-                bins=None,
-                fasta=tiny_fasta,
-                pairs=tiny_pairs,
-                contig_genome_map=tiny_contigs_table,
-                binsize=None,
-            )
-
     def test_contigs_extra_columns_via_from_pairs(
         self, tmp_path, tiny_bins_bed, tiny_pairs
     ):
@@ -633,6 +622,143 @@ class TestFromPairsValidation:
         assert out.exists()
         with h5py.File(out, "r") as f:
             assert "gc_content" in f["contigs"]
+
+
+def _datasets(path: Path) -> dict[str, np.ndarray]:
+    """Every dataset of a file, by name."""
+    out: dict[str, np.ndarray] = {}
+    with h5py.File(path, "r") as f:
+
+        def visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                out[name] = obj[()]
+
+        f.visititems(visit)
+    return out
+
+
+def _contig_table(lengths: dict[str, int]) -> pd.DataFrame:
+    """One bin per contig, as metaTOR hands it to from_pairs."""
+    return pd.DataFrame(
+        {"chrom": list(lengths), "start": 0, "end": list(lengths.values())}
+    )
+
+
+class TestOneBinPerContig:
+    """Without bins or binsize, from_pairs makes one bin per contig."""
+
+    DATA = Path(__file__).parent / "data"
+
+    def test_one_bin_per_contig(
+        self, tmp_path, tiny_fasta, tiny_pairs, tiny_contigs_table
+    ):
+        out = tmp_path / "out.metacool"
+        from_pairs(
+            uri=out,
+            fasta=tiny_fasta,
+            pairs=tiny_pairs,
+            contig_genome_map=tiny_contigs_table,
+            ps=False,
+        )
+        clr = cooler.Cooler(str(out))
+        contigs = clr.chroms()[:]
+        bins = clr.bins()[:]
+        assert len(bins) == len(contigs) == 4
+        assert bins["chrom"].astype(str).tolist() == contigs["name"].tolist()
+        assert (bins["start"] == 0).all()
+        assert bins["end"].tolist() == contigs["length"].tolist()
+        assert clr.binsize is None
+        with h5py.File(out, "r") as f:
+            np.testing.assert_array_equal(f["indexes/chrom_offset"][:], np.arange(5))
+            assert f["genomes/n_bins"][:].tolist() == f["genomes/n_contigs"][:].tolist()
+
+        # Every pair is one contact between its two contigs, upper triangle.
+        pairs = pd.read_csv(tiny_pairs, sep="\t", comment="#", header=None)
+        ids = {name: i for i, name in enumerate(contigs["name"])}
+        a, b = pairs[1].map(ids).to_numpy(), pairs[3].map(ids).to_numpy()
+        expected = (
+            pd.DataFrame({"bin1_id": np.minimum(a, b), "bin2_id": np.maximum(a, b)})
+            .value_counts()
+            .sort_index()
+            .rename("count")
+            .reset_index()
+        )
+        got = clr.pixels()[:][["bin1_id", "bin2_id", "count"]]
+        pd.testing.assert_frame_equal(got, expected, check_dtype=False)
+
+    def test_same_map_as_a_table_of_contigs(self, tmp_path):
+        """The map metaTOR makes from its table of one bin per contig, exactly."""
+        fasta = tmp_path / "assembly.fa"
+        fasta.write_bytes((self.DATA / "assembly_1.fa").read_bytes())
+        pairs = self.DATA / "contacts_1_rep1.pairs.gz"
+        table = _contig_table(_read_contig_lengths(fasta=fasta))
+        from_table, from_nothing = (
+            tmp_path / "table.metacool",
+            tmp_path / "none.metacool",
+        )
+        from_pairs(from_table, bins=table, pairs=pairs, ps=False)
+        from_pairs(from_nothing, fasta=fasta, pairs=pairs, ps=False)
+
+        expected, got = _datasets(from_table), _datasets(from_nothing)
+        assert expected.keys() == got.keys()
+        for name in expected:
+            np.testing.assert_array_equal(got[name], expected[name], err_msg=name)
+        assert len(got["bins/start"]) == len(table)
+        assert got["pixels/count"].sum() > 0
+        qc = [
+            cooler.Cooler(str(p)).info["metadata"]["qc"]
+            for p in (from_table, from_nothing)
+        ]
+        assert qc[0] == qc[1]
+
+    def test_lengths_from_the_pairs_headers(self, tmp_path):
+        out = tmp_path / "out.metacool"
+        from_pairs(out, pairs=self.DATA / "contacts_1_rep1.pairs.gz", ps=False)
+        sizes = pd.read_csv(self.DATA / "assembly_1.chrom.sizes", sep="\t", header=None)
+        contigs = cooler.Cooler(str(out)).chroms()[:]
+        assert dict(zip(contigs["name"], contigs["length"], strict=True)) == dict(
+            zip(sizes[0], sizes[1], strict=True)
+        )
+        assert len(cooler.Cooler(str(out)).bins()[:]) == len(sizes)
+
+    def test_needs_contig_lengths(self, tmp_path, tiny_pairs):
+        """Pairs without #chromsize lines and no fasta: no length to tile."""
+        with pytest.raises(ValueError, match="Contig lengths required"):
+            from_pairs(tmp_path / "out.metacool", pairs=tiny_pairs, ps=False)
+
+    def test_no_binary_search(self, tmp_path, monkeypatch, tiny_fasta, tiny_pairs):
+        """One bin per contig, however given, skips the search over bin starts."""
+        from metacooler.io import create as create_mod
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("a binary search over one bin per contig")
+
+        monkeypatch.setattr(create_mod, "_folded_bin_keys", refuse)
+        table = _contig_table(_read_contig_lengths(fasta=tiny_fasta))
+        bed = tmp_path / "contigs.bed"
+        table.to_csv(bed, sep="\t", header=False, index=False)
+        for i, bins in enumerate((None, table, bed)):
+            out = tmp_path / f"out{i}.metacool"
+            from_pairs(out, bins=bins, fasta=tiny_fasta, pairs=tiny_pairs, ps=False)
+            assert cooler.Cooler(str(out)).pixels()[:]["count"].sum() == 200
+
+    def test_lookup_is_the_binary_search(self):
+        """Taking a contig's first bin gives what the search over starts gives."""
+        rng = np.random.default_rng(0)
+        n = 50
+        lengths = rng.integers(1, 10_000, n)
+        chrom_offset = np.arange(n + 1, dtype=np.int64)
+        c1, c2 = rng.integers(0, n, (2, 5000))
+        p1 = (rng.random(5000) * lengths[c1]).astype(np.int64)
+        p2 = (rng.random(5000) * lengths[c2]).astype(np.int64)
+        keys = _folded_bin_keys(chrom_offset, np.zeros(n, dtype=np.int64))
+        decoded = (c1, c2, p1, p2)
+        pd.testing.assert_frame_equal(
+            _bin_decoded(decoded, chrom_offset, None, None),
+            _bin_decoded(decoded, chrom_offset, None, keys),
+        )
+        assert _one_bin_per_contig(chrom_offset)
+        assert not _one_bin_per_contig(np.array([0, 1, 3]))
 
 
 class TestFromPairsEmptyChunks:

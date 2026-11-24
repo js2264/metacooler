@@ -39,9 +39,12 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
 @click.option(
     "--bins",
     type=str,
-    required=True,
-    help="BED file of bins (without column names), or an integer bin size in bp (e.g. 1000). "
-    "If an integer, contig lengths must be available from the pairs header or a --fasta should be provided.",
+    help=(
+        "BED file of bins (without column names), or an integer bin size in "
+        "bp (e.g. 1000). Without it, one bin per contig: the map of contigs "
+        "that a contig binner such as MetaTOR reads. Without a BED file, "
+        "contig lengths come from the pairs header or from --fasta."
+    ),
 )
 @shared_options(
     qc_threshold=PAIRS_DISTANCE_THRESHOLD,
@@ -70,7 +73,7 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
     "--fasta",
     type=click.Path(exists=True, path_type=Path),
     help="Assembly FASTA. Used to extract contig lengths when --bins is an integer "
-    "and contig sizes are absent from the pairs header.",
+    "or not given, and contig sizes are absent from the pairs header.",
 )
 @click.option(
     "--assembly-name",
@@ -132,7 +135,7 @@ from metacooler.schema import DEFAULT_CHUNKSIZE
 )
 def cmd_create_pairs(
     output: Path,
-    bins: str,
+    bins: str | None,
     pairs: tuple[Path, ...],
     contigs: Path | None,
     contigs_format: str,
@@ -181,15 +184,16 @@ def cmd_create_pairs(
         sort_strategy
     ]
 
-    # Determine if bins is a path or an integer
-    try:
-        binsize = int(bins)
-        bins_path = None
-    except ValueError:
-        binsize = None
-        bins_path = Path(bins)
-        if not bins_path.exists():
-            raise click.BadParameter(f"Bins file not found: {bins}") from None
+    # Determine if bins is a path or an integer; neither is one bin per contig.
+    binsize: int | None = None
+    bins_path: Path | None = None
+    if bins is not None:
+        try:
+            binsize = int(bins)
+        except ValueError:
+            bins_path = Path(bins)
+            if not bins_path.exists():
+                raise click.BadParameter(f"Bins file not found: {bins}") from None
 
     # ``commands`` is provenance and must survive the user's metadata file;
     # load_metadata_file() rejects a file that tries to set it.

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- **`create pairs` without `--bins` makes one bin per contig** — the map of
+  contigs a contig binner such as MetaTOR reads, which used to need a BED file
+  of the contigs. The contig lengths come from the pairs `#chromsize:` headers
+  or `--fasta`, as for an integer `--bins`. From Python,
+  `from_pairs(bins=None, binsize=None)` does the same, where it used to raise
+  `binsize required when bins is None` once it had built the tables. With
+  `--contigs` left out too, `metacooler create pairs --pairs P -o OUT` makes
+  the map a MetaTOR run starts from.
+
+### Performance
+
+- **One bin per contig is binned without a binary search.** When every contig
+  is one bin — without `--bins`, or from a BED file or a table of the contigs,
+  as MetaTOR passes them — a read's bin is its contig's, looked up directly
+  instead of searched for among the bin starts: 13–20 times faster for that
+  step (10 M positions over 2 M contigs: 0.86 s to 0.06 s), the output
+  unchanged.
+
 ## 0.4.0 - 2026-11-23
 
 ### Added

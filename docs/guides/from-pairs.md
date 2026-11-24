@@ -76,7 +76,20 @@ reference for the details.
 
 ### Bins
 
-Two modes:
+Three modes:
+
+=== "One bin per contig (default)"
+
+    Leave `--bins` out: every contig is one bin, from 0 to its length — the
+    map of contigs a contig binner such as MetaTOR reads. Contig lengths come
+    from the pairs header or `--fasta`, as for an integer bin size:
+
+    ```bash
+    metacooler create pairs --pairs contacts.pairs.gz -o sample.metacool
+    ```
+
+    The QC block and the P(s) table are counted on read positions, so they are
+    the same at one bin per contig as at any finer bins.
 
 === "BED file"
 

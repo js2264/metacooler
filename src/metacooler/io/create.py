@@ -1498,6 +1498,39 @@ def _tile_bins(
     )
 
 
+def _contig_bins(
+    contig_order: list[str],
+    contig_lengths: dict[str, int],
+    contig_name_to_id: dict[str, int],
+) -> pd.DataFrame:
+    """One bin per contig, from 0 to its length: the map of contigs.
+
+    The tiling at any bin size at least the longest contig, which is how it is
+    built, int32 guard included.
+
+    Args:
+        contig_order: Ordered list of contig names; bin rows are emitted in
+            this order.
+        contig_lengths: Mapping of contig name to length.
+        contig_name_to_id: Mapping of contig name to integer ID.
+
+    Returns:
+        The bins, as :func:`_tile_bins` returns them.
+    """
+    longest = max((int(contig_lengths[c]) for c in contig_order), default=1)
+    return _tile_bins(contig_order, contig_lengths, contig_name_to_id, longest)
+
+
+def _one_bin_per_contig(chrom_offset: np.ndarray) -> bool:
+    """Whether every contig is one bin, so a contig's bin is its first.
+
+    Then a read's bin needs no binary search over the bins
+    (:func:`_fragment_bin_ids`): it is ``chrom_offset[contig]``, 13-20 times
+    faster, whatever the bins came from (no ``bins``, a BED file, a table).
+    """
+    return bool(np.all(np.diff(chrom_offset) == 1))
+
+
 class _PairsHeader(NamedTuple):
     """What the top of a pairs file says, as :func:`_scan_pairs_header` reads it."""
 
@@ -2167,7 +2200,9 @@ def _bin_pairs_chunk(
         chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
         binsize: Fixed bin size, or ``None`` for fragment-level bins.
         bin_keys: Folded ``(contig, start)`` key of every bin, from
-            :func:`_folded_bin_keys`; required when ``binsize`` is ``None``.
+            :func:`_folded_bin_keys`, when ``binsize`` is ``None``; ``None``
+            with it when every contig is one bin (see
+            :func:`_one_bin_per_contig`).
         stats: Optional accumulator updated with the number of pairs seen and
             dropped, so the caller can report them once at end of stream.
         qc: Optional contact-quality tally, updated from the *raw positions* of
@@ -2235,11 +2270,16 @@ def _bin_decoded(
             chrom_offset[c2] + p2 // binsize,
             chrom_offset[c2 + 1] - 1,
         )
+    elif bin_keys is None:
+        # One bin per contig: a contig's bin is its first, wherever the read
+        # is -- what the binary search below returns, an order of magnitude
+        # faster (see _one_bin_per_contig).
+        bin1 = chrom_offset[c1]
+        bin2 = chrom_offset[c2]
     else:
         # Fragment-level bins: one global binary search over keys that fold the
         # contig id in above the coordinate, so (contig, start) order is plain
         # integer order -- never a per-contig loop (see _folded_bin_keys).
-        assert bin_keys is not None, "bin_keys required for fragment-level binning"
         bin1 = _fragment_bin_ids(bin_keys, chrom_offset, c1, p1)
         bin2 = _fragment_bin_ids(bin_keys, chrom_offset, c2, p2)
 
@@ -2657,7 +2697,9 @@ def _stream_binned_pairs(
         chrom_offset: Cumulative bin counts per contig (length n_contigs+1).
         binsize: Fixed bin size, or ``None`` for fragment-level bins.
         bin_keys: Folded ``(contig, start)`` bin keys from
-            :func:`_folded_bin_keys`; required when *binsize* is ``None``.
+            :func:`_folded_bin_keys`, when *binsize* is ``None``; ``None``
+            with it when every contig is one bin (see
+            :func:`_one_bin_per_contig`).
         chunksize: Rows per streaming batch.
         pairs_kwargs: Extra keyword arguments forwarded to ``_stream_pairs``.
         stats: Drop tally to fill in.  Passed in (rather than created here)
@@ -3140,11 +3182,15 @@ def from_pairs(
 ) -> None:
     """Create a ``.metacool`` file from pairs, bins, and contig assignments.
 
+    Without *bins* or *binsize*, the map has one bin per contig.
+
     Args:
         uri: Output file path (``.metacool`` extension recommended).
         bins: Path to a BED file of bins (without header), or a pre-built DataFrame
-            with columns ``chrom, start, end``.  If ``None``, *binsize* must be given
-            and bins will be tiled from the fasta.
+            with columns ``chrom, start, end``.  If ``None``, bins are tiled
+            from the contig lengths of *fasta* or of the pairs headers: at
+            *binsize*, or, without it, one bin per contig -- the map of
+            contigs a contig binner reads.
         pairs: Path to a pairs file (plain text, gzipped, or bgzipped), or a
             sequence of them -- typically one per Hi-C library of the same
             assembly.  Several files are read back to back in the given order,
@@ -3165,7 +3211,8 @@ def from_pairs(
             the contig and the genome names: ``CONTIG,GENOME[,noheader]``, each
             a 1-based position or a header name, or an alias (see
             :func:`metacooler.io.contigs.parse_contigs_table`).
-        fasta: Assembly fasta (required if *bins* is ``None``).
+        fasta: Assembly fasta, for the contig lengths when *bins* is ``None``
+            and the pairs headers have no ``#chromsize:`` lines.
         assembly_name: Name for this assembly / metagenome.
         contig_ordering: Canonical ordering strategy.
         drop_unassigned: If ``True``, drop contigs not present in the contig
@@ -3175,7 +3222,8 @@ def from_pairs(
             anything is binned, e.g. ``["contigs.length >= 5kb"]``.  A dropped
             contig gets no bins, and its pairs are discarded while binning.
             ``genomes.n_bins`` is not available here.
-        binsize: Fixed bin size (used only when *bins* is ``None``).
+        binsize: Fixed bin size (used only when *bins* is ``None``).  With
+            neither, the map has one bin per contig.
         genomes_table: Optional path to a genomes metadata TSV.  One column
             holds the genome names (see *genomes_table_format*); every other
             column is stored in the ``/genomes`` table.
@@ -3323,7 +3371,10 @@ def from_pairs(
         contig_lengths = _read_contig_lengths(bins=bins_df)
         assembly_source = "the bins table"
     elif bins is None:
-        # Integer binsize mode: need contig lengths from fasta or pairs header
+        # Bins tiled from the contig lengths, which come from the fasta or the
+        # pairs headers: at binsize, or one per contig without it.
+        if binsize is None:
+            logger.info("No bins and no bin size given: one bin per contig.")
         contig_lengths = _read_contig_lengths(fasta=fasta, pairs=pairs_paths)
         assembly_source = (
             f"the FASTA {fasta}" if fasta is not None else "the pairs header(s)"
@@ -3405,12 +3456,12 @@ def from_pairs(
     )
 
     # --- Build final bins table ---
-    if bins_df is None:
-        if binsize is None:
-            raise ValueError("binsize required when bins is None")
-        bins_df = _tile_bins(contig_order, contig_lengths, contig_name_to_id, binsize)
-    else:
+    if bins_df is not None:
         bins_df = _build_bins(bins_df, contig_name_to_id)
+    elif binsize is None:
+        bins_df = _contig_bins(contig_order, contig_lengths, contig_name_to_id)
+    else:
+        bins_df = _tile_bins(contig_order, contig_lengths, contig_name_to_id, binsize)
     bins_df = bins_df.sort_values(["chrom", "start"]).reset_index(drop=True)
     logger.info(
         f"Built final bins table with {len(bins_df)} bins tiling "
@@ -3432,7 +3483,7 @@ def from_pairs(
     logger.info(f"Starting to create cooler file at {uri}...")
     bin_keys: np.ndarray | None = (
         None
-        if binsize is not None
+        if binsize is not None or _one_bin_per_contig(chrom_offset)
         else _folded_bin_keys(chrom_offset, bins_df["start"].to_numpy())
     )
     drop_stats = _PairsDropStats()
