@@ -260,3 +260,50 @@ jobs:
           cli metacooler report tests/data/assembly_1_1kb.metacool -o "$RUNNER_TEMP/report"
           ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html "$RUNNER_TEMP"/report/assembly_1_1kb.metacooler_*.log
 
+  # metacooler's own (the migration plan's X-1, appendix B.5): hicstuff's and
+  # metaTOR's tests against this metacooler, which they read and write maps
+  # with (CONVENTIONS.md § 22). Advisory until both suites are known to be
+  # stable here.
+  downstream:
+    name: ${{ matrix.repository }} with this metacooler
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repository: koszullab/hicstuff
+            # Its test tools are an extra until its own migration (HS-2) makes
+            # them a dependency group.
+            sync: --extra dev
+          - repository: koszullab/metaTOR
+            sync: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: metacooler
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ matrix.repository }}
+          path: downstream
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+
+      - name: Its locked environment, with this metacooler
+        working-directory: downstream
+        env:
+          SYNC: ${{ matrix.sync }}
+        run: |
+          # shellcheck disable=SC2086 # its options, or none
+          uv sync --locked $SYNC
+          uv pip install ../metacooler
+          uv pip show metacooler
+
+      - name: Its tests
+        working-directory: downstream
+        # --no-sync: plain `uv run` would put the locked metacooler back.
+        run: uv run --no-sync pytest -q --no-cov
