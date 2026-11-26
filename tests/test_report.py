@@ -35,6 +35,7 @@ from metacooler.ops.report import (
     PS_COLUMNS,
     _length_steps,
     _number,
+    _pct,
     collect,
     n50,
 )
@@ -234,6 +235,12 @@ class TestItsNumbers:
     )
     def test_number(self, value, number):
         assert _number(value) == number
+
+    def test_pct(self):
+        assert _pct(1, 4) == 25
+        assert _pct(None, 4) is None
+        assert _pct(1, None) is None
+        assert _pct(1, 0) is None
 
     def test_length_steps(self):
         assert _length_steps(np.array([], dtype=np.int64)) == ([], [])

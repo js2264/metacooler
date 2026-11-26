@@ -14,6 +14,7 @@ import shutil
 import time
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -194,6 +195,24 @@ class TestRunLog:
         ):
             raise SystemExit(0)
         assert "Cool file written after" in Path(str(path)).read_text()
+
+    def test_a_parameter_its_command_never_sees_has_no_line(self, tmp_path: Path):
+        """A parameter click keeps from the command (``expose_value=False``)
+        has no value to give: the header leaves it out."""
+
+        @click.command()
+        @click.option("--kept", default=1)
+        @click.option("--dropped", is_flag=True, expose_value=False)
+        def command(kept: int) -> None:
+            with run_log(tmp_path / "a.tsv", "Table written") as path:
+                click.echo(path)
+
+        setup_logging()
+        result = CliRunner().invoke(command, ["--kept", "2", "--dropped"])
+        assert result.exit_code == 0, result.output
+        lines = Path(result.output.strip()).read_text().splitlines()
+        # After the version, the date and the command line: the parameters.
+        assert [line for line in lines if line.startswith("## ")][3:] == ["## kept: 2"]
 
     def test_nothing_for_stdout(self):
         with run_log(None, "Table written") as path:

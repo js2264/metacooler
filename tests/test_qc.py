@@ -1415,6 +1415,21 @@ def test_cli_qc_json(tiny_metacooler):
     assert block["n_contacts"] > 0
 
 
+def test_cli_qc_table(tiny_metacooler):
+    from click.testing import CliRunner
+
+    from metacooler.cli.main import cli
+
+    block = json.loads(
+        CliRunner().invoke(cli, ["qc", str(tiny_metacooler), "-q"]).output
+    )
+    result = CliRunner().invoke(cli, ["qc", str(tiny_metacooler), "--table", "-q"])
+    assert result.exit_code == 0, result.output
+    assert f"Contact QC: {tiny_metacooler.name}" in result.output
+    assert "Total contacts" in result.output
+    assert f"{block['n_contacts']:,}" in result.output
+
+
 def test_cli_qc_threshold_accepts_size_suffix(tiny_metacooler):
     from click.testing import CliRunner
 
