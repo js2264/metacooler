@@ -39,7 +39,8 @@ after its last write, and hands the map it read to `store_weights`:
 ```python
 import metacooler
 
-with metacooler.lock("sample.metacool"):  # MapLockedError if another process or thread writes it
+# MapLockedError if another process or thread writes it
+with metacooler.lock("sample.metacool"):
     mc = metacooler.MetaCooler("sample.metacool")
     weights = my_weights(mc)
     metacooler.store_weights(
@@ -61,7 +62,8 @@ with metacooler.staged_edit("sample.metacool") as staged:
     metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
 
 # An entry of a collection, edited into a standalone map:
-with metacooler.staged_edit("run.mmetacool::entries/r1", output="r1.metacool") as staged:
+entry = "run.mmetacool::entries/r1"
+with metacooler.staged_edit(entry, output="r1.metacool") as staged:
     metacooler.write_clusters(staged, rounds, clusters, members)
 ```
 

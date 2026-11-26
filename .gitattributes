@@ -1,0 +1,21 @@
+# CONVENTIONS.md § 5.
+* text=auto eol=lf
+
+# Binary test data.
+*.cool binary
+*.mcool binary
+*.metacool binary
+*.mmetacool binary
+*.h5 binary
+*.gz binary
+*.bt2 binary
+
+# Written by tools, not by hand.
+uv.lock linguist-generated
+# quarto's render of README.qmd.
+README.md linguist-generated
+# chromokit's kits, copied as they are (chromokit.json lists them).
+src/metacooler/_report/** linguist-vendored
+overrides/** linguist-vendored
+docs/stylesheets/chromokit.css linguist-vendored
+docs/javascripts/chromokit.js linguist-vendored

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 
 import h5py
@@ -27,7 +28,7 @@ class TestRowBlocks:
         bin1_offset = np.array([0, 3, 6, 9, 12, 15, 18, 21])
         blocks = _row_blocks(old_to_new, bin1_offset, chunksize=7)
         assert blocks[0][0] == 0 and blocks[-1][1] == len(old_to_new)
-        for (_, hi), (lo, _) in zip(blocks[:-1], blocks[1:], strict=True):
+        for (_, hi), (lo, _) in pairwise(blocks):
             assert hi == lo
             assert old_to_new[lo] != old_to_new[lo - 1]  # cut between rows
 

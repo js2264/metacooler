@@ -1,0 +1,90 @@
+# metacooler report of assembly_1_1kb
+# format 1: [section] then a key and its value per line; [table: name] then a header and a row
+# per line, on spaces; NA: missing. See https://js2264.github.io/metacooler/format/#the-report-of-a-map
+
+[report]
+format_version      1
+sample              assembly_1_1kb
+map                 tests/data/assembly_1_1kb.metacool
+metacooler_version  0.4.0
+written             2026-11-26T14:55:01
+
+[run]
+generated_by     metacooler-0.1.0
+created          2001-01-01T00:00:00+00:00
+assembly         unknown
+bin_type         fixed
+bin_size_bp      1000
+contig_ordering  genome-then-length
+storage_mode     symmetric-upper
+
+[commands]
+command_1  'metacooler create pairs' --pairs contacts_1_rep1.pairs.gz --bins 1000 -o assembly_1_rep1_1kb.metacool --contigs contigs_table_1.tsv --genomes mag_table_1.tsv -f
+command_2  'metacooler create pairs' --pairs contacts_1_rep2.pairs.gz --bins 1000 -o assembly_1_rep2_1kb.metacool --contigs contigs_table_1.tsv --genomes mag_table_1.tsv -f
+command_3  'metacooler merge' assembly_1_rep1_1kb.metacool assembly_1_rep2_1kb.metacool -o assembly_1_1kb.metacool -f
+
+[genomes]
+genomes           10
+genomes_bp        619000
+unbinned_contigs  5
+unbinned_bp       42000
+binned_pct        93.65
+
+[contigs]
+contigs            44
+contigs_bp         661000
+contig_n50_bp      20000
+contig_l50         10
+longest_contig_bp  50000
+
+[bins]
+bins  661
+
+[contacts]
+contacts  100000
+pixels    36249
+
+[qc]
+stored                     false
+source                     pixels
+distance_threshold_bp      10000
+classified_contacts        100000
+intra_contig_short         17221
+intra_contig_long          2656
+inter_contig_intra_genome  51515
+inter_genome               28608
+trans_contig_ratio         0.8012
+intra_genome_pct           71.39
+inter_genome_pct           28.61
+
+[table: genomes]
+name          length_bp  contigs  bins  intra_contig_short  intra_contig_long  inter_contig_intra_genome  inter_genome  intra_genome_ratio
+__unbinned__  42000      5        42    1417                11                 0                          16634         0.0791
+MAG_01        60000      3        60    1621                566                4551                       3219          0.6767
+MAG_02        124000     4        124   1143                582                5187                       4197          0.6222
+MAG_03        80000      5        80    1178                237                5747                       5034          0.5872
+MAG_04        24000      3        24    2217                165                4676                       3209          0.6874
+MAG_05        41000      4        41    1559                119                5485                       4228          0.6288
+MAG_06        83000      5        83    1146                226                5717                       5072          0.5829
+MAG_07        30000      3        30    2075                125                4647                       3286          0.6757
+MAG_08        49000      4        49    1599                123                5273                       4104          0.6302
+MAG_09        103000     5        103   1097                340                5665                       5064          0.5838
+MAG_10        25000      3        25    2169                162                4567                       3169          0.6852
+
+[table: ps]
+distance_bp  contacts  bin_pairs  probability
+500          2477      330830500  0.000144413
+1000         3947      617000000  0.000123387
+2000         3043      573000000  0.000102432
+3000         2012      529000000  7.33599e-05
+4000         1558      488000000  6.15792e-05
+5477         2209      862000000  4.94282e-05
+7000         822       380000000  4.17229e-05
+8485         1153      668000000  3.3292e-05
+10954        1007      817000000  2.37735e-05
+13964        595       655000000  1.75211e-05
+17436        429       682000000  1.21328e-05
+21909        267       629000000  8.18742e-06
+27386        147       537000000  5.27995e-06
+34322        150       480000000  6.02749e-06
+43715        61        243000000  4.84183e-06

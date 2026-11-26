@@ -351,10 +351,10 @@ def summarize(preset_name, preset, genomes, contigs, pairs):
         "dataset": preset_name,
         "seed": preset["seed"],
         "generator_version": GENERATOR_VERSION,
-        "genomes": int(len(binned)),
-        "mags": int(len(mags)),
+        "genomes": len(binned),
+        "mags": len(mags),
         "mge_bins": int((kind == "MGE").sum()),
-        "contigs": int(len(contigs)),
+        "contigs": len(contigs),
         "binned_contigs": int(binned_of.sum()),
         "assembly_bp": int(lengths.sum()),
         "binned_bp": int(

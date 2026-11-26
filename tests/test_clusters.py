@@ -437,7 +437,7 @@ def test_parents_read_as_numbers_get_a_hint(tmp_path: Path):
     members = pd.DataFrame(
         {"round": ["a", "b"], "cluster": ["1", "2"], "contig": ["c1", "c1"]}
     )
-    with pytest.raises(ValueError, match="a/1.0. The parent columns hold numbers"):
+    with pytest.raises(ValueError, match=r"a/1.0. The parent columns hold numbers"):
         write_clusters(path, ["a", "b"], clusters, members)
     write_clusters(path, ["a", "b"], clusters.astype({"parent": "Int64"}), members)
 
@@ -576,7 +576,7 @@ def test_drop_clusters_leaves_a_plain_cooler_alone(tmp_path: Path):
     cool = make_cool(tmp_path / "plain.cool", ECOLI)
     with h5py.File(cool, "r+") as f:
         f.create_group("clusters")
-    with pytest.raises(ValueError, match="is not a .metacool map"):
+    with pytest.raises(ValueError, match=r"is not a .metacool map"):
         drop_clusters(cool)
     with h5py.File(cool, "r") as f:
         assert "clusters" in f
@@ -1045,7 +1045,7 @@ def test_the_clusters_of_a_contig_in_two_clusters_of_a_round(clustered: Path):
 
 def test_contig_clusters_names_what_is_not_a_contig(clustered: Path):
     mc = MetaCooler(clustered)
-    with pytest.raises(KeyError, match="Not contigs of .*: 'nope', 'caf\u00e9'"):
+    with pytest.raises(KeyError, match=r"Not contigs of .*: 'nope', 'caf\u00e9'"):
         mc.contig_clusters(["c1", "nope", "caf\u00e9"])
     assert mc.chromnames == ["c1", "c2", "c3", "c4"]  # cooler's name -> id dict
     assert mc.contig_clusters("c4")["cluster"].tolist() == ["O2"]
@@ -1274,13 +1274,13 @@ def test_a_round_without_contigs_is_refused(clustered: Path):
         pd.DataFrame({"round": ["a", "b"], "name": ["x", "y"]}),
         pd.DataFrame({"round": ["a"], "cluster": ["x"], "contig": ["c1"]}),
     )
-    with pytest.raises(ValueError, match="Round 'b' .* holds no contig"):
+    with pytest.raises(ValueError, match=r"Round 'b' .* holds no contig"):
         reassign(clustered, output=clustered.with_name("out.metacool"), round="b")
 
 
 @pytest.mark.parametrize("table", [None, {"c1": "MAG_A"}], ids=["neither", "both"])
 def test_a_table_or_a_round(clustered: Path, table):
-    with pytest.raises(ValueError, match="as a table .* or as a clustering round"):
+    with pytest.raises(ValueError, match=r"as a table .* or as a clustering round"):
         reassign(
             clustered,
             table,

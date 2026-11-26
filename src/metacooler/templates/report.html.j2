@@ -1,0 +1,87 @@
+{#- metacooler's report of a map, on chromokit's report kit: the kit's base
+    gives the header, the overview's cards (the MultiQC columns), the Run
+    section (report.run, report.commands), the Files section and the footer;
+    this page adds the overview's breakdown and a section per subject. Its
+    numbers are those of report.txt (metacooler.ops.report). -#}
+{% extends "_report/base.html.j2" %}
+{% import "_report/macros.html.j2" as kit %}
+{% set g = report.genomes %}
+{% set c = report.contigs %}
+{% set x = report.contacts %}
+{% set q = report.qc %}
+{% set nav = [("genomes", "Genomes"), ("contigs", "Contigs"), ("contacts", "Contacts"), ("ps", "P(s)")] %}
+
+{% block overview %}
+{{ super() }}
+<div class="cx-report__cards">
+  {{ kit.stat("3D ratio", kit.number(q.trans_contig_ratio, 3), "of the contacts join two contigs") }}
+  {{ kit.stat("Binned", kit.number(g.binned_pct, 1) ~ "%", "of the assembly in a genome (" ~ kit.mbp(g.genomes_bp) ~ ")") }}
+  {{ kit.stat("Bins", kit.number(report.bins.bins), ("of " ~ kit.number(report.run.bin_size_bp) ~ " bp") if report.run.bin_size_bp is not none else "of variable sizes") }}
+</div>
+<div class="cx-report__grid">
+  {{ kit.plot("plot-qc", "Where the contacts land") }}
+  {{ kit.plot("plot-genomes", "Genomes: how many of their contacts stay within them") }}
+</div>
+{% endblock %}
+
+{% block sections %}
+<section id="genomes" class="cx-report__section">
+  <h2>Genomes</h2>
+  <p class="cx-report__lead">The genomes of the map, and the share of the assembly they hold. <code>__unbinned__</code> holds the contigs that no genome has: each of them counts as a genome of its own in the contacts below.</p>
+  {{ kit.facts([
+    ("Genomes", kit.number(g.genomes)),
+    ("Length of the genomes", kit.mbp(g.genomes_bp)),
+    ("Binned", kit.number(g.binned_pct, 2) ~ "% of the assembly"),
+    ("Unbinned contigs", kit.number(g.unbinned_contigs)),
+    ("Unbinned length", kit.mbp(g.unbinned_bp)),
+  ]) }}
+  <h3>Each genome</h3>
+  <p class="cx-report__note">Its length, its contigs and bins, and its contacts by where they land: within a contig, short or long range (from {{ kit.number(q.distance_threshold_bp) }} bp apart), between its contigs, or with another genome; <em>intra-genome ratio</em>: the share of its contacts that stay within it. Click a column to sort it.</p>
+  {{ kit.table("table-genomes", tables.genomes, columns.genomes, labels={
+    "name": "Genome", "length_bp": "Length (bp)", "contigs": "Contigs", "bins": "Bins",
+    "intra_contig_short": "Intra-contig, short", "intra_contig_long": "Intra-contig, long",
+    "inter_contig_intra_genome": "Between its contigs", "inter_genome": "With other genomes",
+    "intra_genome_ratio": "Intra-genome ratio"}, file=sample ~ "_genomes.csv", placeholder="Filter the genomes") }}
+</section>
+
+<section id="contigs" class="cx-report__section">
+  <h2>Contigs</h2>
+  <p class="cx-report__lead">The contigs of the map: the assembly it was made from, as far as the map holds it.</p>
+  {{ kit.facts([
+    ("Contigs", kit.number(c.contigs)),
+    ("Length", kit.mbp(c.contigs_bp)),
+    ("N50 / L50", kit.number(c.contig_n50_bp) ~ " bp / " ~ kit.number(c.contig_l50)),
+    ("Longest", kit.number(c.longest_contig_bp) ~ " bp"),
+  ]) }}
+  {{ kit.plot("plot-contigs", "Their lengths") }}
+</section>
+
+<section id="contacts" class="cx-report__section">
+  <h2>Contacts</h2>
+  <p class="cx-report__lead">The contacts of the map, and where they land. {% if q.stored %}Their breakdown is the one the map stores, measured {{ "on the read pairs" if q.source == "pairs" else "between bin midpoints" }}.{% else %}The map stores no breakdown: this one is computed from its pixels, between bin midpoints.{% endif %}</p>
+  {{ kit.facts([
+    ("Contacts", kit.number(x.contacts)),
+    ("Pixels", kit.number(x.pixels)),
+    ("3D ratio", kit.number(q.trans_contig_ratio, 4)),
+    ("Within a genome", kit.number(q.intra_genome_pct, 2) ~ "%"),
+    ("Between genomes", kit.number(q.inter_genome_pct, 2) ~ "%"),
+  ]) }}
+  <div class="cx-report__scroll">
+  <table class="cx-table cx-report__table">
+    <thead><tr><th scope="col">Where</th><th scope="col" class="cx-report__num">Contacts</th></tr></thead>
+    <tbody>
+      <tr><td>Within a contig, less than {{ kit.number(q.distance_threshold_bp) }} bp apart</td><td class="cx-report__num">{{ kit.number(q.intra_contig_short) }}</td></tr>
+      <tr><td>Within a contig, {{ kit.number(q.distance_threshold_bp) }} bp apart or more</td><td class="cx-report__num">{{ kit.number(q.intra_contig_long) }}</td></tr>
+      <tr><td>Between two contigs of a genome</td><td class="cx-report__num">{{ kit.number(q.inter_contig_intra_genome) }}</td></tr>
+      <tr><td>Between two genomes</td><td class="cx-report__num">{{ kit.number(q.inter_genome) }}</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="ps" class="cx-report__section">
+  <h2>P(s)</h2>
+  <p class="cx-report__lead">The probability of a contact between two loci of a contig, by their distance, the contigs of the map pooled: measured between bins, from the bin size up.</p>
+  {{ kit.plot("plot-ps") }}
+</section>
+{% endblock %}

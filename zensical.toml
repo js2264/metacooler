@@ -1,69 +1,82 @@
 [project]
 site_name = "metacooler"
-site_url = "https://js2264.github.io/metacooler"
+site_url = "https://js2264.github.io/metacooler/"
 site_description = "Hi-C contact maps for metagenomes — an extension of the cooler format."
 site_author = "Jacques Serizay"
-copyright = "&copy; 2026 Jacques Serizay"
-extra_css = ["stylesheets/metacooler.css"]
-extra_javascript = ["javascripts/metacooler.js"]
-docs_dir = "docs"
-site_dir = "site"
+copyright = "&copy; Jacques Serizay"
 repo_url = "https://github.com/js2264/metacooler"
 repo_name = "js2264/metacooler"
+docs_dir = "docs"
+site_dir = "site"
+# chromokit's stylesheet first, then the repository's own
+# (docs/stylesheets/site.css), which wins.
+extra_css = ["stylesheets/chromokit.css", "stylesheets/site.css"]
+extra_javascript = ["javascripts/chromokit.js"]
 
+# In this order (CONVENTIONS.md § 8): Home; Getting started; Guides, one per
+# task; Reference; the project.
 nav = [
-     { "Home" = "index.md" },
-     { "Getting started" = [
-         { "Why metacooler?" = "why.md" },
-         { "Installation" = "installation.md" },
-         { "Quickstart" = "quickstart.md" },
-         { "Concepts" = "concepts.md" }
-     ]},
-     { "Guides" = [
-         { "Creating from pairs" = "guides/from-pairs.md" },
-         { "Importing from cooler" = "guides/from-cool.md" },
-         { "Collecting single-genome cools" = "guides/collect.md" },
-         { "Multi-resolution files" = "guides/multireso.md" },
-         { "Exporting data" = "guides/export.md" }
-     ]},
-     { "Reference" = [
-         { "CLI reference" = "cli.md" },
-         { "Format specification" = "format.md" },
-         { "Python API" = [
-             { "MetaCooler class" = "api/metacooler.md" },
-             { "I/O functions" = "api/io.md" },
-             { "Operations" = "api/ops.md" }
-         ]}
-     ]},
-     { "Benchmarks" = "benchmarks/" },
-     { "Changelog" = "changelog.md" }
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    { "Why metacooler?" = "why.md" },
+    { "Installation" = "installation.md" },
+    { "Quickstart" = "quickstart.md" },
+    { "Concepts" = "concepts.md" }
+  ]},
+  { "Guides" = [
+    { "Creating from pairs" = "guides/from-pairs.md" },
+    { "Importing from cooler" = "guides/from-cool.md" },
+    { "Collecting single-genome cools" = "guides/collect.md" },
+    { "Multi-resolution files" = "guides/multireso.md" },
+    { "Exporting data" = "guides/export.md" }
+  ]},
+  # metacooler's format page keeps its name, format.md, and so its URL
+  # (CONVENTIONS.md § 8).
+  { "Reference" = [
+    { "CLI reference" = "cli.md" },
+    { "Format specification" = "format.md" },
+    { "Python API" = [
+      { "MetaCooler class" = "api/metacooler.md" },
+      { "I/O functions" = "api/io.md" },
+      { "Operations" = "api/ops.md" }
+    ]}
+  ]},
+  # The benchmark page is not in docs/: docs.yml adds it to every deployment,
+  # from the benchmark-page release that benchmarks.yml publishes.
+  { "The project" = [
+    { "Contributing" = "contributing.md" },
+    { "Internals" = "internals.md" },
+    { "Citing metacooler" = "citation.md" },
+    { "Changelog" = "changelog.md" },
+    { "Benchmarks" = "benchmarks/" }
+  ]}
 ]
 
-
-# The theme is zensical's own ("modern" variant), restyled to match
-# doc.chromosomix.app: overrides/ swaps in its header and in-page footer, and
-# docs/stylesheets/metacooler.css carries the palette and the rest of the look.
+# chromokit (https://github.com/js2264/chromokit): the header and the
+# in-column footer come from overrides/, the palette and the rest of the look
+# from docs/stylesheets/chromokit.css. They are kit files, listed in
+# chromokit.json: `npx github:js2264/chromokit sync` updates them, and local
+# changes go in docs/stylesheets/site.css.
 [project.theme]
 custom_dir = "overrides"
 logo = "assets/metacooler-mark.svg"
 favicon = "assets/metacooler-mark.svg"
-# System fonts, as on chromosomix (no Google Fonts request); the stacks are set
-# in metacooler.css.
+# System fonts, as on chromosomix: no web-font request.
 font = false
 features = [
-    "navigation.instant",
-    "navigation.expand",
-    "navigation.sections",
-    "navigation.top",
-    "search.suggest",
-    "search.highlight",
-    "content.code.copy",
-    "content.code.annotate",
-    "content.tabs.link"
+  "navigation.instant",
+  "navigation.expand",
+  "navigation.sections",
+  "navigation.top",
+  "search.suggest",
+  "search.highlight",
+  "content.code.copy",
+  "content.code.annotate",
+  "content.tabs.link"
 ]
 
-# Light and dark follow the system until the header toggle picks one. Colours
-# come from metacooler.css, so `primary`/`accent` are "custom".
+# Light and dark follow the system until the header's toggle picks one. The
+# colours are chromokit's, so `primary` and `accent` are "custom".
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
 scheme = "default"
@@ -81,22 +94,32 @@ toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 
 [project.extra]
-# Shown next to the site name in the header; bump-my-version keeps it in step
-# with the package (see [tool.bumpversion] in pyproject.toml).
+# Beside the name in the header and in every page's footer: bump-my-version
+# keeps it in step with the package (pyproject.toml, [tool.bumpversion]).
 release = "0.4.0"
+# The small word after the name ("" for none).
+kicker = "docs"
 
+# zensical's default Markdown extensions (admonitions, tabs, attribute lists,
+# icons, keys, Mermaid diagrams, highlighting with language classes) are what
+# the kit styles: declaring [project.markdown_extensions] would replace them.
+
+# The Python API pages: `::: metacooler.<module>` in docs/api/*.md, read
+# from the sources without importing them.
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "google"
-inherited_members = true
 show_source = true
-show_signature_annotations = true
 show_root_heading = true
-show_submodules = true
-members_order = "source"
-merge_init_into_class = true
+show_root_full_path = true
+show_signature_annotations = true
 separate_signature = true
 line_length = 80
-type_parameter_headings = false
+members_order = "source"
+show_submodules = false
+filters = ["!^_"]
+# metacooler's own: MetaCooler documents its arguments on __init__, which the
+# filter above would otherwise hide.
+merge_init_into_class = true

@@ -1,32 +1,39 @@
 [build-system]
-# 1.27 is the first hatchling that writes PEP 639 License-Expression and
-# License-File metadata from `license` / `license-files`.
+# 1.27 is the first hatchling that writes PEP 639 license metadata.
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "metacooler"
+# The version is __version__ in src/metacooler/_version.py (CONVENTIONS.md § 2).
 dynamic = ["version"]
-description = "metacooler: Hi-C contact maps for metagenomes — an extension of the cooler format."
+description = "Hi-C contact maps for metagenomes — an extension of the cooler format."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Jacques Serizay" }]
+authors = [
+    { name = "Jacques Serizay" },
+]
+maintainers = [
+    { name = "Jacques Serizay" },
+]
 keywords = ["hi-c", "metagenomics", "cooler", "contact-maps", "hdf5"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
 ]
-# Lower bounds are exercised by the `lowest` CI job (uv --resolution
-# lowest-direct); raise one only together with the reason it moved.
+# Every runtime dependency has a floor, and every floor a reason, the oldest
+# version the bounds job passes with (CONVENTIONS.md § 3).
 dependencies = [
     "cooler>=0.10",
     "h5py>=3.8",
@@ -42,38 +49,44 @@ dependencies = [
     "click>=8.1",
     "pyyaml>=6.0",
     "pyarrow>=13",
+    # The page of a report (metacooler report), from chromokit's report kit:
+    # 3.1 as metaTOR and the kit ask.
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
+# Optional runtime features only, never tools (CONVENTIONS.md § 2).
+
+[dependency-groups]
+# Never published (CONVENTIONS.md § 2): `uv sync` installs dev, and
+# `uv run --only-group docs …` the docs alone.
+dev = [
+    "bump-my-version>=1.2",
+    "diff-cover>=9",
+    "pre-commit>=4",
+    "pytest>=8",
+    "pytest-cov>=6",
+    "ruff>=0.17.4",
+    "ty>=0.0.38",
+    # metacooler's own: quarto renders benchmarks/benchmarks.qmd and README.qmd
+    # through jupyter, with this environment's Python.
+    "ipython>=8.39.0",
+    "jupyter>=1.1.1",
+]
 docs = [
     "zensical>=0.0.43",
     "mkdocstrings[python]>=0.25",
 ]
 
-[dependency-groups]
-# A dependency group rather than an extra, so `uv sync` (and `uv sync --dev`)
-# installs the toolchain and it never ships as part of the package metadata.
-dev = [
-    "biopython>=1.87",
-    "bump-my-version>=0.28",
-    "diff-cover>=9",
-    "ipython>=8.39.0",
-    "jupyter>=1.1.1",
-    "pre-commit>=4.6.0",
-    "pytest>=7.4",
-    "pytest-cov>=5.0",
-    "ruff>=0.4",
-    "ty>=0.0.38",
-]
+[project.urls]
+Homepage = "https://github.com/js2264/metacooler"
+Documentation = "https://js2264.github.io/metacooler/"
+Repository = "https://github.com/js2264/metacooler"
+Changelog = "https://js2264.github.io/metacooler/changelog/"
+Issues = "https://github.com/js2264/metacooler/issues"
 
 [project.scripts]
 metacooler = "metacooler.cli.main:cli"
-
-[project.urls]
-Homepage = "https://github.com/js2264/metacooler"
-Repository = "https://github.com/js2264/metacooler"
-Documentation = "https://js2264.github.io/metacooler"
-Changelog = "https://js2264.github.io/metacooler/changelog/"
 
 [tool.hatch.version]
 path = "src/metacooler/_version.py"
@@ -82,46 +95,65 @@ path = "src/metacooler/_version.py"
 packages = ["src/metacooler"]
 
 [tool.hatch.build.targets.sdist]
-# Ship the sources, tests, fixtures and docs; leave out repository tooling that
-# is meaningless outside a git checkout.
+# The sources, the tests and their data, README, LICENSE, CITATION.cff and the
+# changelog: what packagers build and test from. Repository tooling and media
+# stay out.
 exclude = [
     "/.github",
-    "/CLAUDE.md",
     "/uv.lock",
     "/.pre-commit-config.yaml",
     "/Makefile",
+    "/AGENTS.md",
+    "/benchmarks",
+    "/docs/images",
 ]
+
+[tool.uv]
+# uv notices a new version in src/metacooler/_version.py (CONVENTIONS.md § 2).
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/metacooler/_version.py" }]
 
 [tool.ruff]
 line-length = 88
 target-version = "py310"
-exclude = [
-    "README.md",
-]
+# chromokit's report kit, linted and formatted in chromokit; and README.md,
+# metacooler's own: quarto renders it from README.qmd, and ruff formats
+# Markdown since 0.17.
+extend-exclude = ["src/metacooler/_report", "README.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+# An explicit list, so that upgrading ruff never changes the rules.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "E501",  # the formatter wraps code; long strings and docstrings are allowed
+]
+# metacooler's own: × and – are meant, in messages (a 1×1 image) and in prose.
+allowed-confusables = ["×", "–"]
 
-[tool.ruff.format]
-quote-style = "double"
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.src]
+# chromokit's report kit, type-checked in chromokit.
+exclude = ["src/metacooler/_report"]
 
 [tool.pytest.ini_options]
+minversion = "8"
 testpaths = ["tests"]
-addopts = "--cov=metacooler --cov-report=term-missing"
+xfail_strict = true
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+    "--cov=metacooler",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+]
 
 [tool.coverage.run]
-source = ["metacooler"]
-omit = ["*/tests/*"]
-
-[tool.coverage.report]
-show_missing = true
-skip_covered = false
+# chromokit's report kit is tested in chromokit.
+omit = ["*/metacooler/_report/*"]
 
 [tool.bumpversion]
-# `_version.py` is the single source of truth for __version__ (see its own
-# comment); this current_version is bump-my-version's bookkeeping copy, kept
-# in sync with it on every bump.
 current_version = "0.4.0"
 commit = true
 tag = true
@@ -135,14 +167,24 @@ search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
 
 [[tool.bumpversion.files]]
-# The version the docs header shows.
+# The version the documentation's header and footer show.
 filename = "zensical.toml"
 search = 'release = "{current_version}"'
 replace = 'release = "{new_version}"'
 
 [[tool.bumpversion.files]]
-# Promotes the accumulated "Unreleased" entries to a dated version section and
-# opens a fresh, empty "Unreleased" above them for the next round of changes.
+# The Unreleased entries become this version's section, under a fresh Unreleased.
 filename = "docs/changelog.md"
 search = "## Unreleased"
-replace = "## Unreleased\n\n## {new_version} - {now:%Y-%m-%d}"
+replace = "## Unreleased\n\n## [{new_version}] - {now:%Y-%m-%d}"
+
+[[tool.bumpversion.files]]
+filename = "CITATION.cff"
+search = 'version: "{current_version}"'
+replace = 'version: "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "CITATION.cff"
+regex = true
+search = 'date-released: "\d{{4}}-\d{{2}}-\d{{2}}"'
+replace = 'date-released: "{now:%Y-%m-%d}"'

@@ -269,8 +269,16 @@ def test_the_cli_keeps_the_block(tmp_path: Path, pairs_file: Path):
 
     result = CliRunner().invoke(
         cli,
-        ["reassign", str(source), "--contigs", str(table), "-o", str(out)]
-        + ["--missing", "unbinned"],
+        [
+            "reassign",
+            str(source),
+            "--contigs",
+            str(table),
+            "-o",
+            str(out),
+            "--missing",
+            "unbinned",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -719,7 +727,7 @@ def test_relabelling_in_place_from_a_thread(tmp_path: Path, pairs_file: Path):
     def run() -> None:
         try:
             reassign(source, ASSIGNMENT_B, inplace=True, missing="unbinned")
-        except BaseException as exc:  # noqa: BLE001 - reported below
+        except BaseException as exc:  # reported below
             errors.append(exc)
 
     thread = threading.Thread(target=run)

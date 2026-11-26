@@ -169,13 +169,6 @@ display(Markdown(f"```yaml\n{content}\n```"))
 - **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection
 
 
-## Releasing
+## Contributing
 
-Changelog entries for in-progress work go under `## Unreleased` in `docs/changelog.md` as they land on `devel`. To cut a release:
-
-```console
-uv run bump-my-version bump minor   # or patch / major
-git push --follow-tags
-```
-
-[`bump-my-version`](https://github.com/callowayproject/bump-my-version) (configured in `pyproject.toml`) promotes `## Unreleased` to a dated `## X.Y.Z - YYYY-MM-DD` section, bumps `__version__` in `src/metacooler/_version.py` — the single source of truth for the package version — and commits and tags the result, all in one step. Pushing the tag triggers [`release.yml`](.github/workflows/release.yml): it builds the sdist/wheel, fails if the tag doesn't match `__version__`, publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no stored token), and opens a GitHub release with that version's changelog section and the built artifacts attached. The documentation site is redeployed by [`docs.yml`](.github/workflows/docs.yml) from `devel`'s push of the release commit, not from the tag, which the `github-pages` environment refuses.
+Setting up, testing, documenting and releasing metacooler: [the contributing page](https://js2264.github.io/metacooler/contributing/).

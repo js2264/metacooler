@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from itertools import pairwise
 from pathlib import Path
 
 import cooler
@@ -341,7 +342,7 @@ class TestNames:
         assert mc.contigs["name"].tolist()[0] == "Bs__chromosome"
 
     def test_names_count_must_match(self, tmp_path: Path, ecoli: Path, bsub: Path):
-        with pytest.raises(ValueError, match="1 genome name.*for 2 input"):
+        with pytest.raises(ValueError, match=r"1 genome name.*for 2 input"):
             collect([ecoli, bsub], tmp_path / "out.metacool", names=["only_one"])
 
     def test_names_must_be_unique(self, tmp_path: Path, ecoli: Path, bsub: Path):
@@ -486,8 +487,7 @@ class TestInputs:
             for chrom, length in chroms.items():
                 edges = [0, length // 5, length // 2, length]
                 rows += [
-                    {"chrom": chrom, "start": s, "end": e}
-                    for s, e in zip(edges[:-1], edges[1:], strict=True)
+                    {"chrom": chrom, "start": s, "end": e} for s, e in pairwise(edges)
                 ]
             return pd.DataFrame(rows)
 

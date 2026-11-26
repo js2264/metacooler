@@ -212,7 +212,9 @@ class TestExistingColumns:
     def test_a_change_needs_replace(self, mc, checkm, tmp_path):
         annotate(mc, inplace=True, genomes_table=checkm, genomes_table_format="Name")
         patch = write(tmp_path / "p.tsv", "Name\tCompleteness\nMAG_1\t80\n")
-        with pytest.raises(ValueError, match="genomes.Completeness: 1 row.*91.5 -> 80"):
+        with pytest.raises(
+            ValueError, match=r"genomes.Completeness: 1 row.*91.5 -> 80"
+        ):
             annotate(mc, inplace=True, genomes_table=patch, genomes_table_format="Name")
 
     def test_replace_keeps_unlisted_rows(self, mc, checkm, tmp_path):
@@ -581,7 +583,7 @@ class TestArguments:
             annotate(mc, inplace=True, genomes_table=checkm, missing="drop")  # ty: ignore[invalid-argument-type]
 
     def test_unqualified_column(self, mc):
-        with pytest.raises(ValueError, match="'genomes.<column>'"):
+        with pytest.raises(ValueError, match=r"'genomes.<column>'"):
             annotate(mc, inplace=True, drop=["lineage"])
 
 

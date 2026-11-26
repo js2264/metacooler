@@ -194,8 +194,14 @@ def test_cli_rejects_zero_nproc(tiny_metacooler: Path, tmp_path: Path):
 
     result = CliRunner().invoke(
         cli,
-        ["zoomify", str(tiny_metacooler), "-o", str(tmp_path / "z.mmetacool")]
-        + ["--nproc", "0"],
+        [
+            "zoomify",
+            str(tiny_metacooler),
+            "-o",
+            str(tmp_path / "z.mmetacool"),
+            "--nproc",
+            "0",
+        ],
     )
     assert result.exit_code != 0
     assert "--nproc" in result.output

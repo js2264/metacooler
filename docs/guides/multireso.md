@@ -200,4 +200,3 @@ cooler zoomify -r 1000,2000,4000,8000 -o sample.mcool sample.metacool
 
 The result is a plain `.mcool`: contigs are its chromosomes, and the genome
 layer is not carried over.
-

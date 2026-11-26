@@ -67,9 +67,9 @@ metacooler.from_cool(
     output="sample.metacool",
     contig_genome_map="contigs.tsv",
     contig_table_format="contigs",
-    genomes_table="mag_table.tsv",   # optional
+    genomes_table="mag_table.tsv",  # optional
     contig_ordering="genome-then-length",
-    assembly_name="gut_T0",          # optional
+    assembly_name="gut_T0",  # optional
     drop_unassigned=False,
 )
 ```

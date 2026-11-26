@@ -221,7 +221,7 @@ class TestContigTables:
 
     def test_wrong_alias_names_the_aliases(self, tmp_path):
         path = write(tmp_path / "t.tsv", "c1\tMAG_1\n")
-        with pytest.raises(ValueError, match="not an alias .*dastool"):
+        with pytest.raises(ValueError, match=r"not an alias .*dastool"):
             parse_contigs_table(path, "das_tool")
 
 

@@ -70,7 +70,7 @@ def try_store(path: str) -> str:
     try:
         n_bins = int(MetaCooler(path).info["nbins"])
         store_weights(path, "w", np.ones(n_bins), method="test", depends_on="pixels")
-    except Exception as error:  # noqa: BLE001 - reported to the test
+    except Exception as error:  # reported to the test
         return f"{type(error).__name__}: {error}"
     return "written"
 
@@ -83,6 +83,6 @@ def try_reassign(source: str, table: str, output: str) -> str:
 
     try:
         reassign(source, table, output=output, force=True)
-    except Exception as error:  # noqa: BLE001 - reported to the test
+    except Exception as error:  # reported to the test
         return f"{type(error).__name__}: {error}"
     return "written"

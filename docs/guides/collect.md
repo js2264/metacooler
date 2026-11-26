@@ -130,10 +130,10 @@ import metacooler
 metacooler.collect(
     ["E_coli.cool", "B_subtilis.mcool::resolutions/5000"],
     "species.metacool",
-    names=["E_coli", "B_subtilis"],        # optional; defaults to file stems
-    genomes_table="species.tsv",           # optional
-    contigs_table="contig_coverage.tsv",   # optional
-    contig_ordering="cool",                # or "genome-then-length", ...
+    names=["E_coli", "B_subtilis"],  # optional; defaults to file stems
+    genomes_table="species.tsv",  # optional
+    contigs_table="contig_coverage.tsv",  # optional
+    contig_ordering="cool",  # or "genome-then-length", ...
 )
 ```
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import cooler
 import pytest
@@ -541,7 +541,7 @@ class TestCreateCoolMatchesSource:
 
     DATA = Path("tests/data")
 
-    SOURCES = [
+    SOURCES: ClassVar = [
         ("fixed-1kb", "assembly_1_rep1_1kb.cool"),
         ("variable-dpnii", "assembly_1_rep1_DpnII.cool"),
     ]

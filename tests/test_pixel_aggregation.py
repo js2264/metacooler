@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -101,7 +103,7 @@ class TestAggregatePixels:
 
 
 class TestDictionaryEncodedNames:
-    NAMES = {"a": 0, "b": 1}
+    NAMES: ClassVar = {"a": 0, "b": 1}
 
     def test_categorical_and_plain_agree(self):
         raw = pd.Series(["a", "zz", "b", None, "a"])

@@ -18,8 +18,8 @@ A few conventions hold across the whole CLI:
 | `METACOOL_PATH` | A **positional** path to a `.metacool` file, or an `.mmetacool` entry URI (`file.mmetacool::entries/<name>`). Every command takes its input this way — there are no input *options*. |
 | `-o, --output` | Output path. Required unless the command writes to stdout. |
 | `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create`, `reassign` and `annotate` keep the previous file until the new one has been written and validated. |
-| `-v, --verbose` | Enable debug logging. Available on every command. |
-| `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
+| `-v, --verbose` | Enable debug logging. Available on every command. Logging goes to stderr: metacooler writes no log file. |
+| `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. With both, `-q` wins. |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
 | `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `collect`, `extract`, `fasta`, `dump`, and `show`. |
 
@@ -718,8 +718,12 @@ with metacooler.staged_edit("sample.metacool") as staged:
       metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
       mc = metacooler.MetaCooler(staged)  # after both
       metacooler.store_weights(
-          staged, "hit", weights_from(mc), method="tool",
-          depends_on=["pixels", "contigs/depth"], source=mc,
+          staged,
+          "hit",
+          weights_from(mc),
+          method="tool",
+          depends_on=["pixels", "contigs/depth"],
+          source=mc,
       )
   ```
 - A `MetaCooler` of the staged map, opened before a write of the session,
@@ -1128,9 +1132,9 @@ the contacts of two contigs by the geometric mean of their Hi-C hits, so it is
 import metacooler
 
 metacooler.store_weights(
-    "gut_T0.metacool",          # or reps.mmetacool::entries/rep1
-    "empirical_hit",            # the /bins column
-    weights,                    # one per bin, NaN for a masked bin
+    "gut_T0.metacool",  # or reps.mmetacool::entries/rep1
+    "empirical_hit",  # the /bins column
+    weights,  # one per bin, NaN for a masked bin
     method="metator",
     depends_on=["pixels"],
     parameters={"mode": "empirical_hit"},
@@ -1200,6 +1204,11 @@ metacooler metadata add    gut_T0.metacool -k enzyme --value DpnII
 metacooler metadata remove gut_T0.metacool -k enzyme
 metacooler metadata load   sample_meta.yaml gut_T0.metacool      # INPUT_FILE first
 ```
+
+| Option | Subcommands | Description |
+|--------|-------------|-------------|
+| `-k, --key KEY` | `get`, `add`, `remove` | The key to read, set or remove; *required*. |
+| `--value VALUE` | `add` | The value to store under it; *required*. |
 
 !!! note "`metadata load` argument order"
     `load` takes the metadata file **first**, then the target:
@@ -1735,8 +1744,10 @@ built for every edge, nor read back to an id.
 import metacooler
 
 edges = metacooler.network("gut_T0.metacool", level="contig")
-hits = edges.groupby("node1")["value"].sum().add(
-    edges.groupby("node2")["value"].sum(), fill_value=0
+hits = (
+    edges.groupby("node1")["value"]
+    .sum()
+    .add(edges.groupby("node2")["value"].sum(), fill_value=0)
 )  # each contig's contacts, a contact with itself counted twice
 
 by_id = metacooler.network("gut_T0.metacool", level="contig", ids=True)
@@ -1974,6 +1985,10 @@ Print core file metadata and statistics (bin size, counts, ordering, …). Print
 JSON by default; `--table` renders a rich table. Also accepts standard
 `.cool`/`.mcool` files and mmetacool entries. **API:** `MetaCooler.info`.
 
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--table` | off | A rich table rather than JSON. |
+
 The `assembly` field reports the standard cooler `genome-assembly` attribute
 (`"unknown"` when `--assembly-name` was not given at creation time); metacooler
 no longer writes a separate `assembly-name` attribute.
@@ -2095,6 +2110,38 @@ metacooler qc gut_T0.metacool --per-genome mag_qc.tsv
 # What create pairs already recorded, without recomputing anything
 metacooler metadata get gut_T0.metacool -k qc
 ```
+
+### `report` { #report }
+
+Write the report of a map: every number of it in `<sample>.report.txt`, its
+row of [MultiQC](https://multiqc.info)'s General Statistics table in
+`<sample>.report_mqc.yaml`, and a page to read it with in
+`<sample>.report.html`. `<sample>` is the map's name without `.metacool`, or
+the entry's name for an entry of a collection, as metaTOR names a map's
+sample. The map is read, never written. **API:** `metacooler.write_report`,
+and `metacooler.read_report` reads a `report.txt` back.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o, --outdir` | `.` | The report's directory, made if missing. |
+| `-f, --force` | off | Replace the report of the same sample in the directory. Without it, an earlier report is refused before the map is read. |
+
+The report holds what the map holds (its genomes, contigs, bins and contacts),
+how it was made (what wrote it, its bins, the command lines in its metadata),
+where its contacts land, each genome, and the map's P(s). Where the contacts
+land is the [QC block](format.md#qc-block) the map stores (`create pairs`, or
+[`qc --store`](#qc)), or one computed from its pixels when it stores none of
+this version. Every key, its unit and its MultiQC column:
+[The report of a map](format.md#the-report-of-a-map).
+
+```bash
+metacooler report gut_T0.metacool -o reports               # reports/gut_T0.report.*
+metacooler report reps.mmetacool::entries/rep1 -o reports  # reports/rep1.report.*
+multiqc reports                                            # one row per map
+```
+
+The page draws its plots with plotly.js, which it loads from its CDN:
+offline, it keeps its numbers and its tables.
 
 ### `tree` { #tree }
 

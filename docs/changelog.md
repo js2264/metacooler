@@ -1,5 +1,10 @@
 # Changelog
 
+Every change a user can notice, by version, in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/)'s format. Versions
+follow [semantic versioning](https://semver.org): before 1.0, a minor release
+may break the interface, a patch release never does.
+
 ## Unreleased
 
 ### Added
@@ -12,6 +17,31 @@
   `binsize required when bins is None` once it had built the tables. With
   `--contigs` left out too, `metacooler create pairs --pairs P -o OUT` makes
   the map a MetaTOR run starts from.
+- **`metacooler report` writes the report of a map**, in an output directory
+  (`-o`): `<sample>.report.txt`, every number of it, for scripts;
+  `<sample>.report_mqc.yaml`, its row of MultiQC's General Statistics table
+  (genomes, contigs, contacts, the inter-genome share); and
+  `<sample>.report.html`, a page with its genomes, contigs and contacts, where
+  its contacts land (the QC block it stores, or one computed from its pixels),
+  each genome, and its P(s). `<sample>` is the map's name, or its entry's.
+  From Python, `metacooler.write_report`, and `metacooler.read_report` reads a
+  `report.txt` back. jinja2 (3.1 or newer) is a new dependency, for the page.
+  ([#35](https://github.com/js2264/metacooler/pull/35))
+
+### Changed
+
+- **The sdist ships the pairs files of the tests' data**,
+  `tests/data/contacts_*.pairs.gz`, which `.gitignore` kept out although the
+  tests read them, and leaves out `benchmarks/`, a tool of the repository.
+  ([#35](https://github.com/js2264/metacooler/pull/35))
+
+### Removed
+
+- **The `docs` extra.** The documentation's tools are the `docs` dependency
+  group, which PyPI does not publish: `uv run --only-group docs zensical
+  serve` in a clone, or `pip install --group docs` with pip 25.1 or newer.
+  `pip install "metacooler[docs]"` now warns that the extra does not exist,
+  and installs metacooler. ([#35](https://github.com/js2264/metacooler/pull/35))
 
 ### Performance
 
@@ -22,7 +52,7 @@
   step (10 M positions over 2 M contigs: 0.86 s to 0.06 s), the output
   unchanged.
 
-## 0.4.0 - 2026-11-23
+## [0.4.0] - 2026-11-23
 
 ### Added
 
@@ -377,7 +407,7 @@
   refused before anything is written, with or without pixels: cooler refused
   them only with pixels.
 
-## 0.3.0 - 2026-11-18
+## [0.3.0] - 2026-11-18
 
 ### Added
 
@@ -574,7 +604,7 @@
   in the format specification; `network` and `aggregate` `--chunksize`
   defaults read 50 000 000, as they are.
 
-## 0.2.0 - 2026-11-16
+## [0.2.0] - 2026-11-16
 
 ### Breaking
 
@@ -1190,9 +1220,7 @@
   run on XL, where it has never finished within the time limit
   (`BENCH_SKIP_COOLER_CREATE`).
 
----
-
-## 0.1.0
+## [0.1.0]
 
 Initial alpha release.
 

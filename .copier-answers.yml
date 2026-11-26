@@ -1,0 +1,57 @@
+# Changes here are overwritten by `uvx copier update`: answer again there.
+_commit: v0.2.0
+_src_path: gh:js2264/chromokit
+authors:
+-   name: Jacques Serizay
+bioconda: false
+cli: click
+command: metacooler
+compiled_dependencies: false
+default_branch: devel
+description: Hi-C contact maps for metagenomes — an extension of the cooler format.
+distribution: metacooler
+docs_url: https://js2264.github.io/metacooler/
+docstring_style: google
+doi: ''
+entry_point: metacooler.cli.main:cli
+gpu: false
+image: false
+install_run: 'cli metacooler info tests/data/assembly_1_1kb.metacool
+
+    cli metacooler check tests/data/assembly_1_1kb.metacool
+
+    cli metacooler report tests/data/assembly_1_1kb.metacool -o "$RUNNER_TEMP/report"
+
+    ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html
+
+    '
+install_source_builds: {}
+keywords:
+- hi-c
+- metagenomics
+- cooler
+- contact-maps
+- hdf5
+license: MIT
+line_length: 88
+maintainers: []
+next_python_apt: libhdf5-dev pkg-config
+owner: js2264
+package: metacooler
+paper: null
+project_name: metacooler
+pypi_only: true
+formats_page: format.md
+python_dev: '3.14'
+python_max: '3.14'
+released: '2026-11-23'
+repository: metacooler
+ruff_version: 0.17.4
+sdist_test_data: true
+src_layout: true
+status: 3 - Alpha
+test_apt: ''
+test_data: tests/data
+ty_required: true
+version: 0.4.0
+version_module: src/metacooler/_version.py
