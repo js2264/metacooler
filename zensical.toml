@@ -45,6 +45,7 @@ nav = [
   # from the benchmark-page release that benchmarks.yml publishes.
   { "The project" = [
     { "Contributing" = "contributing.md" },
+    { "Internals" = "internals.md" },
     { "Citing metacooler" = "citation.md" },
     { "Changelog" = "changelog.md" },
     { "Benchmarks" = "benchmarks/" }
