@@ -22,7 +22,7 @@ install_run: 'cli metacooler info tests/data/assembly_1_1kb.metacool
 
     cli metacooler report tests/data/assembly_1_1kb.metacool -o "$RUNNER_TEMP/report"
 
-    ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html "$RUNNER_TEMP"/report/assembly_1_1kb.metacooler_*.log
+    ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html
 
     '
 install_source_builds: {}

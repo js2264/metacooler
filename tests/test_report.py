@@ -8,7 +8,6 @@ change made on purpose:
 
     uv run metacooler report tests/data/assembly_1_1kb.metacool -o tests/data -f
     rm tests/data/assembly_1_1kb.report.html tests/data/assembly_1_1kb.report_mqc.yaml
-    rm tests/data/assembly_1_1kb.metacooler_*.log
 """
 
 from __future__ import annotations
@@ -66,20 +65,16 @@ def run(*args: str):
 
 
 class TestTheCommand:
-    def test_three_files_and_a_log(self, a_map: Path, tmp_path: Path):
+    def test_three_files_and_nothing_else(self, a_map: Path, tmp_path: Path):
         outdir = tmp_path / "report"
         result = run(str(a_map), "-o", str(outdir))
         assert result.exit_code == 0, result.output
-        names = sorted(path.name for path in outdir.iterdir())
-        assert names[1:] == [
+        # No log file: metacooler logs to the terminal only.
+        assert sorted(path.name for path in outdir.iterdir()) == [
             "assembly_1_1kb.report.html",
             "assembly_1_1kb.report.txt",
             "assembly_1_1kb.report_mqc.yaml",
         ]
-        assert re.fullmatch(r"assembly_1_1kb\.metacooler_\d{14}\.log", names[0])
-        log = (outdir / names[0]).read_text().splitlines()
-        assert log[2].startswith("## cmd: metacooler report ")
-        assert "Report written after" in log[-1]
         # The map is read only.
         assert sorted(path.name for path in a_map.parent.iterdir()) == [a_map.name]
 
@@ -157,10 +152,11 @@ class TestTheCommand:
         self, a_map: Path, tmp_path: Path
     ):
         assert run(str(a_map), "-o", str(tmp_path)).exit_code == 0
+        written = sorted(path.name for path in tmp_path.iterdir())
         result = run(str(a_map), "-o", str(tmp_path))
         assert result.exit_code != 0
         assert "exists" in result.output
-        assert len(list(tmp_path.glob("*.log"))) == 1
+        assert sorted(path.name for path in tmp_path.iterdir()) == written
         result = run(str(a_map), "-o", str(tmp_path), "-f")
         assert result.exit_code == 0, result.output
 

@@ -41,12 +41,11 @@ def cmd_flatten(
     The resulting file is a valid cooler file compatible with
     cooltools, HiGlass, etc.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.flatten import flatten
 
     setup_logging(verbose, command_name="metacooler flatten", quiet=quiet)
 
     check_output(output, force, inputs=[metacool_path])
 
-    with run_log(output, "Cool file written"):
-        flatten(uri=metacool_path, output=output)
+    flatten(uri=metacool_path, output=output)

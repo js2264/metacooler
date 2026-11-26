@@ -63,7 +63,7 @@ def cmd_stack(
     """
     import logging
 
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.mmetacool import copy_entry_cross_file, create_mmetacool
     from metacooler.uri import parse_uri
 
@@ -132,24 +132,21 @@ def cmd_stack(
             sub_entries.append((file_path, src_entry, name))
             logger.debug(f"Entry {name!r}: {file_path}::{group_path.lstrip('/')}")
 
-    with run_log(output, "Collection written"):
-        from metacooler.io.create import _staged_output
-        from metacooler.io.staging import _writing_directly
-        from metacooler.schema import validate_mmetacooler
+    from metacooler.io.create import _staged_output
+    from metacooler.io.staging import _writing_directly
+    from metacooler.schema import validate_mmetacooler
 
-        # Built in one staged file, which only this run knows of: each entry
-        # pulled in is written to it directly, and it is validated once, then
-        # renamed onto the output.
-        with (
-            _staged_output(
-                Path(output), keep_partial=False, inputs=input_files
-            ) as staged,
-            _writing_directly(staged),
-        ):
-            create_mmetacool(staged, whole_files, force=True)
-            for src_path, src_entry, name in sub_entries:
-                copy_entry_cross_file(src_path, src_entry, staged, name, overwrite=True)
-            validate_mmetacooler(staged)
+    # Built in one staged file, which only this run knows of: each entry
+    # pulled in is written to it directly, and it is validated once, then
+    # renamed onto the output.
+    with (
+        _staged_output(Path(output), keep_partial=False, inputs=input_files) as staged,
+        _writing_directly(staged),
+    ):
+        create_mmetacool(staged, whole_files, force=True)
+        for src_path, src_entry, name in sub_entries:
+            copy_entry_cross_file(src_path, src_entry, staged, name, overwrite=True)
+        validate_mmetacooler(staged)
 
-        n_entries = len(whole_files) + len(sub_entries)
-        click.echo(f"Created {output} with {n_entries} entries")
+    n_entries = len(whole_files) + len(sub_entries)
+    click.echo(f"Created {output} with {n_entries} entries")

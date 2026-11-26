@@ -161,7 +161,7 @@ def cmd_create_pairs(
     """
     Create a metacool file from pairs file(s), bins, and contig assignments.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.filters import parse_distance
     from metacooler.io.create import from_pairs
 
@@ -200,31 +200,30 @@ def cmd_create_pairs(
     meta: dict = {"commands": [reconstruct_command()]}
     meta.update(load_metadata_file(metadata))
 
-    with run_log(output, "Map written"):
-        from_pairs(
-            uri=output,
-            bins=bins_path,
-            pairs=list(pairs),
-            contig_genome_map=contigs,
-            contig_table_format=contigs_format,
-            fasta=fasta,
-            assembly_name=assembly_name,
-            contig_ordering=cast(
-                Literal["genome-then-length", "genome-then-alpha", "fasta", "alpha"],
-                contig_order,
-            ),
-            drop_unassigned=drop_unassigned,
-            filters=list(filters) or None,
-            binsize=binsize,
-            genomes_table=genomes_table,
-            genomes_table_format=genomes_format,
-            chunksize=chunksize,
-            sort_in_memory=sort_in_memory,
-            metadata=meta,
-            qc=qc,
-            qc_distance_threshold=qc_distance_threshold,
-            ps=ps,
-            ps_bins_per_decade=ps_bins_per_decade,
-            force=force,
-            nproc=nproc,
-        )
+    from_pairs(
+        uri=output,
+        bins=bins_path,
+        pairs=list(pairs),
+        contig_genome_map=contigs,
+        contig_table_format=contigs_format,
+        fasta=fasta,
+        assembly_name=assembly_name,
+        contig_ordering=cast(
+            Literal["genome-then-length", "genome-then-alpha", "fasta", "alpha"],
+            contig_order,
+        ),
+        drop_unassigned=drop_unassigned,
+        filters=list(filters) or None,
+        binsize=binsize,
+        genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
+        chunksize=chunksize,
+        sort_in_memory=sort_in_memory,
+        metadata=meta,
+        qc=qc,
+        qc_distance_threshold=qc_distance_threshold,
+        ps=ps,
+        ps_bins_per_decade=ps_bins_per_decade,
+        force=force,
+        nproc=nproc,
+    )

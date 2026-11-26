@@ -59,7 +59,7 @@ class TestParseUri:
 
 
 class TestSampleName:
-    """The name of a map's, or an output's, sample: its log's and its report's."""
+    """The name of a map's sample, which names its report: metaTOR's rule."""
 
     @pytest.mark.parametrize(
         ("uri", "name"),
@@ -70,14 +70,9 @@ class TestSampleName:
             ("reps.mmetacool::entries/rep1", "rep1"),
             ("reps.mmetacool::/entries/rep1/", "rep1"),
             ("reps.mmetacool::", "reps"),
-            # The extensions of what metacooler writes, the longest first.
-            ("flat.cool", "flat"),
-            ("edges.tsv.gz", "edges"),
-            ("mags/MAG_01.fa.gz", "MAG_01"),
-            ("heatmap.PNG", "heatmap"),
-            # A directory's, or a prefix's: its name.
-            ("mags/", "mags"),
-            ("out/gut", "gut"),
+            # Only a map's extensions go, as in metaTOR.
+            ("gut_T0.cool", "gut_T0.cool"),
+            ("gut_T0.metacool.bak", "gut_T0.metacool.bak"),
             # A name that is an extension and nothing else stays as it is.
             (".metacool", ".metacool"),
         ],

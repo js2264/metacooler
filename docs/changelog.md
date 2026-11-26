@@ -27,14 +27,6 @@ may break the interface, a patch release never does.
   From Python, `metacooler.write_report`, and `metacooler.read_report` reads a
   `report.txt` back. jinja2 (3.1 or newer) is a new dependency, for the page.
   ([#35](https://github.com/js2264/metacooler/pull/35))
-- **Every command that writes a map or a file writes its log beside it**,
-  `<sample>.metacooler_<YYYYMMDDHHMMSS>.log`, `<sample>` being the output's
-  name (an entry's, for an entry edited in place): hicstuff's header (the
-  version, the date, the command line, the value of each option), a line per
-  record, and what the command wrote and how long it took. The log keeps
-  everything from INFO up whatever `-q` does to stderr, and DEBUG with `-v`. A
-  command that only reads logs to stderr only, as before; stderr shows what it
-  showed. ([#35](https://github.com/js2264/metacooler/pull/35))
 
 ### Changed
 

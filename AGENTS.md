@@ -75,9 +75,8 @@ The project's (CONVENTIONS.md § 21):
 - **The command line is tested in-process**, with click's `CliRunner`; a
   subprocess is for third-party programs only (cooler's command line).
 - **Diagnostics go through logging** (`logging.getLogger("metacooler")`), never
-  `print`. A command that writes a map or a file runs its work in
-  `cli/logging_utils.run_log`, which writes its log beside the output; one that
-  only reads logs to stderr only.
+  `print`, to stderr only: metacooler writes no log file, as it is not a
+  pipeline (an exception to CONVENTIONS.md § 11, which the pipelines follow).
 - **Nothing a user calls is renamed** (commands, options, output files, modules,
   documentation URLs): an alias is added, which warns.
 - **chromokit's files are never edited**: `overrides/`,
@@ -161,8 +160,8 @@ metacooler's own, each in full in [docs/internals.md](docs/internals.md):
 ## Procedures
 
 - **Adding a command:** [docs/contributing.md](docs/contributing.md#adding-a-command):
-  its code in `io/` or `ops/`, its `cmd_<name>.py`, its registration, its log,
-  its API, its tests, its section in `docs/cli.md` (`tests/test_docs.py` fails
+  its code in `io/` or `ops/`, its `cmd_<name>.py`, its registration, its API,
+  its tests, its section in `docs/cli.md` (`tests/test_docs.py` fails
   without it) and its changelog entry.
 - **Reviewing a pull request:** [docs/contributing.md](docs/contributing.md#reviewing-a-pull-request):
   as a whole, at its head, layer by layer, each finding with its place and its
@@ -183,7 +182,7 @@ metacooler's own, each in full in [docs/internals.md](docs/internals.md):
 
 - `docs/cli.md`: **the** command line's reference, every command and option,
   and the Python function each maps to; `tests/test_docs.py` keeps it true.
-- `docs/format.md`: the format's specification, the report's keys and the logs.
+- `docs/format.md`: the format's specification and the report's keys.
 - The site is zensical with chromokit's look (`zensical.toml`, `overrides/`);
   the version in its header is `extra.release`, which bump-my-version updates.
 - `reviewed/`: dated notes of earlier reviews, ignored by git: they exist only

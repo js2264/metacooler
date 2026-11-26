@@ -74,18 +74,17 @@ def cmd_aggregate(
     contig (``--level contig``) or a genome (``--level genome``).  Pixels
     are processed in chunks so the operation scales to large files.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.aggregate import aggregate
 
     setup_logging(verbose, command_name="metacooler aggregate", quiet=quiet)
 
     check_output(output, force, inputs=[metacool_path])
 
-    with run_log(output, "Cool file written"):
-        aggregate(
-            uri=metacool_path,
-            output=output,
-            level=cast(Literal["contig", "genome"], level),
-            count_col=count_col,
-            chunksize=chunksize,
-        )
+    aggregate(
+        uri=metacool_path,
+        output=output,
+        level=cast(Literal["contig", "genome"], level),
+        count_col=count_col,
+        chunksize=chunksize,
+    )

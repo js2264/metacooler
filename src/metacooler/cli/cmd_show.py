@@ -155,7 +155,7 @@ def cmd_show(
     quiet: bool = False,
 ) -> None:
     """Render a contact map heatmap from a metacool file."""
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.show import show
 
     setup_logging(verbose, command_name="metacooler show", quiet=quiet)
@@ -164,21 +164,20 @@ def cmd_show(
 
     # ``show`` upgrades the level for --range/--contigs itself, so the Python
     # API and the CLI cannot drift apart.
-    with run_log(output, "Image written"):
-        show(
-            uri=metacool_path,
-            level=cast(Literal["bin", "contig", "genome"], level),
-            genomes=genomes or None,
-            contigs=contigs or None,
-            filters=filters or None,
-            range1=range1,
-            range2=range2,
-            transform=cast(Literal["log1p", "log10", "none"], transform),
-            cmap=cmap,
-            vmax=vmax,
-            separators=separators,
-            out=output,
-            dpi=dpi,
-            force=force,
-            balance=balance,
-        )
+    show(
+        uri=metacool_path,
+        level=cast(Literal["bin", "contig", "genome"], level),
+        genomes=genomes or None,
+        contigs=contigs or None,
+        filters=filters or None,
+        range1=range1,
+        range2=range2,
+        transform=cast(Literal["log1p", "log10", "none"], transform),
+        cmap=cmap,
+        vmax=vmax,
+        separators=separators,
+        out=output,
+        dpi=dpi,
+        force=force,
+        balance=balance,
+    )

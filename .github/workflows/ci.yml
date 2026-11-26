@@ -258,7 +258,7 @@ jobs:
           cli metacooler info tests/data/assembly_1_1kb.metacool
           cli metacooler check tests/data/assembly_1_1kb.metacool
           cli metacooler report tests/data/assembly_1_1kb.metacool -o "$RUNNER_TEMP/report"
-          ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html "$RUNNER_TEMP"/report/assembly_1_1kb.metacooler_*.log
+          ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html
 
   # metacooler's own (the migration plan's X-1, appendix B.5): hicstuff's and
   # metaTOR's tests against this metacooler, which they read and write maps

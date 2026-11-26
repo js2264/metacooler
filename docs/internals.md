@@ -27,7 +27,7 @@ src/metacooler/
 ├── normalize.py   # normalization arithmetic, pure numpy (ICE for any grouping, NB/ZINB fits)
 ├── qc.py          # the contact-quality tally: its four categories, pure numpy
 ├── ps.py          # P(s) arithmetic: distance grids and denominators
-├── cli/           # one file per command: cmd_<name>.py; logging_utils.py, the logs
+├── cli/           # one file per command: cmd_<name>.py; logging_utils.py, stderr's logging
 ├── io/            # file read/write: create, collect, reassign, annotate, clusters, extract, fasta,
 │                  # dump, flatten, network, merge, mmetacool, contigs, genomes, colspec, weights,
 │                  # sites, staging (locks and staged writes), report
@@ -89,7 +89,7 @@ src/metacooler/
 
 ### Logging { #logging }
 
-**Logging**: use `logging.getLogger("metacooler")`, never `print`. Every CLI command exposes `-v/--verbose` for debug logging. A command that writes a map or a file runs its work inside `cli/logging_utils.run_log`, after its own checks: its log, beside what it writes, gets everything from INFO up (DEBUG with `-v`, whatever `-q` does to stderr), and nothing of the log's header or last line reaches stderr. A command that only reads logs to stderr only. See [Logs](format.md#logs).
+**Logging**: use `logging.getLogger("metacooler")`, never `print`. Every CLI command exposes `-v/--verbose` for debug logging. It goes to stderr only, never to a file: metacooler is not a pipeline, and the terminal is enough (an exception to CONVENTIONS.md § 11's log files, which the pipelines write).
 
 ### Streaming creation { #streaming-creation }
 

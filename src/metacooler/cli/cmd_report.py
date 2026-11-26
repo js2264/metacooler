@@ -24,8 +24,8 @@ from metacooler.cli.main import MetaCoolURI, cli
     help=(
         "Directory of the report, created if missing: "
         "[cyan]<sample>.report.txt[/cyan], [cyan]<sample>.report_mqc.yaml[/cyan], "
-        "[cyan]<sample>.report.html[/cyan] and the log, [cyan]<sample>[/cyan] "
-        "being the map's name without [cyan].metacool[/cyan], or its entry's."
+        "and [cyan]<sample>.report.html[/cyan], [cyan]<sample>[/cyan] being the "
+        "map's name without [cyan].metacool[/cyan], or its entry's."
     ),
 )
 @force_option
@@ -46,7 +46,7 @@ def cmd_report(
     computed from its pixels), each genome, and its P(s). MultiQC finds the
     report_mqc.yaml files of several maps and merges their rows.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.io._utils import check_output_path
     from metacooler.io.report import report_paths, write_report
     from metacooler.uri import sample_name
@@ -54,9 +54,8 @@ def cmd_report(
     setup_logging(verbose, command_name="metacooler report", quiet=quiet)
 
     sample = sample_name(metacool_path)
-    # An earlier report is refused before the log starts, as an existing
+    # An earlier report is refused before anything is read, as an existing
     # output of every other command is.
     for path in report_paths(outdir, sample):
         check_output_path(path, force, inputs=[metacool_path], defer_removal=True)
-    with run_log(outdir, "Report written", directory=outdir, sample=sample, mkdir=True):
-        write_report(metacool_path, outdir, force=force)
+    write_report(metacool_path, outdir, force=force)

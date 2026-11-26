@@ -50,7 +50,7 @@ def cmd_merge(
     """
     import h5py
 
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.merge import merge
     from metacooler.qc import QC_METADATA_KEY, strip_qc_metadata
 
@@ -61,29 +61,28 @@ def cmd_merge(
 
     check_output(output, force, inputs=metacool_paths)
 
-    with run_log(output, "Map written"):
-        merge(inputs=metacool_paths, output=output)
+    merge(inputs=metacool_paths, output=output)
 
-        # Merge metadata from inputs and append command
-        combined_meta: dict = {}
-        all_commands: list[str] = []
-        for inp in metacool_paths:
-            # Each input's qc block describes that input alone, not the summed
-            # pixel table: the block merge() wrote, if it could sum them, is kept.
-            meta = strip_qc_metadata(read_metadata_uri(inp))
-            for key, value in meta.items():
-                if key == "commands":
-                    if isinstance(value, list):
-                        for cmd in value:
-                            if cmd not in all_commands:
-                                all_commands.append(cmd)
-                else:
-                    combined_meta[key] = value
-        all_commands.append(reconstruct_command())
-        combined_meta["commands"] = all_commands
+    # Merge metadata from inputs and append command
+    combined_meta: dict = {}
+    all_commands: list[str] = []
+    for inp in metacool_paths:
+        # Each input's qc block describes that input alone, not the summed
+        # pixel table: the block merge() wrote, if it could sum them, is kept.
+        meta = strip_qc_metadata(read_metadata_uri(inp))
+        for key, value in meta.items():
+            if key == "commands":
+                if isinstance(value, list):
+                    for cmd in value:
+                        if cmd not in all_commands:
+                            all_commands.append(cmd)
+            else:
+                combined_meta[key] = value
+    all_commands.append(reconstruct_command())
+    combined_meta["commands"] = all_commands
 
-        with h5py.File(output, "a") as f:
-            merged_qc = read_metadata(f).get(QC_METADATA_KEY)
-            if merged_qc is not None:
-                combined_meta[QC_METADATA_KEY] = merged_qc
-            f.attrs["metadata"] = json.dumps(combined_meta)
+    with h5py.File(output, "a") as f:
+        merged_qc = read_metadata(f).get(QC_METADATA_KEY)
+        if merged_qc is not None:
+            combined_meta[QC_METADATA_KEY] = merged_qc
+        f.attrs["metadata"] = json.dumps(combined_meta)

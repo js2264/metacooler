@@ -239,13 +239,12 @@ uv run --only-group docs zensical serve     # http://localhost:8000
     @quiet_option
     def cmd_name(metacool_path, output, force, verbose, quiet):
         """What it does, in more words."""
-        from metacooler.cli.logging_utils import run_log, setup_logging
+        from metacooler.cli.logging_utils import setup_logging
         from metacooler.io.name import do_it  # heavy imports here: --help stays fast
 
         setup_logging(verbose, command_name="metacooler <name>", quiet=quiet)
         check_output(output, force, inputs=[metacool_path])
-        with run_log(output, "Map written"):  # a command that writes: its log
-            do_it(metacool_path, output)
+        do_it(metacool_path, output)
     ```
 
     - its `help=` is one line, and it takes no `cls=`: the group's
@@ -256,8 +255,8 @@ uv run --only-group docs zensical serve     # http://localhost:8000
     - the shared options are `cli/_options.py`'s: `-f/--force` with
       `check_output(..., inputs=...)`, `-v`, `-q`, `--nproc`, `--genomes` and
       `--contigs` (`parse_comma_list`), `--filter`;
-    - a command that writes a map or a file runs its work in `run_log`, after
-      its own checks; one that only reads does not.
+    - it logs through `setup_logging`, to stderr only: metacooler writes no log
+      file (it is not a pipeline, an exception to CONVENTIONS.md § 11).
 3. **Its registration:** one line in the import block at the end of
    `cli/main.py`, in alphabetical order, and its name in the right panel of
    `COMMAND_GROUPS` there.

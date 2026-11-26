@@ -106,7 +106,7 @@ def cmd_qc(
     precise block (measured on read positions, before binning) under
     ``metadata.qc`` — read it with ``metacooler metadata get -k qc``.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.filters import parse_distance
     from metacooler.ops.qc import qc as run_qc
 
@@ -119,40 +119,35 @@ def cmd_qc(
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--threshold") from exc
 
-    with run_log(
-        output or per_genome_out or (metacool_path if store else None), "QC written"
-    ):
-        result = run_qc(
-            metacool_path,
-            distance_threshold=distance_threshold,
-            chunksize=chunksize,
-            store=store,
+    result = run_qc(
+        metacool_path,
+        distance_threshold=distance_threshold,
+        chunksize=chunksize,
+        store=store,
+    )
+
+    if per_genome_out is not None:
+        result.per_genome.to_csv(per_genome_out, sep="\t", index=False)
+
+    if table_out:
+        from rich.console import Console
+        from rich.table import Table
+
+        table = Table(
+            title=f"Contact QC: {Path(metacool_path.split('::')[0]).name}",
         )
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="magenta", justify="right")
+        for label, key in _TABLE_ROWS:
+            if key not in result.summary:
+                continue
+            value = result.summary[key]
+            table.add_row(label, f"{value:,}" if isinstance(value, int) else str(value))
+        Console().print(table)
+        return
 
-        if per_genome_out is not None:
-            result.per_genome.to_csv(per_genome_out, sep="\t", index=False)
-
-        if table_out:
-            from rich.console import Console
-            from rich.table import Table
-
-            table = Table(
-                title=f"Contact QC: {Path(metacool_path.split('::')[0]).name}",
-            )
-            table.add_column("Metric", style="cyan")
-            table.add_column("Value", style="magenta", justify="right")
-            for label, key in _TABLE_ROWS:
-                if key not in result.summary:
-                    continue
-                value = result.summary[key]
-                table.add_row(
-                    label, f"{value:,}" if isinstance(value, int) else str(value)
-                )
-            Console().print(table)
-            return
-
-        text = json.dumps(result.summary, indent=2, default=str)
-        if output is not None:
-            output.write_text(text + "\n")
-        else:
-            click.echo(text)
+    text = json.dumps(result.summary, indent=2, default=str)
+    if output is not None:
+        output.write_text(text + "\n")
+    else:
+        click.echo(text)

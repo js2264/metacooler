@@ -176,7 +176,7 @@ def cmd_reassign(
     assignment is a --contigs table, or a --round of the map's own clusters.
     """
     from metacooler.cli._provenance import load_metadata_file, reconstruct_command
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.reassign import reassign
 
     setup_logging(verbose, command_name="metacooler reassign", quiet=quiet)
@@ -212,23 +212,19 @@ def cmd_reassign(
     meta: dict = {"commands": [reconstruct_command()]}
     meta.update(load_metadata_file(metadata))
 
-    with run_log(
-        output if output is not None else metacool_path,
-        "Map written" if output is not None else "Map edited",
-    ):
-        reassign(
-            uri=metacool_path,
-            contig_genome_map=contigs_table,
-            output=output,
-            round=round_name,
-            contig_table_format=contigs_format,
-            genomes_table=genomes_table,
-            genomes_table_format=genomes_format,
-            missing=missing,
-            layout=cast("Layout", layout),
-            inplace=inplace,
-            metadata=meta,
-            qc=qc,
-            chunksize=chunksize,
-            force=force,
-        )
+    reassign(
+        uri=metacool_path,
+        contig_genome_map=contigs_table,
+        output=output,
+        round=round_name,
+        contig_table_format=contigs_format,
+        genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
+        missing=missing,
+        layout=cast("Layout", layout),
+        inplace=inplace,
+        metadata=meta,
+        qc=qc,
+        chunksize=chunksize,
+        force=force,
+    )

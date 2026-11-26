@@ -683,43 +683,6 @@ with the four columns above. Every map's file carries the same `id`, so
 sample that hicstuff and metaTOR report under the same name gets their columns
 on the same row.
 
-## Logs { #logs }
-
-Every command that writes a map or a file writes its log beside it:
-`<sample>.metacooler_<YYYYMMDDHHMMSS>.log`, in the directory of its output,
-beside the map it edits in place, or in `report`'s directory. `<sample>` is
-the output's name without its extension (`.metacool`, `.mmetacool`, `.cool`,
-`.tsv.gz`, `.fa.gz`, `.png`, …), the entry's name for an entry of a collection
-edited in place, or the map's sample for its report; the time is when the
-command started, in local time. A command that only reads (`info`, `ls`,
-`tree`, `attrs`, `check`, `normalize list`, `metadata list` and `get`, a
-`dump`, `network`, `ps` or `qc` to stdout) logs to stderr only, and so does a
-command refused before it starts its work (an existing output without `-f`).
-
-A log starts with hicstuff's header: the version, the date, the command line,
-and the value of each of the command's parameters, as given or by default,
-then `---`. Then a line per record, from INFO up (from DEBUG with `-v`, whatever
-`-q` does to stderr), and a last line that says what the command wrote and how
-long it took, or why it failed:
-
-```text
-## metacooler: v0.5.0 log file
-## date: 2026-11-26 10:15:30
-## cmd: metacooler flatten gut_T0.metacool -o gut_T0.cool
-## metacool_path: gut_T0.metacool
-## output: gut_T0.cool
-## force: False
-## verbose: False
-## quiet: False
----
-2026-11-26,10:15:30 :: INFO :: Flattening gut_T0.metacool → gut_T0.cool: 44 contigs, 661 bins
-2026-11-26,10:15:31 :: INFO :: Written flattened cool to gut_T0.cool
-2026-11-26,10:15:31 :: INFO :: Cool file written after 0h 0m 1s: gut_T0.cool
-```
-
-The log's name, its header's keys and its last line are part of metacooler's
-interface: they change only with an entry in the changelog.
-
 ## Cooler compatibility detail
 
 The compatibility mechanism relies on two things written by metacooler at file

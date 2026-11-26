@@ -76,18 +76,17 @@ def cmd_binnify(
     The new bin size must be an exact multiple of the current bin size.
     Uses midpoint assignment to map old bins to new bins.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.ops.binnify import binnify
 
     setup_logging(verbose, command_name="metacooler binnify", quiet=quiet)
 
     check_output(output, force, inputs=[metacool_path])
 
-    with run_log(output, "Map written"):
-        binnify(
-            uri=metacool_path,
-            output=output,
-            binsize=binsize,
-            level=level,
-            chunksize=chunksize,
-        )
+    binnify(
+        uri=metacool_path,
+        output=output,
+        binsize=binsize,
+        level=level,
+        chunksize=chunksize,
+    )

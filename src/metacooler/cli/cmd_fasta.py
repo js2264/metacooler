@@ -141,7 +141,7 @@ def cmd_fasta(
     By default, one file per genome, its contigs' records as they are in the
     assembly (header and line breaks included), in map order.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.io.fasta import write_fasta
 
     setup_logging(verbose, command_name="metacooler fasta", quiet=quiet)
@@ -151,18 +151,17 @@ def cmd_fasta(
         check_output(
             output, force, inputs=[metacool_path, assembly], defer_removal=True
         )
-    with run_log(output, "FASTA written", mkdir=True):
-        write_fasta(
-            metacool_path,
-            assembly,
-            output,
-            genomes=genomes or None,
-            filters=filters or None,
-            round=round_name,
-            unbinned=unbinned,
-            stitch=stitch,
-            spacer=spacer if stitch else None,
-            single_file=single_file,
-            force=force,
-            temp_dir=temp_dir,
-        )
+    write_fasta(
+        metacool_path,
+        assembly,
+        output,
+        genomes=genomes or None,
+        filters=filters or None,
+        round=round_name,
+        unbinned=unbinned,
+        stitch=stitch,
+        spacer=spacer if stitch else None,
+        single_file=single_file,
+        force=force,
+        temp_dir=temp_dir,
+    )

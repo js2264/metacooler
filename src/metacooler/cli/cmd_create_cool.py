@@ -101,7 +101,7 @@ def cmd_create_cool(
     Converts a standard cooler file to metacool format by adding the genome
     hierarchy. Bins and pixels from the input cool file are preserved exactly.
     """
-    from metacooler.cli.logging_utils import run_log, setup_logging
+    from metacooler.cli.logging_utils import setup_logging
     from metacooler.filters import parse_distance
     from metacooler.io.create import from_cool
 
@@ -129,24 +129,23 @@ def cmd_create_cool(
     meta: dict = {"commands": [reconstruct_command()]}
     meta.update(load_metadata_file(metadata))
 
-    with run_log(output, "Map written"):
-        from_cool(
-            cool_uri=cool_path,
-            output=output,
-            contig_genome_map=contigs,
-            contig_table_format=contigs_format,
-            genomes_table=genomes_table,
-            genomes_table_format=genomes_format,
-            contig_ordering=cast(
-                Literal["genome-then-length", "genome-then-alpha", "cool", "alpha"],
-                contig_order,
-            ),
-            assembly_name=assembly_name,
-            drop_unassigned=drop_unassigned,
-            filters=list(filters) or None,
-            metadata=meta,
-            nproc=nproc,
-            sort_in_memory=sort_in_memory,
-            qc=qc,
-            qc_distance_threshold=qc_distance_threshold,
-        )
+    from_cool(
+        cool_uri=cool_path,
+        output=output,
+        contig_genome_map=contigs,
+        contig_table_format=contigs_format,
+        genomes_table=genomes_table,
+        genomes_table_format=genomes_format,
+        contig_ordering=cast(
+            Literal["genome-then-length", "genome-then-alpha", "cool", "alpha"],
+            contig_order,
+        ),
+        assembly_name=assembly_name,
+        drop_unassigned=drop_unassigned,
+        filters=list(filters) or None,
+        metadata=meta,
+        nproc=nproc,
+        sort_in_memory=sort_in_memory,
+        qc=qc,
+        qc_distance_threshold=qc_distance_threshold,
+    )
