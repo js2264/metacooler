@@ -47,20 +47,24 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write # attach results to the release; publish the data and page releases
-  actions: write # start docs.yml once the page is published
+  contents: read
 
 jobs:
   benchmarks:
     runs-on: ubuntu-latest
     timeout-minutes: 340
+    permissions:
+      contents: write # attach results to the release; publish the data and page releases
+      actions: write # start docs.yml once the page is published
     env:
       BENCH_DATASETS: ${{ inputs.datasets || 'S M L XL' }}
       BENCH_TIMEOUT: ${{ inputs.timeout || '1800' }}
       GH_TOKEN: ${{ github.token }}
       DATA: benchmarks/_work/data
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Free disk space
         run: |
@@ -71,11 +75,11 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq time pigz
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          enable-cache: true
+          # No cache: this workflow publishes releases (zizmor's cache-poisoning).
+          enable-cache: false
           python-version: "3.13"
-          cache-dependency-glob: "uv.lock"
 
       - name: Install metacooler and cooler
         run: |
@@ -88,7 +92,7 @@ jobs:
           .venv/bin/cooler --version
 
       - name: Install Quarto
-        uses: quarto-dev/quarto-actions/setup@v2
+        uses: quarto-dev/quarto-actions/setup@8a96df13519ee81fd526f2dfca5962811136661b # v2.2.0
         with:
           version: 1.10.19
 
@@ -148,7 +152,7 @@ jobs:
 
       - name: Keep the page, tables, figures and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmarks-${{ github.ref_name }}-${{ github.run_number }}
           path: |
@@ -186,7 +190,7 @@ jobs:
           TAG: benchmark-page
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          site=$(sed -n 's/^site_url = "\(.*\)"$/\1/p' zensical.toml)/benchmarks/
+          site=$(sed -n 's/^site_url = "\(.*[^/]\)\/*"$/\1/p' zensical.toml)/benchmarks/
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           {
             echo "The benchmark page the documentation site serves at <$site>:"
