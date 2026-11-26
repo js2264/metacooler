@@ -47,7 +47,7 @@ nav = [
     { "Contributing" = "contributing.md" },
     { "Citing metacooler" = "citation.md" },
     { "Changelog" = "changelog.md" },
-    { "Benchmarks" = "https://js2264.github.io/metacooler/benchmarks/" }
+    { "Benchmarks" = "benchmarks/" }
   ]}
 ]
 

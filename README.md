@@ -245,13 +245,6 @@ assembly:
 - **Re-attributable bins**: `reassign` swaps in a new contig-to-genome table on an existing file — the `/genomes` table and the contig layout are rebuilt, the contacts are not recomputed
 - **Multi-resolution**: `binnify` (exact multiples of the source bin size only) and `zoomify` → a `.mmetacool` collection
 
-## Releasing
+## Contributing
 
-Changelog entries for in-progress work go under `## Unreleased` in `docs/changelog.md` as they land on `devel`. To cut a release:
-
-``` console
-uv run bump-my-version bump minor   # or patch / major
-git push --follow-tags
-```
-
-[`bump-my-version`](https://github.com/callowayproject/bump-my-version) (configured in `pyproject.toml`) promotes `## Unreleased` to a dated `## X.Y.Z - YYYY-MM-DD` section, bumps `__version__` in `src/metacooler/_version.py` — the single source of truth for the package version — and commits and tags the result, all in one step. Pushing the tag triggers [`release.yml`](.github/workflows/release.yml): it builds the sdist/wheel, fails if the tag doesn’t match `__version__`, publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no stored token), and opens a GitHub release with that version’s changelog section and the built artifacts attached. [`docs.yml`](.github/workflows/docs.yml) redeploys the documentation site on the same tag.
+Setting up, testing, documenting and releasing metacooler: [the contributing page](https://js2264.github.io/metacooler/contributing/).

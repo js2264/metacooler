@@ -1205,6 +1205,11 @@ metacooler metadata remove gut_T0.metacool -k enzyme
 metacooler metadata load   sample_meta.yaml gut_T0.metacool      # INPUT_FILE first
 ```
 
+| Option | Subcommands | Description |
+|--------|-------------|-------------|
+| `-k, --key KEY` | `get`, `add`, `remove` | The key to read, set or remove; *required*. |
+| `--value VALUE` | `add` | The value to store under it; *required*. |
+
 !!! note "`metadata load` argument order"
     `load` takes the metadata file **first**, then the target:
     `metacooler metadata load <metadata.yaml> <file.metacool>`.
@@ -1979,6 +1984,10 @@ metacooler show gut_T0.metacool -r contig_0_0:0-100000 \
 Print core file metadata and statistics (bin size, counts, ordering, …). Prints
 JSON by default; `--table` renders a rich table. Also accepts standard
 `.cool`/`.mcool` files and mmetacool entries. **API:** `MetaCooler.info`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--table` | off | A rich table rather than JSON. |
 
 The `assembly` field reports the standard cooler `genome-assembly` attribute
 (`"unknown"` when `--assembly-name` was not given at creation time); metacooler

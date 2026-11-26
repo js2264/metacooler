@@ -1,8 +1,8 @@
 {#-
-  metacooler: zensical's search button, labelled as on doc.chromosomix.app.
+  chromokit: zensical's search button, labelled as on doc.chromosomix.app.
 -#}
 <div class="md-search" data-md-component="search" role="dialog" aria-label="{{ lang.t('search') }}">
   <button type="button" class="md-search__button">
-    Search the docs…
+    {{ config.extra.search_label | d("Search the docs…", true) }}
   </button>
 </div>
