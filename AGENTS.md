@@ -33,6 +33,9 @@ make fix                                        # ty, ruff, and README.md render
 uv run bump-my-version bump minor               # a release (docs/contributing.md)
 ```
 
+uv, never pip, makes the environment; hatchling builds the package;
+`pyproject.toml` gives every dependency, each floor with its reason, and
+`uv.lock` pins them. ruff formats with double quotes and leaves README.md out.
 Run pytest through `uv run`: some tests run cooler's command line, which it
 puts on `PATH`. To reproduce CI's `bounds` job, set `UV_RESOLUTION` for every
 uv command, in a scratch copy (docs/contributing.md, Testing).
@@ -131,8 +134,13 @@ metacooler's own, each in full in [docs/internals.md](docs/internals.md):
   `h5py.File(map, "r+")`. A writer of a new output goes through
   `writing_output` ([#in-place](docs/internals.md#in-place)).
 - **Each writer's own invariants** (`collect`, `reassign`, `annotate`, `create`'s
-  contigs table, `fasta`, `merge`, `/genomes`, `--nproc`) are in
-  [Internals](docs/internals.md#rules): read the one you change.
+  contigs table, `binnify --level contig`'s stream, `fasta`, `merge`,
+  `/genomes`, `--nproc`) are in [Internals](docs/internals.md#rules): read the
+  one you change.
+- **Correctness, speed, the API, errors:** the HDF5 layer's links and offsets,
+  no dense matrix past its bound, `force` or `FileExistsError`, deprecations
+  that warn, messages that name what they refuse
+  ([#more-rules](docs/internals.md#more-rules)).
 - **The report** (`metacooler report`): `ops/report.collect` computes it,
   `io/report.write_report` writes it with the kit; a key, a column or a MultiQC
   column that changes or goes raises `ops/report.FORMAT_VERSION`, and
@@ -164,7 +172,12 @@ metacooler's own, each in full in [docs/internals.md](docs/internals.md):
 - **Documenting:** docstrings, help strings and the words to use,
   [docs/contributing.md](docs/contributing.md#docstrings-help-and-words).
 - **Releasing:** [docs/contributing.md](docs/contributing.md#releasing).
-- **The benchmarks:** [benchmarks/README.md](benchmarks/README.md).
+- **The benchmarks:** [benchmarks/README.md](benchmarks/README.md). They time
+  uv.lock's cooler (0.12.1): `bench.sh`'s `COOLER_VERSION` moves with it.
+  `simulate.py`'s `GENERATOR_VERSION` moves with its model or a preset (the
+  `benchmark-data-v<N>` release caches the data). The page reaches the site
+  through the `benchmark-page` release, which `docs.yml` serves at every
+  build, since a deployment replaces the whole site.
 
 ## Reference
 

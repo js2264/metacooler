@@ -45,16 +45,39 @@ make cli-tests                                      # every command from the she
     uv run diff-cover coverage.xml --compare-branch=origin/devel --fail-under=80
     ```
 
-- **The fixtures** are in `tests/conftest.py`: `tiny_fasta`,
-  `tiny_contigs_table`, `tiny_bins_bed`, `tiny_pairs`, `tiny_genomes_table`,
-  `tiny_metacooler`, `tiny_cool`, `tiny_mmetacool`, and their variants for each
-  contigs-table format and edge case. `tests/_cools.py` (`make_cool`, `ECOLI`,
-  `BSUB`) builds the small single-genome cools of the `collect` tests. A
+- **The fixtures** are in `tests/conftest.py`:
+  - `tiny_fasta`, four contigs: `contig_A` (1000 bp), `contig_B` (600),
+    `contig_C` (400) and `contig_D` (200);
+  - `tiny_contigs_table`, their assignment to two MAGs, `contig_D` left
+    unbinned (`__unbinned__`); `tiny_genomes_table`, the genomes' metadata,
+    extra columns included;
+  - `tiny_bins_bed`, fixed 100 bp bins; `tiny_pairs`, about 200 synthetic
+    contacts (numpy's seed 42);
+  - `tiny_metacooler`, the map `from_pairs` makes of them; `tiny_cool`, the
+    cool `cooler.create_cooler` makes of the same pairs and bins;
+    `tiny_mmetacool`, a collection of two entries of `tiny_metacooler`;
+  - variants for each contigs-table format (`contig_genome`, `metator`, by
+    column index) and edge case (variable bins, a cool whose contigs are not
+    in the map's order).
+
+  `tests/_cools.py` (`make_cool`, `ECOLI`, `BSUB`) builds the small
+  single-genome cools of the `collect` tests: two "species" that share contig
+  names, as real assemblies do, E. coli's deliberately not longest-first. A
   fixture that many tests share is built once per module
   (`tmp_path_factory`).
 - **The test data**, in `tests/data/`, is generated: `make regenerate`
-  rebuilds it (`generate-raw-files.py`, then `raw-to-cool.sh`). No file there
-  is over 5 MB, which pre-commit enforces.
+  rebuilds it (`generate-raw-files.py`, then `raw-to-cool.sh`). Two
+  assemblies (`assembly_1.fa`, `assembly_2.fa`, with their `.fai` and
+  `.chrom.sizes`), two libraries of each (`contacts_<n>_rep<r>.pairs.gz`),
+  their binnings (`contigs_table_<n>.tsv`, `mag_table_<n>.tsv`,
+  `assembly_<n>_DpnII-digested.bed`, `metadata.yaml`), and the cools, mcools
+  and maps made of them at 1 kb and by restriction fragment
+  (`assembly_<n>_rep<r>_{1kb,DpnII}.*`, `assembly_<n>_1kb.metacool` and
+  `.mmetacool`). `assembly_1_1kb.report.txt` is the reference of `metacooler
+  report`. No file there is over 5 MB, which pre-commit enforces.
+- **The suite's warnings** are cooler's, on the tiny `mergebuf` that two tests
+  of `TestUnorderedWrites` force on purpose; a warning from anywhere else is
+  worth a look.
 - **The dependency bounds.** The `test` job installs from `uv.lock`; the
   `bounds` job re-resolves without it, at `lowest-direct` on Python 3.10 and
   at `highest` on the newest Python. To reproduce one, set `UV_RESOLUTION` for
@@ -72,7 +95,12 @@ make cli-tests                                      # every command from the she
 ### Writing a test
 
 - **Group tests by what they test**, in classes (`class TestReassignLayout:`),
-  in `tests/test_<module>.py`; the command line's in `test_cli*.py`.
+  in `tests/test_<module>.py`; the command line's in `test_cli*.py`
+  (`test_cli_mmetacool.py` for the collections' commands), and the
+  collections' `info`, `tree` and `attrs` in `test_info_mmetacool.py`.
+- **A task of writing tests** reads the module it tests first, for its API,
+  changes the tests and not that module, and reports the tests it wrote and
+  their run.
 - **Each feature is tested on its happy path, its edge cases (empty inputs,
   missing files, invalid formats), its errors (`pytest.raises(ValueError,
   match=r"...")`, a raw pattern) and what it must keep working**: the
@@ -121,17 +149,32 @@ uv run --only-group docs zensical serve     # http://localhost:8000
 
 - **A module** starts with a one-line docstring saying what it does, not what
   it is: `"""URI parsing for metacool and mmetacool files."""`.
+- **A class** has a one-sentence summary, then its public responsibilities
+  and its key attributes; it does not repeat what its `__init__`'s own
+  docstring says of its parameters (mkdocstrings merges the two).
 - **A public function or method** has a Google-style docstring: a summary
   line, then `Args:`, `Returns:` (or `Yields:`) and `Raises:` sections, which
-  name the actual parameters, the units and formats, and when each exception
-  is raised. A private helper has a summary line at least.
+  name the actual parameters, the units, the formats and the valid ranges, and
+  when each exception is raised. A private helper has a summary line at
+  least, and a property one line.
+- **`src/metacooler/__init__.py`'s** module docstring says how its lazy
+  `__getattr__` exports the API ([Internals](internals.md#lazy-api)).
 - **A command's `help=`** is one line, an imperative sentence, which `metacooler
   -h` lists; its details go in its options' help. **Every option and argument**
   has a `help=` that says what it controls, the format or the unit of its
   value, and its default where that is not obvious. A deprecated alias says
-  so: `[DEPRECATED: use --genomes]`.
+  so: `[DEPRECATED: use --genomes]`. An `epilog=` is short, its rich markup
+  for emphasis only (`[bold]`, `[cyan]`).
 - **Documentation never changes behaviour**: a pass over the docstrings
-  changes no algorithm and no data flow, and adds no type annotation.
+  changes no algorithm and no data flow, adds no type annotation, reformats
+  no code (indentation, the order of imports) and touches `src/metacooler/`
+  alone, its tests only when asked.
+- **A pass over the documentation**: find the modules without a docstring,
+  the options and arguments without a `help=`, the functions with a summary
+  alone, and what is stale (a renamed option, an old parameter's name); write
+  what the code does, having read it, one precise sentence rather than two
+  vague ones; apply it, then read it again. Say which files changed and what
+  in each, and what was left, and why.
 - **One word for one thing**, everywhere:
 
     | Word | What it is |
@@ -250,17 +293,24 @@ maintainer squash-merges it. A review says how the whole change affects
 metacooler (its behaviour, its outputs, its command line, its Python API, its
 documentation), and gives each finding its file, function and lines, and a
 severity that reflects what it costs: 🔴 correctness, 🟠 speed, 🟡 the API,
-🔵 the documentation. It reports; it does not rewrite.
+🔵 the documentation. It reports; it does not rewrite. A finding is specific:
+"this could be cleaner" is not one, nor is a matter of taste (a name, a
+comment's wording) that harms neither correctness nor use. cooler itself is
+out of a review's scope: it is reported upstream, never changed here. Every
+step below is taken, however small the change: faults sit in code the
+change calls as well as in the code it changes.
 
 1. **Orient:** which layers the change touches. `cli → io/ops → api → schema`:
    the lower, the wider the harm. A fault in `cli/` is rarely wrong data; one
    in `io/create.py` can be wrong data that nothing notices.
 2. **Correctness:** dead code (a result computed and dropped, code that a
-   later change made inert), return values against their annotations
+   later change made inert; 🔴 when it was clearly meant to be used, a check
+   whose result should have raised), return values against their annotations
    (a generator `yield`s; `-> None` returns nothing), exceptions caught too
    broadly, constant expressions (`x or True`), an `x or []` in a body where
    `x` may be empty, a raw string not parsed by `parse_uri`, a URI written
-   with a separator other than `::`, and the rules of [Internals](internals.md)
+   with a separator other than `::`, a path handled as a `str` rather than a
+   `Path`, and the rules of [Internals](internals.md)
    (the format's invariants, `validate()`, the in-place writes, ASCII names,
    cooler's writer through `write_cooler`).
 3. **Speed:** [Internals](internals.md#speed): no Python loop over pixels,
@@ -270,6 +320,13 @@ severity that reflects what it costs: 🔴 correctness, 🟠 speed, 🟡 the API
 5. **The documentation:** docstrings against what the code does (a table's
    columns, its header), annotations as precise as the values, messages that
    name what they refuse; `docs/cli.md` and `docs/format.md` up to date.
+
+A review is written down as `review-<YYYYMMDD-hhmm>.md`: a summary (what was
+reviewed, and how many findings of each severity, in a table), then each
+finding (its title; its file, function and line; its severity; the step it
+comes from; two to four sentences on the fault and what it costs; the code
+as it is and as it should be), then a checklist of the findings, one line
+each. The maintainer keeps them in `reviewed/`.
 
 ## Debugging a map
 

@@ -20,7 +20,8 @@ Two file types exist:
 ```text
 src/metacooler/
 ├── api.py         # MetaCooler class — the primary Python API
-├── schema.py      # format constants, dtypes, is_metacooler/is_mmetacooler, validate(), read_table()
+├── schema.py      # format constants (METACOOLER_FORMAT, MMETACOOLER_FORMAT, COOLER_FORMAT), dtypes,
+│                  # is_metacooler/is_mmetacooler, validate(), read_table()
 ├── uri.py         # parse_uri("file::group") → (Path, group_path); sample_name()
 ├── filters.py     # --filter expression parser + DataFrame predicate engine
 ├── normalize.py   # normalization arithmetic, pure numpy (ICE for any grouping, NB/ZINB fits)
@@ -221,13 +222,14 @@ test's toy data cannot show, these rules keep out.
   (`with mc.open("r+") as f:`), or is private and says that its caller closes
   what it returns.
 - A deprecation warns when the deprecated thing is used, never only in a
-  docstring: `FutureWarning` from Python, a warning on stderr from the command
-  line, naming what replaces it, for one minor release at least before it
+  docstring: `FutureWarning` from Python (`stacklevel=2`, so that it names the
+  caller's line), a warning on stderr from the command line, naming what replaces it, for one minor release at least before it
   goes (CONVENTIONS.md § 18). A renamed option keeps its old name as an alias.
 - A hash that is not for security is `hashlib.md5(usedforsecurity=False)`:
   FIPS systems refuse the plain call.
 - A function that may overwrite a file takes `force=False` and raises
-  `FileExistsError` without it; its command has `-f/--force`.
+  `FileExistsError` without it, or its docstring says plainly that it
+  replaces its output; its command has `-f/--force`.
 - One word for one thing in `api.py`, `ops/` and `cli/`: `level="contig"`, not
   `"contigs"`.
 - A temporary file is removed with whatever a library wrote beside it

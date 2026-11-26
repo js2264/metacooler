@@ -300,6 +300,11 @@ metacooler info gut_T0.mmetacool::entries/rep1
 mc = metacooler.MetaCooler("gut_T0.mmetacool::entries/rep1")
 ```
 
+A plain path, `gut_T0.metacool`, is the map at the root of its file (the
+group `/`). `gut_T0.mmetacool::`, or the bare path, is the collection itself,
+which only the commands that describe it take (`ls`, `tree`, `attrs`, and
+`annotate`, on every entry).
+
 ### Multi-resolution files (zoomify output)
 
 `metacooler zoomify` produces a `.mmetacool` file where each entry is named
