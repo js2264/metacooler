@@ -172,7 +172,7 @@ def dump(
     quiet: bool,
 ) -> None:
     """Dump a table from a metacool file to TSV."""
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.dump import dump_table
 
     setup_logging(verbose, command_name="metacooler dump", quiet=quiet)
@@ -218,33 +218,37 @@ def dump(
 
     check_output(output, force, inputs=[metacool_path])
 
-    dump_table(
-        uri=metacool_path,
-        table=cast(
-            Literal[
-                "bins",
-                "chroms",
-                "contigs",
-                "genomes",
-                "pixels",
-                "indexes",
-                "clusters",
-                "members",
-                "all",
-            ],
-            table,
-        ),
-        genomes=genomes or None,
-        contigs=contigs or None,
-        filters=filters or None,
-        range1=range1,
-        range2=range2,
-        header=header,
-        out=output,
-        prefix=prefix,
-        pixels_format=cast(Literal["long", "wide"], pixels_format),
-        weight=weight,
-        join=join,
-        force=force,
-        balance=balance,
-    )
+    with run_log(
+        output if output is not None else prefix,
+        "Tables written" if table == "all" else "Table written",
+    ):
+        dump_table(
+            uri=metacool_path,
+            table=cast(
+                Literal[
+                    "bins",
+                    "chroms",
+                    "contigs",
+                    "genomes",
+                    "pixels",
+                    "indexes",
+                    "clusters",
+                    "members",
+                    "all",
+                ],
+                table,
+            ),
+            genomes=genomes or None,
+            contigs=contigs or None,
+            filters=filters or None,
+            range1=range1,
+            range2=range2,
+            header=header,
+            out=output,
+            prefix=prefix,
+            pixels_format=cast(Literal["long", "wide"], pixels_format),
+            weight=weight,
+            join=join,
+            force=force,
+            balance=balance,
+        )

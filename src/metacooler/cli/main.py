@@ -215,6 +215,17 @@ class MetaCoolerGroup(MetaCoolerCommand, click.RichGroup):
     command_class = MetaCoolerCommand
     group_class = type
 
+    def make_context(self, info_name, args, parent=None, **extra):
+        """Keep the command line's arguments as given, for the header of a
+        command's log (``cli/logging_utils.py``): parsing consumes them."""
+        given = list(args)
+        ctx = super().make_context(info_name, args, parent=parent, **extra)
+        if parent is None:
+            from metacooler.cli.logging_utils import ARGV_KEY
+
+            ctx.meta[ARGV_KEY] = given
+        return ctx
+
     def invoke(self, ctx):
         try:
             result = super().invoke(ctx)

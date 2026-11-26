@@ -186,7 +186,7 @@ def cmd_collect(
     ``<genome>__<contig>``.  Contacts between two inputs were never observed,
     so the inter-genome blocks of the output are empty.
     """
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.filters import parse_size
     from metacooler.io._utils import check_output_not_an_input
     from metacooler.io.collect import collect
@@ -218,22 +218,25 @@ def cmd_collect(
     meta: dict = {"commands": [reconstruct_command()]}
     meta.update(load_metadata_file(metadata))
 
-    collect(
-        inputs=cool_paths,
-        output=output,
-        names=names or None,
-        genomes_table=genomes_table,
-        genomes_table_format=genomes_format,
-        contigs_table=contigs_table,
-        contigs_table_format=contigs_format,
-        contig_ordering=cast(
-            Literal["cool", "genome-then-length", "genome-then-alpha"], contig_order
-        ),
-        assembly_name=assembly_name,
-        filters=list(filters) or None,
-        metadata=meta,
-        sort_in_memory={"auto": None, "memory": True, "external": False}[sort_strategy],
-        chunksize=chunksize,
-        qc=qc,
-        qc_distance_threshold=qc_distance_threshold,
-    )
+    with run_log(output, "Map written"):
+        collect(
+            inputs=cool_paths,
+            output=output,
+            names=names or None,
+            genomes_table=genomes_table,
+            genomes_table_format=genomes_format,
+            contigs_table=contigs_table,
+            contigs_table_format=contigs_format,
+            contig_ordering=cast(
+                Literal["cool", "genome-then-length", "genome-then-alpha"], contig_order
+            ),
+            assembly_name=assembly_name,
+            filters=list(filters) or None,
+            metadata=meta,
+            sort_in_memory={"auto": None, "memory": True, "external": False}[
+                sort_strategy
+            ],
+            chunksize=chunksize,
+            qc=qc,
+            qc_distance_threshold=qc_distance_threshold,
+        )

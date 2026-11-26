@@ -32,7 +32,7 @@ from metacooler.cli.main import MetaCoolURI, cli
 @quiet_option
 def cmd_rm(target: str, force: bool, verbose: bool, quiet: bool) -> None:
     """Remove an entry from an mmetacool file."""
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.mmetacool import list_entries, remove_entry
 
     setup_logging(verbose, command_name="metacooler rm", quiet=quiet)
@@ -52,4 +52,5 @@ def cmd_rm(target: str, force: bool, verbose: bool, quiet: bool) -> None:
     if not force:
         click.confirm(f"Remove entry {entry_name!r} from {file_path}?", abort=True)
 
-    remove_entry(file_path, entry_name)
+    with run_log(file_path, "Collection written"):
+        remove_entry(file_path, entry_name)

@@ -107,7 +107,7 @@ def cmd_network(
     """
     import sys
 
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.network import network
 
     setup_logging(verbose, command_name="metacooler network", quiet=quiet)
@@ -116,15 +116,16 @@ def cmd_network(
 
     # Without -o, the edges go to stdout as they are made (network() would
     # return them, every pixel in memory at --level bin).
-    network(
-        uri=metacool_path,
-        level=cast(Literal["bin", "contig", "genome"], level),
-        weight=weight,
-        out=output if output is not None else sys.stdout,
-        header=header,
-        chunksize=chunksize,
-        force=force,
-        balance=balance,
-        drop_spurious=drop_spurious,
-        ids=ids,
-    )
+    with run_log(output, "Network written"):
+        network(
+            uri=metacool_path,
+            level=cast(Literal["bin", "contig", "genome"], level),
+            weight=weight,
+            out=output if output is not None else sys.stdout,
+            header=header,
+            chunksize=chunksize,
+            force=force,
+            balance=balance,
+            drop_spurious=drop_spurious,
+            ids=ids,
+        )

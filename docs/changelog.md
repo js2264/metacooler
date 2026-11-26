@@ -17,6 +17,14 @@ may break the interface, a patch release never does.
   `binsize required when bins is None` once it had built the tables. With
   `--contigs` left out too, `metacooler create pairs --pairs P -o OUT` makes
   the map a MetaTOR run starts from.
+- **Every command that writes a map or a file writes its log beside it**,
+  `<sample>.metacooler_<YYYYMMDDHHMMSS>.log`, `<sample>` being the output's
+  name (an entry's, for an entry edited in place): hicstuff's header (the
+  version, the date, the command line, the value of each option), a line per
+  record, and what the command wrote and how long it took. The log keeps
+  everything from INFO up whatever `-q` does to stderr, and DEBUG with `-v`. A
+  command that only reads logs to stderr only, as before; stderr shows what it
+  showed. ([#PR](https://github.com/js2264/metacooler/pull/PR))
 
 ### Performance
 

@@ -234,22 +234,24 @@ def normalize_ice_cmd(
 ) -> None:
     """Balance a map and store the weights."""
     commands = _start(verbose, quiet, "ice")
+    from metacooler.cli.logging_utils import run_log
     from metacooler.ops.normalize import normalize_ice
 
-    normalize_ice(
-        metacool_path,
-        scope=scope,
-        name=name,
-        ignore_diags=ignore_diags,
-        mad_max=mad_max,
-        min_nnz=min_nnz,
-        min_count=min_count,
-        tol=tol,
-        max_iters=max_iters,
-        chunksize=chunksize,
-        force=force,
-        commands=commands,
-    )
+    with run_log(metacool_path, "Weights written"):
+        normalize_ice(
+            metacool_path,
+            scope=scope,
+            name=name,
+            ignore_diags=ignore_diags,
+            mad_max=mad_max,
+            min_nnz=min_nnz,
+            min_count=min_count,
+            tol=tol,
+            max_iters=max_iters,
+            chunksize=chunksize,
+            force=force,
+            commands=commands,
+        )
 
 
 @normalize.command(
@@ -283,21 +285,23 @@ def normalize_normcc_cmd(
 ) -> None:
     """Normalize a map with NormCC."""
     commands = _start(verbose, quiet, "normcc")
+    from metacooler.cli.logging_utils import run_log
     from metacooler.ops.normalize import normalize_normcc
 
-    normalize_normcc(
-        metacool_path,
-        sites=sites,
-        enzymes=enzymes or None,
-        fasta=fasta,
-        min_length=_distance(min_length, "--min-length"),
-        min_signal=min_signal,
-        spurious=spurious,
-        name=name,
-        chunksize=chunksize,
-        force=force,
-        commands=commands,
-    )
+    with run_log(metacool_path, "Weights written"):
+        normalize_normcc(
+            metacool_path,
+            sites=sites,
+            enzymes=enzymes or None,
+            fasta=fasta,
+            min_length=_distance(min_length, "--min-length"),
+            min_signal=min_signal,
+            spurious=spurious,
+            name=name,
+            chunksize=chunksize,
+            force=force,
+            commands=commands,
+        )
 
 
 @normalize.command(
@@ -357,24 +361,26 @@ def normalize_hiczin_cmd(
 ) -> None:
     """Normalize a map with HiCzin."""
     commands = _start(verbose, quiet, "hiczin")
+    from metacooler.cli.logging_utils import run_log
     from metacooler.ops.normalize import normalize_hiczin
 
-    normalize_hiczin(
-        metacool_path,
-        coverage=coverage,
-        sites=sites,
-        enzymes=enzymes or None,
-        fasta=fasta,
-        min_length=_distance(min_length, "--min-length"),
-        min_signal=min_signal,
-        spurious=spurious,
-        max_pairs=max_pairs,
-        seed=seed,
-        name=name,
-        chunksize=chunksize,
-        force=force,
-        commands=commands,
-    )
+    with run_log(metacool_path, "Weights written"):
+        normalize_hiczin(
+            metacool_path,
+            coverage=coverage,
+            sites=sites,
+            enzymes=enzymes or None,
+            fasta=fasta,
+            min_length=_distance(min_length, "--min-length"),
+            min_signal=min_signal,
+            spurious=spurious,
+            max_pairs=max_pairs,
+            seed=seed,
+            name=name,
+            chunksize=chunksize,
+            force=force,
+            commands=commands,
+        )
 
 
 #: Attributes shown by ``normalize list``, in order, when a column has them.

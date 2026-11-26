@@ -83,7 +83,7 @@ def metadata_add(
 ) -> None:
     """Add or update a metadata key-value pair."""
     from metacooler.cli._provenance import refuse_reserved_metadata_key
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.staging import edit_metadata
 
     setup_logging(verbose, command_name="metacooler metadata add", quiet=quiet)
@@ -99,7 +99,8 @@ def metadata_add(
         meta[key] = parsed
 
     # Under the map's lock, through a staged copy (see metacooler.io.staging).
-    edit_metadata(metacool_path, change)
+    with run_log(metacool_path, "Metadata written"):
+        edit_metadata(metacool_path, change)
 
 
 @metadata.command(name="remove")
@@ -113,7 +114,7 @@ def metadata_remove(metacool_path: str, key: str, verbose: bool, quiet: bool) ->
         read_metadata_uri,
         refuse_reserved_metadata_key,
     )
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.staging import edit_metadata
 
     setup_logging(verbose, command_name="metacooler metadata remove", quiet=quiet)
@@ -129,7 +130,8 @@ def metadata_remove(metacool_path: str, key: str, verbose: bool, quiet: bool) ->
         meta.pop(key, None)
 
     # Under the map's lock, through a staged copy (see metacooler.io.staging).
-    edit_metadata(metacool_path, change)
+    with run_log(metacool_path, "Metadata written"):
+        edit_metadata(metacool_path, change)
 
 
 @metadata.command(name="load")
@@ -142,7 +144,7 @@ def metadata_load(
 ) -> None:
     """Load metadata from a JSON or YAML file into the 'metadata' attribute."""
     from metacooler.cli._provenance import load_metadata_file
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.staging import edit_metadata
 
     setup_logging(verbose, command_name="metacooler metadata load", quiet=quiet)
@@ -152,4 +154,5 @@ def metadata_load(
     meta = load_metadata_file(input_file)
 
     # Under the map's lock, through a staged copy (see metacooler.io.staging).
-    edit_metadata(metacool_path, lambda existing: existing.update(meta))
+    with run_log(metacool_path, "Metadata written"):
+        edit_metadata(metacool_path, lambda existing: existing.update(meta))

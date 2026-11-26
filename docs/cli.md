@@ -18,8 +18,8 @@ A few conventions hold across the whole CLI:
 | `METACOOL_PATH` | A **positional** path to a `.metacool` file, or an `.mmetacool` entry URI (`file.mmetacool::entries/<name>`). Every command takes its input this way — there are no input *options*. |
 | `-o, --output` | Output path. Required unless the command writes to stdout. |
 | `-f, --force` | Overwrite the output if it already exists. Available on **every** command that writes a file, including `dump`, `network`, and `show`. An output that is one of the command's own inputs is refused even with `-f`, and `create`, `reassign` and `annotate` keep the previous file until the new one has been written and validated. |
-| `-v, --verbose` | Enable debug logging. Available on every command. |
-| `-q, --quiet` | Suppress informational logging; warnings and errors are still printed. Available on every command. `-v` and `-q` are mutually exclusive in effect (`-v` wins). |
+| `-v, --verbose` | Enable debug logging, on stderr and in the command's log. Available on every command. |
+| `-q, --quiet` | Suppress informational logging on stderr; warnings and errors are still printed, and the command's log keeps everything. Available on every command. With both, `-q` holds for stderr and `-v` for the log. |
 | `--genomes`, `--contigs` | Multi-value filters: repeat the flag or pass a comma-separated list (`--genomes MAG_01,MAG_02`). An explicitly empty value (`--genomes ''`) is **rejected** — it used to silently disable the filter, which turned an unset shell variable into a full dump. |
 | `--filter` | Select by *property* rather than by name — see [Filtering with `--filter`](#filter) below. Available on `create pairs`, `create cool`, `collect`, `extract`, `fasta`, `dump`, and `show`. |
 
@@ -57,6 +57,15 @@ A few conventions hold across the whole CLI:
     `.cool` as chrom names. Extra `--genomes` metadata columns are exempt:
     cooler never reads that group, so accented taxonomy is fine there. See
     [Names must be ASCII](format.md#names-must-be-ascii).
+
+**The log of a command.** Every command that writes a map or a file writes
+its log beside it, `<sample>.metacooler_<YYYYMMDDHHMMSS>.log`: `<sample>` is
+the output's name without its extension (or an entry's name, for an entry of a
+collection edited in place), and the time is when the command started. It
+starts with the command line and the value of every option, and ends with what
+the command wrote and how long it took. A command that only reads (`info`,
+`ls`, `tree`, `attrs`, `check`, a `dump` to stdout, …) logs to stderr only.
+See [Logs](format.md#logs).
 
 New to the tool? Start with the [Quickstart](quickstart.md); for the ideas
 behind genomes, contigs, bins, and levels, see [Concepts](concepts.md).

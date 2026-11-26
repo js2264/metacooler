@@ -39,7 +39,7 @@ from metacooler.cli.main import MetaCoolURI, cli
 @quiet_option
 def cmd_mv(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
     """Move (rename) an entry within an mmetacool file."""
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.mmetacool import list_entries, move_entry
 
     setup_logging(verbose, command_name="metacooler mv", quiet=quiet)
@@ -69,4 +69,5 @@ def cmd_mv(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
         )
         overwrite = True
 
-    move_entry(src_path, src_name, dst_name, overwrite=overwrite)
+    with run_log(src_path, "Collection written"):
+        move_entry(src_path, src_name, dst_name, overwrite=overwrite)

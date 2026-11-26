@@ -80,20 +80,21 @@ def cmd_zoomify(
     Input must be a fixed-bin metacooler. By default each level doubles the bin
     size; pass --resolutions for an explicit cooler-style resolution list.
     """
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.ops.zoomify import zoomify
 
     setup_logging(verbose, command_name="metacooler zoomify", quiet=quiet)
 
     check_output(output, force, inputs=[metacool_path])
 
-    zoomify(
-        uri=metacool_path,
-        output=output,
-        levels=levels,
-        resolutions=resolutions,
-        temp_dir=temp_dir,
-        force=force,
-        nproc=nproc,
-    )
-    click.echo(f"Zoomified {metacool_path} → {output}")
+    with run_log(output, "Collection written"):
+        zoomify(
+            uri=metacool_path,
+            output=output,
+            levels=levels,
+            resolutions=resolutions,
+            temp_dir=temp_dir,
+            force=force,
+            nproc=nproc,
+        )
+        click.echo(f"Zoomified {metacool_path} → {output}")

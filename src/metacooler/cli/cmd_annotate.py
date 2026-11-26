@@ -159,7 +159,7 @@ def cmd_annotate(
     .mmetacool path annotates every entry of the collection.
     """
     from metacooler.cli._provenance import reconstruct_command
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.annotate import annotate
 
     setup_logging(verbose, command_name="metacooler annotate", quiet=quiet)
@@ -184,19 +184,23 @@ def cmd_annotate(
         defer_removal=True,
     )
 
-    annotate(
-        metacool_path,
-        output,
-        genomes_table=genomes_table,
-        contigs_table=contigs_table,
-        genomes_table_format=genomes_format,
-        contigs_table_format=contigs_format,
-        columns=columns or None,
-        drop=drop or None,
-        replace=replace,
-        missing=missing,
-        unmatched=unmatched,
-        inplace=inplace,
-        metadata={"commands": [reconstruct_command()]},
-        force=force,
-    )
+    with run_log(
+        output if output is not None else metacool_path,
+        "Map written" if output is not None else "Map edited",
+    ):
+        annotate(
+            metacool_path,
+            output,
+            genomes_table=genomes_table,
+            contigs_table=contigs_table,
+            genomes_table_format=genomes_format,
+            contigs_table_format=contigs_format,
+            columns=columns or None,
+            drop=drop or None,
+            replace=replace,
+            missing=missing,
+            unmatched=unmatched,
+            inplace=inplace,
+            metadata={"commands": [reconstruct_command()]},
+            force=force,
+        )

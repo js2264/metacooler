@@ -172,7 +172,7 @@ def cmd_ps(
     ``create pairs`` already writes that finer table beside its output as
     ``<output>.ps.tsv``.
     """
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.filters import parse_distance
     from metacooler.ops.ps import ps
 
@@ -189,23 +189,24 @@ def cmd_ps(
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint=hint) from exc
 
-    table = ps(
-        uri=metacool_path,
-        out=output,
-        plot=plot,
-        pairs=pairs,
-        by=cast(Literal["all", "genome"], by),
-        genomes=genomes or None,
-        contigs=contigs or None,
-        filters=filters or None,
-        bins_per_decade=bins_per_decade,
-        min_distance=_distance(min_distance, "--min-distance"),
-        max_distance=_distance(max_distance, "--max-distance"),
-        value=value,
-        header=header,
-        dpi=dpi,
-        chunksize=chunksize,
-        force=force,
-    )
-    if output is None:
-        table.to_csv(sys.stdout, sep="\t", index=False, header=header)
+    with run_log(output or plot, "P(s) written"):
+        table = ps(
+            uri=metacool_path,
+            out=output,
+            plot=plot,
+            pairs=pairs,
+            by=cast(Literal["all", "genome"], by),
+            genomes=genomes or None,
+            contigs=contigs or None,
+            filters=filters or None,
+            bins_per_decade=bins_per_decade,
+            min_distance=_distance(min_distance, "--min-distance"),
+            max_distance=_distance(max_distance, "--max-distance"),
+            value=value,
+            header=header,
+            dpi=dpi,
+            chunksize=chunksize,
+            force=force,
+        )
+        if output is None:
+            table.to_csv(sys.stdout, sep="\t", index=False, header=header)

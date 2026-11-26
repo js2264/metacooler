@@ -76,7 +76,7 @@ def cmd_extract(
     Supports extracting one or more genomes and/or contigs.
     The output is a valid cooler file compatible with cooltools, HiGlass, etc.
     """
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.extract import extract
 
     setup_logging(verbose, command_name="metacooler extract", quiet=quiet)
@@ -96,12 +96,13 @@ def cmd_extract(
             "--contigs cannot be combined with --split (split is genome-only)."
         )
 
-    extract(
-        uri=metacool_path,
-        genomes=genome_list or None,
-        contigs=list(contigs) or None,
-        filters=list(filters) or None,
-        output=output,
-        split=split,
-        force=force,
-    )
+    with run_log(output, "Cool files written" if split else "Cool file written"):
+        extract(
+            uri=metacool_path,
+            genomes=genome_list or None,
+            contigs=list(contigs) or None,
+            filters=list(filters) or None,
+            output=output,
+            split=split,
+            force=force,
+        )

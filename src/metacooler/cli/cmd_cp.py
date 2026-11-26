@@ -74,7 +74,7 @@ def parse_entry_uri(uri: str, role: str) -> tuple[Path, str]:
 @quiet_option
 def cmd_cp(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
     """Copy an entry within or between mmetacool files."""
-    from metacooler.cli.logging_utils import setup_logging
+    from metacooler.cli.logging_utils import run_log, setup_logging
     from metacooler.io.mmetacool import (
         copy_entry,
         copy_entry_cross_file,
@@ -94,47 +94,48 @@ def cmd_cp(src: str, dst: str, force: bool, verbose: bool, quiet: bool) -> None:
             f"Source entry {src_name!r} not found. Available: {src_entries}"
         )
 
-    same_file = src_path.resolve() == dst_path.resolve()
+    with run_log(dst_path, "Collection written"):
+        same_file = src_path.resolve() == dst_path.resolve()
 
-    if same_file:
-        dst_entries = src_entries
-    else:
-        # Only now that the source is known good may we touch the destination —
-        # creating it first left a stray empty .mmetacool behind on a typo.
-        if not os.path.lexists(dst_path):
-            import h5py
+        if same_file:
+            dst_entries = src_entries
+        else:
+            # Only now that the source is known good may we touch the destination —
+            # creating it first left a stray empty .mmetacool behind on a typo.
+            if not os.path.lexists(dst_path):
+                import h5py
 
-            from metacooler.io.staging import writing_output
+                from metacooler.io.staging import writing_output
 
-            # Created exclusively: a collection another writer created
-            # meanwhile -- another cp, an entry copied into it -- is copied
-            # into, never truncated.
-            try:
-                with (
-                    writing_output(dst_path, force=False),
-                    h5py.File(dst_path, "w-") as f,
-                ):
-                    init_mmetacool_attrs(f)
-            except FileExistsError:
-                pass
-            else:
-                click.echo(f"Initialised new mmetacool file: {dst_path}")
-        dst_entries = list_entries(dst_path)
+                # Created exclusively: a collection another writer created
+                # meanwhile -- another cp, an entry copied into it -- is copied
+                # into, never truncated.
+                try:
+                    with (
+                        writing_output(dst_path, force=False),
+                        h5py.File(dst_path, "w-") as f,
+                    ):
+                        init_mmetacool_attrs(f)
+                except FileExistsError:
+                    pass
+                else:
+                    click.echo(f"Initialised new mmetacool file: {dst_path}")
+            dst_entries = list_entries(dst_path)
 
-    # Answering "y" must actually overwrite: the old code fell through with
-    # overwrite=force (still False) and the io layer raised anyway.
-    overwrite = force
-    if dst_name in dst_entries and not force:
-        where = "" if same_file else f" in {dst_path}"
-        click.confirm(
-            f"Destination entry {dst_name!r} already exists{where}. Overwrite?",
-            abort=True,
-        )
-        overwrite = True
+        # Answering "y" must actually overwrite: the old code fell through with
+        # overwrite=force (still False) and the io layer raised anyway.
+        overwrite = force
+        if dst_name in dst_entries and not force:
+            where = "" if same_file else f" in {dst_path}"
+            click.confirm(
+                f"Destination entry {dst_name!r} already exists{where}. Overwrite?",
+                abort=True,
+            )
+            overwrite = True
 
-    if same_file:
-        copy_entry(src_path, src_name, dst_name, overwrite=overwrite)
-    else:
-        copy_entry_cross_file(
-            src_path, src_name, dst_path, dst_name, overwrite=overwrite
-        )
+        if same_file:
+            copy_entry(src_path, src_name, dst_name, overwrite=overwrite)
+        else:
+            copy_entry_cross_file(
+                src_path, src_name, dst_path, dst_name, overwrite=overwrite
+            )

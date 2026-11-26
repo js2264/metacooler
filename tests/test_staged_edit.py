@@ -1539,7 +1539,8 @@ def test_an_output_another_process_writes_is_refused(
 ):
     """Every writer of a new map holds the lock of its output -- the path
     itself -- while it writes it: a writer of the same path in another process
-    refuses it, and nothing is written there."""
+    refuses it, and nothing is written there but the log of the run that
+    failed (a command's, see cli/logging_utils.py)."""
     from _staging_workers import hold
 
     name, write = OUTPUT_WRITERS[writer]
@@ -1554,7 +1555,8 @@ def test_an_output_another_process_writes_is_refused(
         assert ready.wait(60), "the holder did not take the lock"
         with pytest.raises((MapLockedError, _CliFailed), match="test holder"):
             write(tiny_metacooler, out, request)
-        assert sorted(p.name for p in out.parent.iterdir()) == [f"{name}.lock"]
+        left = [p.name for p in out.parent.iterdir() if ".metacooler_" not in p.name]
+        assert sorted(left) == [f"{name}.lock"]
     finally:
         release.set()
         process.join(60)
