@@ -1,5 +1,5 @@
 # Changes here are overwritten by `uvx copier update`: answer again there.
-_commit: v0.2.0
+_commit: v0.2.1
 _src_path: gh:js2264/chromokit
 authors:
 -   name: Jacques Serizay
@@ -14,6 +14,7 @@ docs_url: https://js2264.github.io/metacooler/
 docstring_style: google
 doi: ''
 entry_point: metacooler.cli.main:cli
+formats_page: format.md
 gpu: false
 image: false
 install_run: 'cli metacooler info tests/data/assembly_1_1kb.metacool
@@ -41,7 +42,6 @@ package: metacooler
 paper: null
 project_name: metacooler
 pypi_only: true
-formats_page: format.md
 python_dev: '3.14'
 python_max: '3.14'
 released: '2026-11-23'
