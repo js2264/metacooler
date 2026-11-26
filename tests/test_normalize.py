@@ -961,7 +961,7 @@ def test_normcc_matches_metaccs_model(mapfile: Path, community: MetaHiC):
 
 def test_normcc_without_sites(mapfile: Path):
     result = N.normalize_normcc(mapfile)
-    beta, w, _, _ = _normcc_reference(MetaCooler(mapfile), None)
+    beta, _, _, _ = _normcc_reference(MetaCooler(mapfile), None)
     assert result.attrs["covariates"] == [
         "intercept",
         "log_length",

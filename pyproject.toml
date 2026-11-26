@@ -121,6 +121,8 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
 ignore = [
     "E501",  # the formatter wraps code; long strings and docstrings are allowed
 ]
+# metacooler's own: × and – are meant, in messages (a 1×1 image) and in prose.
+allowed-confusables = ["×", "–"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

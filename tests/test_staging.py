@@ -24,7 +24,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import h5py
 import numpy as np
@@ -614,7 +614,7 @@ def _in_thread(call):
     def run():
         try:
             call()
-        except BaseException as error:  # noqa: BLE001 - re-raised below
+        except BaseException as error:  # re-raised below
             errors.append(error)
 
     thread = threading.Thread(target=run, name="other-thread")
@@ -1364,7 +1364,7 @@ class TestRegroupCarries:
             f["indexes"].create_dataset("extra_offset", data=np.zeros(n))
             return "/indexes/extra_offset"
 
-    EXTRAS = [
+    EXTRAS: ClassVar = [
         "group",
         "root attribute",
         "pixel column",
@@ -1909,9 +1909,12 @@ class TestRegistry:
         a.touch()
         b.touch()
         lock_path(a).write_text("")
-        waiting = threading.Thread(
-            target=lambda: pytest.raises(MapLockedError, lambda: lock(a).__enter__())
-        )
+
+        def wait():
+            with pytest.raises(MapLockedError):
+                lock(a).__enter__()
+
+        waiting = threading.Thread(target=wait)
         waiting.start()
         time.sleep(0.2)
         start = time.monotonic()
@@ -2032,7 +2035,7 @@ class TestCheckedCooler:
 
         monkeypatch.setattr(collect_module, "write_cooler", changed_midway)
         out = tmp_path / "collected.metacool"
-        with pytest.raises(MapChangedError, match="ecoli.cool"):
+        with pytest.raises(MapChangedError, match=r"ecoli.cool"):
             metacooler.collect([ecoli, bsub], out, keep_partial=False)
         assert not out.exists()
 
@@ -2222,7 +2225,7 @@ class TestCorners:
 class TestKeptReads:
     """What a MetaCooler read once and kept is refused once its file changes."""
 
-    ACCESSORS = {
+    ACCESSORS: ClassVar = {
         "bins()": lambda mc: mc.bins(),
         "contigs": lambda mc: mc.contigs,
         "genomes": lambda mc: mc.genomes,
@@ -2416,7 +2419,7 @@ class TestThirdReviewCorners:
         mc._contigs_table = pd.DataFrame({"name": ["set"]})
         assert list(mc.contigs["name"]) == ["set"]
         del mc._contigs_table
-        assert list(mc.contigs["name"])[0] != "set"
+        assert next(iter(mc.contigs["name"])) != "set"
 
     def test_a_weight_column_written_aside_first(
         self, tiny_metacooler: Path, monkeypatch: pytest.MonkeyPatch

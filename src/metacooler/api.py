@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-class _cached(Generic[T]):  # noqa: N801 - a decorator, as cached_property is
+class _cached(Generic[T]):  # lowercase: a decorator, as cached_property is
     """What a :class:`MetaCooler` reads once and keeps, checked on every read.
 
     Like :func:`functools.cached_property`, the value is computed on its first

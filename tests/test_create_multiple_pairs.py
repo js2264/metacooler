@@ -361,7 +361,7 @@ class TestPairsPaths:
             _pairs_paths([p, p])
         link = tmp_path / "link.pairs"
         link.symlink_to(p)
-        with pytest.raises(ValueError, match="'.*link.pairs' is given twice"):
+        with pytest.raises(ValueError, match=r"'.*link.pairs' is given twice"):
             _pairs_paths([p, link])
 
     def test_from_pairs_refuses_the_same_file_twice(
@@ -382,7 +382,7 @@ class TestPairsPaths:
         monkeypatch.setattr(create_mod, "_stream_pairs", never)
         monkeypatch.setattr(create_mod, "_parse_pairs_header", never)
         missing = tmp_path / "lib_c.pairs.gz"
-        with pytest.raises(FileNotFoundError, match="lib_c.pairs.gz"):
+        with pytest.raises(FileNotFoundError, match=r"lib_c.pairs.gz"):
             _create(tmp_path / "x.metacool", [*files, missing], tiny_contigs_table)
 
 

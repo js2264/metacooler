@@ -718,8 +718,12 @@ with metacooler.staged_edit("sample.metacool") as staged:
       metacooler.annotate(staged, contigs_table="depth.tsv", inplace=True)
       mc = metacooler.MetaCooler(staged)  # after both
       metacooler.store_weights(
-          staged, "hit", weights_from(mc), method="tool",
-          depends_on=["pixels", "contigs/depth"], source=mc,
+          staged,
+          "hit",
+          weights_from(mc),
+          method="tool",
+          depends_on=["pixels", "contigs/depth"],
+          source=mc,
       )
   ```
 - A `MetaCooler` of the staged map, opened before a write of the session,
@@ -1128,9 +1132,9 @@ the contacts of two contigs by the geometric mean of their Hi-C hits, so it is
 import metacooler
 
 metacooler.store_weights(
-    "gut_T0.metacool",          # or reps.mmetacool::entries/rep1
-    "empirical_hit",            # the /bins column
-    weights,                    # one per bin, NaN for a masked bin
+    "gut_T0.metacool",  # or reps.mmetacool::entries/rep1
+    "empirical_hit",  # the /bins column
+    weights,  # one per bin, NaN for a masked bin
     method="metator",
     depends_on=["pixels"],
     parameters={"mode": "empirical_hit"},
@@ -1735,8 +1739,10 @@ built for every edge, nor read back to an id.
 import metacooler
 
 edges = metacooler.network("gut_T0.metacool", level="contig")
-hits = edges.groupby("node1")["value"].sum().add(
-    edges.groupby("node2")["value"].sum(), fill_value=0
+hits = (
+    edges.groupby("node1")["value"]
+    .sum()
+    .add(edges.groupby("node2")["value"].sum(), fill_value=0)
 )  # each contig's contacts, a contact with itself counted twice
 
 by_id = metacooler.network("gut_T0.metacool", level="contig", ids=True)

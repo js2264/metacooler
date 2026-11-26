@@ -14,6 +14,7 @@ import os
 import shutil
 import signal
 from pathlib import Path
+from typing import ClassVar
 
 import cooler
 import h5py
@@ -99,7 +100,7 @@ def _full_validations(monkeypatch: pytest.MonkeyPatch) -> list:
 # ---------------------------------------------------------------------------
 class TestOneCopy:
     #: Writers that edit a map without re-grouping its contigs.
-    EDITS = [
+    EDITS: ClassVar = [
         "annotate",
         "store_weights",
         "write_clusters",
@@ -654,7 +655,7 @@ class TestTheStagedMapsLock:
                 try:
                     _store(staged, "child")
                     said = "written"
-                except BaseException as error:  # noqa: BLE001 - reported
+                except BaseException as error:  # reported
                     said = f"{type(error).__name__}: {error}"
                 os.write(writable, said.encode()[:4000])
                 os._exit(0)

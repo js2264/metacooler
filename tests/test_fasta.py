@@ -414,7 +414,7 @@ def test_clusters_by_name_and_by_filter(clustered, tmp_path, caplog):
 
 def test_a_round_refuses_what_it_does_not_read(clustered, tmp_path):
     path, assembly = clustered
-    with pytest.raises(FilterError, match="filter them with 'clusters.<column>'"):
+    with pytest.raises(FilterError, match=r"filter them with 'clusters.<column>'"):
         write_fasta(
             path,
             assembly,
@@ -485,7 +485,7 @@ def test_unbinned_alone_cannot_hide_an_empty_selection(mapped, tmp_path):
     """Names or genome filters that keep no genome are refused, --unbinned or
     not: writing __unbinned__.fa alone would pass for a selection."""
     path, assembly = mapped
-    with pytest.raises(FilterError, match="genomes.length > 1Gb  ->  0 of"):
+    with pytest.raises(FilterError, match=r"genomes.length > 1Gb  ->  0 of"):
         write_fasta(
             path,
             assembly,
@@ -517,7 +517,7 @@ def test_unbinned_alone_cannot_hide_an_empty_round(clustered, tmp_path):
             filters=["contigs.length >= 2500"],
             unbinned=True,
         )
-    with pytest.raises(FilterError, match="clusters.completeness > 99"):
+    with pytest.raises(FilterError, match=r"clusters.completeness > 99"):
         write_fasta(
             path,
             assembly,
@@ -743,7 +743,7 @@ def test_a_copy_that_cannot_be_written_names_where(mapped, tmp_path, monkeypatch
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr(fasta_module.shutil, "copyfileobj", full)
-    with pytest.raises(OSError, match="its plain copy .*No space left") as error:
+    with pytest.raises(OSError, match=r"its plain copy .*No space left") as error:
         write_fasta(path, packed, tmp_path / "out", temp_dir=tmp_path / "scratch")
     assert error.value.errno == errno.ENOSPC
     assert str(tmp_path / "scratch") in str(error.value)
@@ -799,7 +799,7 @@ def test_a_broken_gzip_assembly(mapped, tmp_path):
 def test_every_missing_contig_is_named_or_counted(mapped, tmp_path):
     path, _ = mapped
     assembly = _write_assembly(tmp_path / "x.fa", RAW["xx"])
-    with pytest.raises(ValueError, match="5 contig.* not in .*: c1, c2, c3, c4, c5\\."):
+    with pytest.raises(ValueError, match=r"5 contig.* not in .*: c1, c2, c3, c4, c5\."):
         write_fasta(path, assembly, tmp_path / "out", unbinned=True)
     assert fasta_module._shown(list("abcdefgh")) == "a, b, c, d, e and 3 more"
 

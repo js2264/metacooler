@@ -422,7 +422,7 @@ def test_annotate_replaces_an_older_column_by_its_shown_name(
     assert MetaCooler(plain).contigs["genome"].tolist() == ["E.coli", "B.subtilis"]
     changed = tmp_path / "changed.tsv"
     changed.write_text("contig_name\tgenome\nc1\tE.coli\nc2\tB.sub\n")
-    with pytest.raises(ValueError, match="contigs.user_genome"):
+    with pytest.raises(ValueError, match=r"contigs.user_genome"):
         annotate(plain, contigs_table=changed, inplace=True)
     annotate(plain, contigs_table=changed, inplace=True, replace=True)
     contigs = MetaCooler(plain).contigs

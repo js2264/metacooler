@@ -124,7 +124,8 @@ QC_CATEGORIES = (
 QC_COLUMN_PREFIX = "qc_"
 
 # Per-genome columns written into ``/genomes``, in order.
-QC_GENOME_COLUMNS = tuple(f"{QC_COLUMN_PREFIX}{c}" for c in QC_CATEGORIES) + (
+QC_GENOME_COLUMNS = (
+    *(f"{QC_COLUMN_PREFIX}{c}" for c in QC_CATEGORIES),
     f"{QC_COLUMN_PREFIX}intra_genome_ratio",
 )
 

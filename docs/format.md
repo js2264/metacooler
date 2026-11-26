@@ -259,6 +259,7 @@ A file is a valid `.metacool` if and only if:
 
 ```python
 import metacooler
+
 print(metacooler.is_metacooler("gut_T0.metacool"))  # True
 ```
 

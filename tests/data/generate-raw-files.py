@@ -125,7 +125,7 @@ with gzip.open(filename="contacts_1_rep1.pairs.gz", mode="wt") as f:
     f.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
     for i in range(n_pairs):
         if np.random.rand() < 0.8:
-            mag = np.random.choice(mag_names + ["__unbinned__"])
+            mag = np.random.choice([*mag_names, "__unbinned__"])
             mag_contigs = [c for c in contigs if c[2] == mag]
             if len(mag_contigs) < 2:
                 mag_contigs = contigs
@@ -146,7 +146,7 @@ with gzip.open("contacts_1_rep2.pairs.gz", "wt") as f:
     f.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
     for i in range(n_pairs):
         if np.random.rand() < 0.7:
-            mag = np.random.choice(mag_names + ["__unbinned__"])
+            mag = np.random.choice([*mag_names, "__unbinned__"])
             mag_contigs = [c for c in contigs if c[2] == mag]
             if len(mag_contigs) < 2:
                 mag_contigs = contigs
@@ -245,7 +245,7 @@ with gzip.open("contacts_2_rep1.pairs.gz", "wt") as f:
     f.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
     for i in range(n_pairs):
         if np.random.rand() < 0.8:
-            mag = np.random.choice(mag_names + ["__unbinned__"])
+            mag = np.random.choice([*mag_names, "__unbinned__"])
             mag_contigs = [c for c in contigs if c[2] == mag]
             if len(mag_contigs) < 2:
                 mag_contigs = contigs
@@ -266,7 +266,7 @@ with gzip.open("contacts_2_rep2.pairs.gz", "wt") as f:
     f.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
     for i in range(n_pairs):
         if np.random.rand() < 0.7:
-            mag = np.random.choice(mag_names + ["__unbinned__"])
+            mag = np.random.choice([*mag_names, "__unbinned__"])
             mag_contigs = [c for c in contigs if c[2] == mag]
             if len(mag_contigs) < 2:
                 mag_contigs = contigs

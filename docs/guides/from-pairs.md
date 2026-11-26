@@ -349,16 +349,16 @@ import metacooler
 
 metacooler.from_pairs(
     uri="sample.metacool",
-    pairs="contacts.pairs.gz",      # or a list: one pairs file per library
-    bins="fragments.bed",           # or an integer: binsize=1000
+    pairs="contacts.pairs.gz",  # or a list: one pairs file per library
+    bins="fragments.bed",  # or an integer: binsize=1000
     contig_genome_map="contigs.tsv",
     contig_table_format="contigs",
     genomes_table="mag_table.tsv",  # optional
-    assembly_name="gut_T0",         # optional
+    assembly_name="gut_T0",  # optional
     contig_ordering="genome-then-length",
     drop_unassigned=False,
     metadata={"sample": "gut_T0"},  # optional
-    chunksize=50_000_000,           # default; lower it to cap peak memory
+    chunksize=50_000_000,  # default; lower it to cap peak memory
 )
 ```
 

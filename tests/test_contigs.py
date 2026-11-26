@@ -67,7 +67,7 @@ class TestParseContigTable:
     def test_metator_missing_columns(self, tmp_path):
         path = tmp_path / "mag.tsv"
         path.write_text("A\tB\nc1\tMAG_1\n")
-        with pytest.raises(ValueError, match="'Name'.*Name,Final_cluster"):
+        with pytest.raises(ValueError, match=r"'Name'.*Name,Final_cluster"):
             parse_contigs_table(path, fmt="metator")
 
     def test_unknown_format(self, tmp_path):
@@ -129,7 +129,7 @@ class TestParseContigsTableColSpec:
         """'2,1' treats col 2 as contig_name and col 1 as genome_id."""
         path = tmp_path / "contigs.tsv"
         path.write_text("genome\tcontig\nMAG_1\tc1\nMAG_2\tc2\n")
-        mapping, df = parse_contigs_table(path, fmt="2,1")
+        mapping, _ = parse_contigs_table(path, fmt="2,1")
         assert mapping == {"c1": "MAG_1", "c2": "MAG_2"}
 
     def test_zero_index_raises(self, tmp_path):

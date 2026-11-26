@@ -378,7 +378,7 @@ class TestContigsSelection:
         (ax,) = _panels(rendered)
         assert ax.get_title() == "contig_C — bin level"
         assert ax.get_ylabel() == "contig_C — position (bp)"
-        assert [t.get_text() for t in ax.get_yticklabels()][0] == "0 bp"
+        assert ax.get_yticklabels()[0].get_text() == "0 bp"
 
     def test_genome_level_is_upgraded_to_contig(self, metacool, tmp_path, rendered):
         """A contig has no row of its own at genome level, so the level moves."""

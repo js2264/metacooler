@@ -591,7 +591,7 @@ def _genome_id_order(genome_names: Iterable[str]) -> list[str]:
     names = set(genome_names)
     ordered = sorted(names - {"__unbinned__"})
     if "__unbinned__" in names:
-        ordered = ["__unbinned__"] + ordered
+        ordered = ["__unbinned__", *ordered]
     return ordered
 
 
@@ -892,7 +892,7 @@ def _build_genomes_table(
         )
         extra_cols = [c for c in extra_genomes_df.columns if c != "genome_id"]
         extra = extra_genomes_df.rename(columns={"genome_id": "name"})[
-            ["name"] + extra_cols
+            ["name", *extra_cols]
         ].copy()
         # De-duplicate on the merge key so a repeated genome name cannot explode
         # the genomes table into duplicate rows (last row wins).
@@ -974,7 +974,7 @@ def _build_contigs_table(
         ]
         if extra_cols:
             rename_map = {"contig_name": "name"}
-            extra = contig_df.rename(columns=rename_map)[["name"] + extra_cols].copy()
+            extra = contig_df.rename(columns=rename_map)[["name", *extra_cols]].copy()
             # De-duplicate on the merge key so a repeated contig name cannot
             # explode the contigs table into phantom rows (which would also
             # desync attrs['nchroms'] from len(/contigs)).  Last row wins,

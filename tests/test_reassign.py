@@ -612,7 +612,7 @@ def test_a_dict_mapping_is_accepted(tmp_path: Path, tiny_metacooler: Path):
 
 def test_non_ascii_genome_names_are_refused(tmp_path: Path, tiny_metacooler: Path):
     table = _table(tmp_path / "t.tsv", {"contig_C": "MAG_é"})
-    with pytest.raises(Exception, match="not ASCII|cooler could not open|ASCII"):
+    with pytest.raises(Exception, match=r"not ASCII|cooler could not open|ASCII"):
         reassign(tiny_metacooler, table, tmp_path / "out.metacool")
     assert not (tmp_path / "out.metacool").exists()
 
@@ -1150,8 +1150,15 @@ def test_cli_refuses_an_output_that_is_the_contigs_table(
     before = table.read_text()
     result = runner.invoke(
         cli,
-        ["reassign", str(tiny_metacooler), "--contigs", str(table), "-o", str(table)]
-        + ["--force"],
+        [
+            "reassign",
+            str(tiny_metacooler),
+            "--contigs",
+            str(table),
+            "-o",
+            str(table),
+            "--force",
+        ],
     )
 
     assert result.exit_code != 0

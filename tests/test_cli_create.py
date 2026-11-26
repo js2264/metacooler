@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import h5py
 import pandas as pd
@@ -697,8 +697,22 @@ class TestCreatePairsOneBinPerContig:
         reference = tmp_path / "contigs.cool"
         # cooler's own CLI: a third-party tool, so a subprocess.
         cload = subprocess.run(
-            [_COOLER, "cload", "pairs", "-c1", "2", "-p1", "3", "-c2", "4", "-p2", "5"]
-            + [str(bed), str(pairs), str(reference)],
+            [
+                _COOLER,
+                "cload",
+                "pairs",
+                "-c1",
+                "2",
+                "-p1",
+                "3",
+                "-c2",
+                "4",
+                "-p2",
+                "5",
+                str(bed),
+                str(pairs),
+                str(reference),
+            ],
             capture_output=True,
             text=True,
         )
@@ -707,8 +721,19 @@ class TestCreatePairsOneBinPerContig:
         out = tmp_path / "contigs.metacool"
         result = runner.invoke(
             cli,
-            ["create", "pairs", "--output", str(out), "--pairs", str(pairs)]
-            + ["--contig-order", "fasta", "--no-ps", "--nproc", nproc],
+            [
+                "create",
+                "pairs",
+                "--output",
+                str(out),
+                "--pairs",
+                str(pairs),
+                "--contig-order",
+                "fasta",
+                "--no-ps",
+                "--nproc",
+                nproc,
+            ],
         )
         assert result.exit_code == 0, result.output
 
@@ -731,9 +756,19 @@ class TestCreatePairsOneBinPerContig:
         out = tmp_path / "out.metacool"
         result = runner.invoke(
             cli,
-            ["create", "pairs", "--output", str(out), "--pairs", str(tiny_pairs)]
-            + ["--fasta", str(tiny_fasta), "--contigs", str(tiny_contigs_table)]
-            + ["--no-ps"],
+            [
+                "create",
+                "pairs",
+                "--output",
+                str(out),
+                "--pairs",
+                str(tiny_pairs),
+                "--fasta",
+                str(tiny_fasta),
+                "--contigs",
+                str(tiny_contigs_table),
+                "--no-ps",
+            ],
         )
         assert result.exit_code == 0, result.output
         mc = MetaCooler(str(out))
@@ -1032,7 +1067,7 @@ class TestCreatePairsPixelCorrectness:
     # (label, --bins value, reference cooler) — fixed-width and variable-width.
     # The variable-width case is the one that exercises a caller-supplied bin
     # table rather than metacooler's own tiling.
-    BIN_SPECS = [
+    BIN_SPECS: ClassVar = [
         ("fixed-1kb", "1000", "assembly_1_rep1_1kb.cool"),
         (
             "variable-dpnii",
@@ -1055,7 +1090,7 @@ class TestCreatePairsPixelCorrectness:
     # Capping ``_PAIRS_READ_BLOCK_MAX_BYTES`` to 64 KiB gives ~39 real chunks.
     # ``expect_spill`` is None where ``--sort-strategy`` is explicit, since
     # ``_buffer_pixels`` is then bypassed entirely.
-    STRATEGIES = [
+    STRATEGIES: ClassVar = [
         ("default-single-pass", None, None, "auto", None, False),
         ("many-chunks-in-memory", 1 << 16, 1000, "memory", None, None),
         ("many-chunks-external-sort", 1 << 16, 1000, "external", None, None),

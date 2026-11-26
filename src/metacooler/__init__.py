@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     )
     from metacooler.uri import parse_uri
 
-__all__ = [
+__all__ = [  # noqa: RUF022 - grouped by subject, as its comments say
     "__version__",
     "MetaCooler",
     # creation

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -433,7 +434,7 @@ def _row_blocks(
     targets = np.arange(chunksize, int(bin1_offset[-1]), chunksize, dtype=np.int64)
     picks = np.searchsorted(pixels_before, targets, side="right") - 1
     cuts = np.unique(np.concatenate(([0], starts[np.maximum(picks, 0)], [n_old])))
-    return [(int(lo), int(hi)) for lo, hi in zip(cuts[:-1], cuts[1:], strict=True)]
+    return [(int(lo), int(hi)) for lo, hi in pairwise(cuts)]
 
 
 def _coarsen_row_blocks(

@@ -81,7 +81,7 @@ class TestParse:
         assert filt.value == "^a>b=c"
 
     def test_missing_prefix_names_both_tables(self):
-        with pytest.raises(FilterError, match="genomes.length.*contigs.length"):
+        with pytest.raises(FilterError, match=r"genomes.length.*contigs.length"):
             parse_filter("length > 1Mb")
 
     def test_unknown_table(self):
