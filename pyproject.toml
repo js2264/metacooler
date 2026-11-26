@@ -115,8 +115,10 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "src/metacooler/_version.py"
 [tool.ruff]
 line-length = 88
 target-version = "py310"
-# chromokit's report kit, linted and formatted in chromokit.
-extend-exclude = ["src/metacooler/_report"]
+# chromokit's report kit, linted and formatted in chromokit; and README.md,
+# metacooler's own: quarto renders it from README.qmd, and ruff formats
+# Markdown since 0.17.
+extend-exclude = ["src/metacooler/_report", "README.md"]
 
 [tool.ruff.lint]
 # An explicit list, so that upgrading ruff never changes the rules.
