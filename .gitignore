@@ -1,89 +1,61 @@
-# Byte-compiled / optimized / DLL files
+# CONVENTIONS.md § 17: the standard Python list, then the repository's own
+# outputs. Never uv.lock or .python-version, which are committed.
+
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+.eggs/
+build/
+dist/
+.venv/
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
+# Tests and coverage
+.pytest_cache/
 .coverage
 .coverage.*
-.cache
-nosetests.xml
 coverage.xml
-*.cover
-.hypothesis/
-.pytest_cache/
+htmlcov/
+.ruff_cache/
+.mypy_cache/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# The documentation site, as zensical builds it
+/site/
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDEs
+# Editors and systems
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-
-# Hatch / build
-.hatch/
-
-# macOS
 .DS_Store
 
-###############################################################
+# Instructions for coding agents are AGENTS.md, and nothing else
+# (CONVENTIONS.md § 21): a personal CLAUDE.md holding `@AGENTS.md` stays out.
+CLAUDE.md
+CLAUDE.local.md
 
-REVIEW.md
-NOTES.md
-TESTS.md
-TODO.md
+# The repository's own outputs
+# Files a run of metacooler or of its tests leaves, and notes kept out of git.
 *.metacool
 *.mmetacool
 *.cool
 *.mcool
 !tests/data/*cool
 *.pairs.gz
+# The test data is tracked, and the sdist ships it (CONVENTIONS.md § 2).
+!tests/data/*.pairs.gz
 outs/
-reviewed/
-site/
 real-data/
 *.png
+REVIEW.md
+NOTES.md
+TESTS.md
+TODO.md
+reviewed/
+# Environments and editors' files besides those above.
+env/
+venv/
+.env
+.ipynb_checkpoints
+*.swp
+*.swo
+*~

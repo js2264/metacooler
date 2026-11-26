@@ -1,0 +1,22 @@
+# GitHub shows this file as "Cite this repository", and Zenodo reads it for
+# each release (CONVENTIONS.md § 17). bump-my-version updates version and
+# date-released.
+cff-version: 1.2.0
+message: "If you use metacooler, please cite it as below."
+type: software
+title: "metacooler"
+abstract: "Hi-C contact maps for metagenomes — an extension of the cooler format."
+version: "0.4.0"
+date-released: "2026-11-23"
+license: "MIT"
+repository-code: "https://github.com/js2264/metacooler"
+url: "https://js2264.github.io/metacooler/"
+keywords:
+  - "hi-c"
+  - "metagenomics"
+  - "cooler"
+  - "contact-maps"
+  - "hdf5"
+authors:
+  - family-names: "Serizay"
+    given-names: "Jacques"
