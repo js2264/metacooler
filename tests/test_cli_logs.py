@@ -80,9 +80,11 @@ class TestTheLogOfACommand:
             rf":: INFO :: Cool file written after 0h 0m \d+s: {re.escape(str(out))}$",
             records[-1],
         )
-        # Nothing of the log on stderr: it shows what it always showed.
-        assert "## metacooler" not in result.stderr
-        assert "Cool file written after" not in result.stderr
+        # Nothing of the log's own lines on stderr, which shows what it always
+        # showed. result.output holds stderr with stdout: click 8.1's runner
+        # (the floor) mixes the two, and keeps no stderr of its own.
+        assert "## metacooler" not in result.output
+        assert "Cool file written after" not in result.output
 
     def test_a_command_that_only_reads_writes_no_log(self, a_map: Path):
         for args in (["info", str(a_map)], ["dump", "-t", "genomes", str(a_map)]):
@@ -102,7 +104,7 @@ class TestTheLogOfACommand:
         out = tmp_path / "flat.cool"
         result = CliRunner().invoke(cli, ["flatten", str(a_map), "-o", str(out), "-q"])
         assert result.exit_code == 0, result.output
-        assert "[INFO]" not in result.stderr
+        assert "[INFO]" not in result.output
         lines = one_log(tmp_path, "flat")
         assert "## quiet: True" in lines
         assert any(" :: INFO :: Flattening " in line for line in lines)
