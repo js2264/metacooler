@@ -600,6 +600,84 @@ staged copy beside it:
   reclaims what an edit replaces): a map holds at most what its last edit, or
   session, replaced, and does not grow from one edit to the next.
 
+## The report of a map { #the-report-of-a-map }
+
+[`metacooler report`](cli.md#report) writes the report of one map, named after
+its sample (the map's name without `.metacool`, or the entry's name for an
+entry of a collection), in its output directory:
+
+- `<sample>.report.txt`: every number of the report, for scripts;
+- `<sample>.report_mqc.yaml`: the map's row of MultiQC's General Statistics
+  table;
+- `<sample>.report.html`: a page to read the map with, whose plots plotly.js
+  draws, loaded from its CDN: offline, it keeps its numbers and tables.
+
+They are written by [chromokit](https://github.com/js2264/chromokit)'s report
+kit, as every tool of the project writes its own, metaTOR's included.
+
+### `<sample>.report.txt` { #reporttxt }
+
+A header of comments, then sections, `[name]`, each a key and its value per
+line, then tables, `[table: name]`, each a header and a row per line, their
+fields aligned on spaces. `NA` is a missing value. An integer is written as
+one, a `_pct` with 2 decimals, a `_ratio` with 4; lengths are in `_bp`; a text
+holds on one line, and a table's field writes its spaces as `_`.
+`metacooler.read_report` reads it back, its values as text.
+
+Its `format_version`, now 1, is raised when a key, a column, a unit or a
+MultiQC column changes or goes; one that comes does not raise it.
+
+| Section | Key | Unit, or what it is | MultiQC column |
+|---|---|---|---|
+| `report` | `format_version` | the format of this file and of `report_mqc.yaml` | |
+| | `sample` | the sample's name | the row's name |
+| | `map` | the map's path, or its entry's URI | |
+| | `metacooler_version` | the version that wrote the report | |
+| | `written` | when, in local time (`YYYY-MM-DDTHH:MM:SS`) | |
+| `run` | `generated_by` | what wrote the map (`metacooler-0.4.0`) | |
+| | `created` | when it was written | |
+| | `assembly` | its assembly's name (`unknown` if none was given) | |
+| | `bin_type` | `fixed` or `variable` | |
+| | `bin_size_bp` | bp; `NA` for bins of variable sizes | |
+| | `contig_ordering` | the order of its contigs (`genome-then-length`, …) | |
+| | `storage_mode` | cooler's, `symmetric-upper` | |
+| `commands` | `command_1`, `command_2`, … | the command lines that wrote the map, in order (its `metadata.commands`) | |
+| `genomes` | `genomes` | genomes, `__unbinned__` aside | **Genomes** |
+| | `genomes_bp` | bp: their length | |
+| | `unbinned_contigs` | contigs that no genome has | |
+| | `unbinned_bp` | bp: their length | |
+| | `binned_pct` | % of the contigs' length in a genome | |
+| `contigs` | `contigs` | contigs | **Contigs** |
+| | `contigs_bp` | bp: their length | |
+| | `contig_n50_bp` | bp: N50 | |
+| | `contig_l50` | contigs: L50 | |
+| | `longest_contig_bp` | bp | |
+| `bins` | `bins` | bins | |
+| `contacts` | `contacts` | contacts: the sum of the pixels' counts | **Contacts** |
+| | `pixels` | pixels | |
+| `qc` | `stored` | `true` for the [QC block](#qc-block) the map stores; `false` for one computed from its pixels | |
+| | `source` | `pairs` or `pixels`: where its distances were measured | |
+| | `distance_threshold_bp` | bp: from it on, a contact within a contig is long-range | |
+| | `classified_contacts` | contacts it counts | |
+| | `intra_contig_short`, `intra_contig_long`, `inter_contig_intra_genome`, `inter_genome` | contacts in each of [the four categories](#qc-block) | |
+| | `trans_contig_ratio` | the share of the contacts between two contigs, the "3D ratio" | |
+| | `intra_genome_pct` | % of the contacts within a genome | |
+| | `inter_genome_pct` | % of the contacts between two genomes | **Inter-genome** |
+
+| Table | Columns |
+|---|---|
+| `genomes` | one row per genome of `/genomes`, `__unbinned__` included: `name`; `length_bp`; `contigs`; `bins`; its contacts in each of the four categories (`intra_contig_short`, `intra_contig_long`, `inter_contig_intra_genome`, `inter_genome`), each unbinned contig counting as a genome of its own; and `intra_genome_ratio`, the share of its contacts that stay within it |
+| `ps` | the contact probability by distance, the map's contigs pooled, between bins: `distance_bp`, the geometric middle of a distance bin; `contacts` in it; `bin_pairs` that could hold them; `probability` |
+
+### `<sample>.report_mqc.yaml` { #report_mqcyaml }
+
+[MultiQC](https://multiqc.info)'s custom content (`id: metacooler`,
+`plot_type: generalstats`): the map's row of its General Statistics table,
+with the four columns above. Every map's file carries the same `id`, so
+`multiqc DIR` merges the maps whose reports it finds into one table, and a
+sample that hicstuff and metaTOR report under the same name gets their columns
+on the same row.
+
 ## Logs { #logs }
 
 Every command that writes a map or a file writes its log beside it:

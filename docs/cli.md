@@ -2120,6 +2120,38 @@ metacooler qc gut_T0.metacool --per-genome mag_qc.tsv
 metacooler metadata get gut_T0.metacool -k qc
 ```
 
+### `report` { #report }
+
+Write the report of a map: every number of it in `<sample>.report.txt`, its
+row of [MultiQC](https://multiqc.info)'s General Statistics table in
+`<sample>.report_mqc.yaml`, and a page to read it with in
+`<sample>.report.html`. `<sample>` is the map's name without `.metacool`, or
+the entry's name for an entry of a collection, as metaTOR names a map's
+sample. The map is read, never written. **API:** `metacooler.write_report`,
+and `metacooler.read_report` reads a `report.txt` back.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o, --outdir` | `.` | The report's directory, made if missing. The command's log goes there too. |
+| `-f, --force` | off | Replace the report of the same sample in the directory. Without it, an earlier report is refused before the map is read. |
+
+The report holds what the map holds (its genomes, contigs, bins and contacts),
+how it was made (what wrote it, its bins, the command lines in its metadata),
+where its contacts land, each genome, and the map's P(s). Where the contacts
+land is the [QC block](format.md#qc-block) the map stores (`create pairs`, or
+[`qc --store`](#qc)), or one computed from its pixels when it stores none of
+this version. Every key, its unit and its MultiQC column:
+[The report of a map](format.md#the-report-of-a-map).
+
+```bash
+metacooler report gut_T0.metacool -o reports               # reports/gut_T0.report.*
+metacooler report reps.mmetacool::entries/rep1 -o reports  # reports/rep1.report.*
+multiqc reports                                            # one row per map
+```
+
+The page draws its plots with plotly.js, which it loads from its CDN:
+offline, it keeps its numbers and its tables.
+
 ### `tree` { #tree }
 
 Print the HDF5 group/dataset hierarchy of a `.metacool` or `.mmetacool` file.

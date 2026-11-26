@@ -88,6 +88,9 @@ class TestInit:
             "contact_qc",
             "contact_probability",
             "plot_ps",
+            # the report of a map
+            "write_report",
+            "read_report",
             # format
             "is_metacooler",
             "is_mmetacooler",

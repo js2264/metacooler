@@ -17,6 +17,16 @@ may break the interface, a patch release never does.
   `binsize required when bins is None` once it had built the tables. With
   `--contigs` left out too, `metacooler create pairs --pairs P -o OUT` makes
   the map a MetaTOR run starts from.
+- **`metacooler report` writes the report of a map**, in an output directory
+  (`-o`): `<sample>.report.txt`, every number of it, for scripts;
+  `<sample>.report_mqc.yaml`, its row of MultiQC's General Statistics table
+  (genomes, contigs, contacts, the inter-genome share); and
+  `<sample>.report.html`, a page with its genomes, contigs and contacts, where
+  its contacts land (the QC block it stores, or one computed from its pixels),
+  each genome, and its P(s). `<sample>` is the map's name, or its entry's.
+  From Python, `metacooler.write_report`, and `metacooler.read_report` reads a
+  `report.txt` back. jinja2 (3.1 or newer) is a new dependency, for the page.
+  ([#PR](https://github.com/js2264/metacooler/pull/PR))
 - **Every command that writes a map or a file writes its log beside it**,
   `<sample>.metacooler_<YYYYMMDDHHMMSS>.log`, `<sample>` being the output's
   name (an entry's, for an entry edited in place): hicstuff's header (the

@@ -127,6 +127,26 @@ jobs:
         working-directory: tests/data
         run: uv run --locked bash ./cli_tests.sh
 
+      # metacooler's own: two maps' reports through MultiQC, which must merge
+      # them into one General Statistics table (CONVENTIONS.md § 12).
+      - name: The report, through MultiQC
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        run: |
+          reports="$RUNNER_TEMP/reports"
+          samples=(assembly_1_rep1_1kb assembly_2_rep1_1kb)
+          for sample in "${samples[@]}"; do
+            uv run --locked metacooler report "tests/data/$sample.metacool" -o "$reports" -q
+          done
+          uvx --from multiqc==1.35 multiqc "$reports" --outdir "$RUNNER_TEMP/multiqc" --no-ansi --quiet
+          stats="$RUNNER_TEMP/multiqc/multiqc_data/multiqc_general_stats.txt"
+          cat "$stats"
+          head -1 "$stats" | tr '\t' '\n' | grep -qx 'custom_content_metacooler-inter_genome_pct' ||
+            { echo "::error::MultiQC's General Statistics have no metacooler column"; exit 1; }
+          for sample in "${samples[@]}"; do
+            awk -F '\t' -v sample="$sample" '$1 == sample { found = 1 } END { exit !found }' "$stats" ||
+              { echo "::error::MultiQC has no row for $sample"; exit 1; }
+          done
+
       # One leg only: the newest Python, on Linux.
       - name: Coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
@@ -237,3 +257,6 @@ jobs:
           cli() { env -i HOME="$HOME" PATH=/nonexistent "$RUNNER_TEMP/venv/bin/$1" "${@:2}"; }
           cli metacooler info tests/data/assembly_1_1kb.metacool
           cli metacooler check tests/data/assembly_1_1kb.metacool
+          cli metacooler report tests/data/assembly_1_1kb.metacool -o "$RUNNER_TEMP/report"
+          ls "$RUNNER_TEMP"/report/assembly_1_1kb.report.html "$RUNNER_TEMP"/report/assembly_1_1kb.metacooler_*.log
+

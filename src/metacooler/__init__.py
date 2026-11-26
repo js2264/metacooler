@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     )
     from metacooler.io.network import network
     from metacooler.io.reassign import reassign
+    from metacooler.io.report import read_report, write_report
     from metacooler.io.staging import (
         MapChangedError,
         MapLockedError,
@@ -112,6 +113,9 @@ __all__ = [  # noqa: RUF022 - grouped by subject, as its comments say
     "contact_qc",
     "contact_probability",
     "plot_ps",
+    # the report of a map
+    "write_report",
+    "read_report",
     # format
     "is_metacooler",
     "is_mmetacooler",
@@ -185,6 +189,14 @@ def __getattr__(name: str) -> object:
         from metacooler.io.extract import extract as _extract
 
         return _extract
+    if name == "write_report":
+        from metacooler.io.report import write_report as _write_report
+
+        return _write_report
+    if name == "read_report":
+        from metacooler.io.report import read_report as _read_report
+
+        return _read_report
     if name == "write_fasta":
         from metacooler.io.fasta import write_fasta as _write_fasta
 

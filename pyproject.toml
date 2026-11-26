@@ -49,6 +49,9 @@ dependencies = [
     "click>=8.1",
     "pyyaml>=6.0",
     "pyarrow>=13",
+    # The page of a report (metacooler report), from chromokit's report kit:
+    # 3.1 as metaTOR and the kit ask.
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
