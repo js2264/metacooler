@@ -36,6 +36,21 @@ may break the interface, a patch release never does.
   command that only reads logs to stderr only, as before; stderr shows what it
   showed. ([#PR](https://github.com/js2264/metacooler/pull/PR))
 
+### Changed
+
+- **The sdist ships the pairs files of the tests' data**,
+  `tests/data/contacts_*.pairs.gz`, which `.gitignore` kept out although the
+  tests read them, and leaves out `benchmarks/`, a tool of the repository.
+  ([#PR](https://github.com/js2264/metacooler/pull/PR))
+
+### Removed
+
+- **The `docs` extra.** The documentation's tools are the `docs` dependency
+  group, which PyPI does not publish: `uv run --only-group docs zensical
+  serve` in a clone, or `pip install --group docs` with pip 25.1 or newer.
+  `pip install "metacooler[docs]"` now warns that the extra does not exist,
+  and installs metacooler. ([#PR](https://github.com/js2264/metacooler/pull/PR))
+
 ### Performance
 
 - **One bin per contig is binned without a binary search.** When every contig
