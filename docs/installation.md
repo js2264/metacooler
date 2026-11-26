@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- Python ≥ 3.10
-- A C compiler (required by `h5py`) — present by default on Linux and macOS
+- Python ≥ 3.10, on Linux or macOS
+- Nothing to compile: every dependency publishes wheels for both
 
 ## From PyPI
 
@@ -32,18 +32,19 @@ a [dependency group](https://packaging.python.org/en/latest/specifications/depen
 which `uv sync` installs by default. With pip ≥ 25.1, the equivalent is
 `pip install -e . --group dev`.
 
-## Optional dependencies
-
-### Documentation
+## Building the documentation
 
 The documentation site is built with [Zensical](https://zensical.org) and
-[mkdocstrings](https://mkdocstrings.github.io). To build and preview it locally:
+[mkdocstrings](https://mkdocstrings.github.io), which the `docs` dependency
+group installs on its own: mkdocstrings reads metacooler's sources without
+importing them, so neither metacooler nor its dependencies are needed.
 
 ```bash
-pip install "metacooler[docs]"   # or: uv sync --extra docs
-zensical serve                   # live preview at http://localhost:8000
-zensical build                   # render the static site into ./site
+uv run --only-group docs zensical serve   # live preview at http://localhost:8000
+uv run --only-group docs zensical build   # render the static site into ./site
 ```
+
+With pip ≥ 25.1, `pip install --group docs` in the clone installs the same.
 
 ## Verifying the install
 
