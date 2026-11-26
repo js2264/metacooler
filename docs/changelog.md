@@ -1,5 +1,10 @@
 # Changelog
 
+Every change a user can notice, by version, in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/)'s format. Versions
+follow [semantic versioning](https://semver.org): before 1.0, a minor release
+may break the interface, a patch release never does.
+
 ## Unreleased
 
 ### Added
@@ -22,7 +27,7 @@
   step (10 M positions over 2 M contigs: 0.86 s to 0.06 s), the output
   unchanged.
 
-## 0.4.0 - 2026-11-23
+## [0.4.0] - 2026-11-23
 
 ### Added
 
@@ -377,7 +382,7 @@
   refused before anything is written, with or without pixels: cooler refused
   them only with pixels.
 
-## 0.3.0 - 2026-11-18
+## [0.3.0] - 2026-11-18
 
 ### Added
 
@@ -574,7 +579,7 @@
   in the format specification; `network` and `aggregate` `--chunksize`
   defaults read 50 000 000, as they are.
 
-## 0.2.0 - 2026-11-16
+## [0.2.0] - 2026-11-16
 
 ### Breaking
 
@@ -1190,9 +1195,7 @@
   run on XL, where it has never finished within the time limit
   (`BENCH_SKIP_COOLER_CREATE`).
 
----
-
-## 0.1.0
+## [0.1.0]
 
 Initial alpha release.
 
